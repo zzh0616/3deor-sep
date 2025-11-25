@@ -26,6 +26,7 @@ from losses import (
     foreground_smoothness_loss,
     loss_function,
 )
+from utils import ensure_tensor_on, prepare_broadcastable_prior
 
 
 Tensor = torch.Tensor
@@ -52,7 +53,7 @@ def _prepare_broadcastable_prior(
 ) -> Optional[Tensor]:
     if value is None:
         return None
-    tensor = _ensure_tensor_on(value, reference.device, reference.dtype)
+    tensor = ensure_tensor_on(value, reference.device, reference.dtype)
     if tensor.ndim == 0:
         return tensor
     try:
@@ -344,37 +345,43 @@ def optimize_components(
         raise ValueError("loss_mode must be 'base', 'rfft', 'poly', or 'poly_reparam'.")
     y_tensor, _, _ = _prepare_observation(y, device=device, dtype=dtype)
 
-    data_error_tensor = _prepare_broadcastable_prior(data_error, y_tensor, "data_error")
+    data_error_tensor = prepare_broadcastable_prior(data_error, y_tensor, "data_error")
     if data_error_tensor is None:
         data_error_tensor = torch.as_tensor(0.05, device=y_tensor.device, dtype=y_tensor.dtype)
 
-    eor_mean_tensor = _prepare_broadcastable_prior(eor_prior_mean, y_tensor, "eor_prior_mean")
+    eor_mean_tensor = prepare_broadcastable_prior(eor_prior_mean, y_tensor, "eor_prior_mean")
     if eor_mean_tensor is None:
         eor_mean_tensor = torch.zeros(1, device=y_tensor.device, dtype=y_tensor.dtype)
 
-    eor_sigma_tensor = _prepare_broadcastable_prior(eor_prior_sigma, y_tensor, "eor_prior_sigma")
+    eor_sigma_tensor = prepare_broadcastable_prior(eor_prior_sigma, y_tensor, "eor_prior_sigma")
     if eor_sigma_tensor is None:
         eor_sigma_tensor = torch.full((1,), 0.1, device=y_tensor.device, dtype=y_tensor.dtype)
 
-    fg_mean_tensor = _ensure_tensor_on(fg_smooth_mean, y_tensor.device, y_tensor.dtype)
+    fg_mean_tensor = ensure_tensor_on(fg_smooth_mean, y_tensor.device, y_tensor.dtype)
     if fg_mean_tensor is None:
         fg_mean_tensor = torch.zeros(1, device=y_tensor.device, dtype=y_tensor.dtype)
 
-    fg_sigma_tensor = _ensure_tensor_on(fg_smooth_sigma, y_tensor.device, y_tensor.dtype)
+    fg_sigma_tensor = ensure_tensor_on(fg_smooth_sigma, y_tensor.device, y_tensor.dtype)
     if fg_sigma_tensor is None:
         fg_sigma_tensor = torch.ones(1, device=y_tensor.device, dtype=y_tensor.dtype)
 
-    corr_mean_tensor = _ensure_tensor_on(corr_prior_mean, y_tensor.device, y_tensor.dtype)
+    corr_mean_tensor = ensure_tensor_on(corr_prior_mean, y_tensor.device, y_tensor.dtype)
     if corr_mean_tensor is None:
         corr_mean_tensor = torch.zeros(1, device=y_tensor.device, dtype=y_tensor.dtype)
 
-    corr_sigma_tensor = _ensure_tensor_on(corr_prior_sigma, y_tensor.device, y_tensor.dtype)
+    corr_sigma_tensor = ensure_tensor_on(corr_prior_sigma, y_tensor.device, y_tensor.dtype)
     if corr_sigma_tensor is None:
         corr_sigma_tensor = torch.full((1,), 0.2, device=y_tensor.device, dtype=y_tensor.dtype)
 
-    fft_mean_tensor = _ensure_tensor_on(fft_prior_mean, y_tensor.device, y_tensor.dtype)
-    fft_sigma_tensor = _ensure_tensor_on(fft_prior_sigma, y_tensor.device, y_tensor.dtype)
-    poly_sigma_tensor = _ensure_tensor_on(poly_sigma, y_tensor.device, y_tensor.dtype)
+    fft_mean_tensor = ensure_tensor_on(fft_prior_mean, y_tensor.device, y_tensor.dtype)
+    fft_sigma_tensor = ensure_tensor_on(fft_prior_sigma, y_tensor.device, y_tensor.dtype)
+    poly_sigma_tensor = ensure_tensor_on(poly_sigma, y_tensor.device, y_tensor.dtype)
+
+    if loss_mode == "poly":
+        print(
+            "Warning: loss_mode=poly runs a full polynomial fit over the foreground; "
+            "this can be slow on large cubes and is recommended only for testing or small inputs."
+        )
 
     fg_init, eor_init = initialize_components(y_tensor, freq_axis=freq_axis)
 

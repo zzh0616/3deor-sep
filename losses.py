@@ -9,39 +9,9 @@ import math
 from typing import Dict, Optional, Tuple, Union
 
 import torch
+from utils import ensure_tensor_on, prepare_broadcastable_prior
 
 Tensor = torch.Tensor
-
-
-def _ensure_tensor_on(
-    value: Optional[Union[Tensor, float]],
-    device: torch.device,
-    dtype: torch.dtype,
-) -> Optional[Tensor]:
-    if value is None:
-        return None
-    if torch.is_tensor(value):
-        return value.to(device=device, dtype=dtype)
-    return torch.as_tensor(value, device=device, dtype=dtype)
-
-
-def _prepare_broadcastable_prior(
-    value: Optional[Union[Tensor, float]],
-    reference: Tensor,
-    name: str,
-) -> Optional[Tensor]:
-    if value is None:
-        return None
-    tensor = _ensure_tensor_on(value, reference.device, reference.dtype)
-    if tensor.ndim == 0:
-        return tensor
-    try:
-        torch.broadcast_shapes(reference.shape, tensor.shape)
-    except RuntimeError as exc:  # pragma: no cover - broadcaster
-        raise ValueError(
-            f"{name} with shape {tuple(tensor.shape)} is not broadcastable to {tuple(reference.shape)}"
-        ) from exc
-    return tensor
 
 
 def forward_model(fg: Tensor, eor: Tensor, psf: Optional[callable] = None) -> Tensor:
@@ -68,13 +38,13 @@ def foreground_smoothness_loss(
     if fg.shape[freq_axis] < 4:
         return torch.zeros((), dtype=fg.dtype, device=fg.device)
     third_diff = torch.diff(fg, n=3, dim=freq_axis)
-    mean_tensor = _prepare_broadcastable_prior(prior_mean, third_diff, "fg_smooth_mean")
-    sigma_tensor = _prepare_broadcastable_prior(prior_sigma, third_diff, "fg_smooth_sigma")
+    mean_tensor = prepare_broadcastable_prior(prior_mean, third_diff, "fg_smooth_mean")
+    sigma_tensor = prepare_broadcastable_prior(prior_sigma, third_diff, "fg_smooth_sigma")
     if mean_tensor is None:
         mean_tensor = torch.zeros(1, device=third_diff.device, dtype=third_diff.dtype)
     if sigma_tensor is None:
         sigma_tensor = torch.ones(1, device=third_diff.device, dtype=third_diff.dtype)
-    sigma_tensor = torch.clamp(sigma_tensor, min=1e-8)
+    sigma_tensor = clamp_eps(sigma_tensor, eps=EPS_LOSS)
     normalized = (third_diff - mean_tensor) / sigma_tensor
     return torch.mean(normalized**2)
 
@@ -165,10 +135,10 @@ def polynomial_prior_loss(
     fitted = (design_cast.to(dtype=fg.dtype) @ coeffs).reshape_as(fg_moved)
     residual = fg_moved - fitted
     residual = residual.movedim(0, freq_axis)
-    sigma_tensor = _prepare_broadcastable_prior(sigma, residual, "poly_sigma")
+    sigma_tensor = prepare_broadcastable_prior(sigma, residual, "poly_sigma")
     if sigma_tensor is None:
         sigma_tensor = torch.ones(1, device=fg.device, dtype=fg.dtype)
-    sigma_tensor = torch.clamp(sigma_tensor, min=1e-8)
+    sigma_tensor = clamp_eps(sigma_tensor, eps=EPS_LOSS)
     return torch.mean((residual / sigma_tensor) ** 2)
 
 
@@ -204,7 +174,7 @@ def loss_function(
     Combined loss used for optimizing foreground and EoR components.
     """
     y_pred = forward_model(fg, eor, psf=psf)
-    sigma_data = torch.clamp(data_error, min=1e-8)
+    sigma_data = clamp_eps(data_error, eps=EPS_LOSS)
     data_loss = torch.mean(((y_pred - y) / sigma_data) ** 2)
 
     smooth_loss = foreground_smoothness_loss(
@@ -212,7 +182,7 @@ def loss_function(
     )
 
     eor_mean_tensor = eor_mean
-    eor_sigma_tensor = torch.clamp(eor_sigma, min=1e-8)
+    eor_sigma_tensor = clamp_eps(eor_sigma, eps=EPS_LOSS)
     eor_reg = torch.mean(((eor - eor_mean_tensor) / eor_sigma_tensor) ** 2)
 
     corr_loss, corr_coeff = correlation_penalty(fg, eor, corr_prior_mean, corr_prior_sigma)
@@ -220,7 +190,7 @@ def loss_function(
     fft_loss = torch.zeros_like(data_loss)
     if loss_mode == "rfft":
         prior_mean = fft_prior_mean
-        prior_sigma = torch.clamp(fft_prior_sigma, min=1e-8) if fft_prior_sigma is not None else None
+        prior_sigma = clamp_eps(fft_prior_sigma, eps=EPS_LOSS) if fft_prior_sigma is not None else None
         energy_map = compute_highfreq_energy(fg, freq_axis=freq_axis, percent=fft_percent)
         if prior_mean is None:
             prior_mean = torch.zeros(1, device=energy_map.device, dtype=energy_map.dtype)
@@ -233,10 +203,10 @@ def loss_function(
     elif loss_mode == "poly_reparam":
         if poly_residual is None:
             poly_residual = torch.zeros_like(fg)
-        sigma_tensor = _prepare_broadcastable_prior(poly_sigma, poly_residual, "poly_sigma_reparam")
+        sigma_tensor = prepare_broadcastable_prior(poly_sigma, poly_residual, "poly_sigma_reparam")
         if sigma_tensor is None:
             sigma_tensor = torch.ones(1, device=fg.device, dtype=fg.dtype)
-        sigma_tensor = torch.clamp(sigma_tensor, min=1e-8)
+        sigma_tensor = clamp_eps(sigma_tensor, eps=EPS_LOSS)
         poly_loss = torch.mean((poly_residual / sigma_tensor) ** 2)
 
     total_loss = (
