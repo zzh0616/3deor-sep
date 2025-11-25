@@ -1,0 +1,16 @@
+{
+  "dx": 1.0,
+  "dy": 1.0,
+  "df": 1.0,
+  "df_unit": "mhz",
+  "ref_freq_mhz": 150.0,
+  "rest_freq_mhz": 1420.40575,
+  "H0": 70.0,
+  "Om0": 0.3,
+  "Ode0": 0.7,
+  "freq_axis": 0,
+  "nbins_1d": 30,
+  "nbins_kperp": 30,
+  "nbins_kpar": 30,
+  "output_dir": "powerspec"
+}

@@ -26,6 +26,7 @@ from losses import (
     foreground_smoothness_loss,
     loss_function,
 )
+from powerspec import PowerSpecConfig, compute_power_spectra, save_power_outputs
 from utils import ensure_tensor_on, prepare_broadcastable_prior
 
 
@@ -139,6 +140,8 @@ class OptimizationConfig:
     loss_mode: str = "base"  # "base", "rfft", or "poly_reparam"
     optimizer_name: str = "adam"
     momentum: float = 0.9
+    power_config: Optional[str] = None
+    power_output_dir: Optional[str] = None
     freq_axis: int = 0
     print_every: int = 50
     device: Optional[str] = None
@@ -759,6 +762,31 @@ def _optimize_from_fits(
         )
         evaluate_eor_estimate(eor_est, eor_true, freq_axis=config.freq_axis, output_path=plot_path)
 
+    if config.power_config:
+        power_cfg_path = Path(config.power_config)
+        if not power_cfg_path.exists():
+            print(f"Power config '{power_cfg_path}' not found; skipping power spectrum computation.")
+        else:
+            power_cfg_data = load_config_file(power_cfg_path)
+            for key in ("dx", "dy", "df"):
+                if key not in power_cfg_data:
+                    print(f"Power config missing '{key}', skipping power spectrum computation.")
+                    power_cfg_data = None
+                    break
+            if power_cfg_data is None:
+                return
+            power_cfg = PowerSpecConfig(**power_cfg_data)
+            if config.power_output_dir:
+                output_dir = Path(config.power_output_dir)
+            else:
+                output_dir = eor_output.with_name(f"{eor_output.stem}_powerspec")
+            print(f"Computing power spectra to {output_dir} ...")
+            rec_power = compute_power_spectra(eor_est.detach().cpu().numpy(), power_cfg)
+            true_power = None
+            if config.true_eor_cube:
+                true_power = compute_power_spectra(eor_true.detach().cpu().numpy(), power_cfg)
+            save_power_outputs(Path(output_dir), rec_power, true_power)
+
 
 def run_synthetic_demo(config: OptimizationConfig) -> None:
     torch.manual_seed(0)
@@ -976,6 +1004,16 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         action="store_true",
         help="Run the built-in synthetic demo instead of loading a FITS cube.",
     )
+    parser.add_argument(
+        "--power-config",
+        type=str,
+        help="Path to JSON config for power spectrum computation.",
+    )
+    parser.add_argument(
+        "--power-output-dir",
+        type=str,
+        help="Directory to write power spectrum outputs (overrides power config).",
+    )
     return parser, parser.parse_args()
 
 
@@ -1009,6 +1047,8 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "poly_weight",
         "poly_degree",
         "poly_sigma",
+        "power_config",
+        "power_output_dir",
         "true_eor_cube",
         "corr_plot",
         "init_fg_cube",
