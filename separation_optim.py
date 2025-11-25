@@ -18,6 +18,13 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
+from constants import (
+    DEFAULT_CORR_SIGMA,
+    DEFAULT_DATA_ERROR,
+    DEFAULT_EOR_SIGMA,
+    DEFAULT_FFT_SIGMA,
+    DEFAULT_POLY_SIGMA,
+)
 from losses import (
     compute_highfreq_energy,
     correlation_penalty,
@@ -33,37 +40,6 @@ from utils import ensure_tensor_on, prepare_broadcastable_prior
 Tensor = torch.Tensor
 ForwardOperator = Callable[[Tensor], Tensor]
 Device = Union[torch.device, str]
-
-
-def _ensure_tensor_on(
-    value: Optional[Union[Tensor, float]],
-    device: torch.device,
-    dtype: torch.dtype,
-) -> Optional[Tensor]:
-    if value is None:
-        return None
-    if torch.is_tensor(value):
-        return value.to(device=device, dtype=dtype)
-    return torch.as_tensor(value, device=device, dtype=dtype)
-
-
-def _prepare_broadcastable_prior(
-    value: Optional[Union[Tensor, float]],
-    reference: Tensor,
-    name: str,
-) -> Optional[Tensor]:
-    if value is None:
-        return None
-    tensor = ensure_tensor_on(value, reference.device, reference.dtype)
-    if tensor.ndim == 0:
-        return tensor
-    try:
-        torch.broadcast_shapes(reference.shape, tensor.shape)
-    except RuntimeError as exc:  # pragma: no cover - broadcaster
-        raise ValueError(
-            f"{name} with shape {tuple(tensor.shape)} is not broadcastable to {tuple(reference.shape)}"
-        ) from exc
-    return tensor
 
 
 def derive_smoothness_stats_from_cube(
@@ -136,7 +112,7 @@ class OptimizationConfig:
     fft_weight: float = 1.0
     poly_weight: float = 1.0
     poly_degree: int = 3
-    poly_sigma: float = 0.05
+    poly_sigma: float = DEFAULT_POLY_SIGMA
     loss_mode: str = "base"  # "base", "rfft", or "poly_reparam"
     optimizer_name: str = "adam"
     momentum: float = 0.9
@@ -150,20 +126,20 @@ class OptimizationConfig:
     corr_plot: Optional[str] = None
     init_fg_cube: Optional[str] = None
     init_eor_cube: Optional[str] = None
-    data_error: float = 0.05
+    data_error: float = DEFAULT_DATA_ERROR
     eor_prior_mean: float = 0.0
-    eor_prior_sigma: float = 0.1
+    eor_prior_sigma: float = DEFAULT_EOR_SIGMA
     fg_smooth_mean: float = 0.0
     fg_smooth_sigma: float = 0.05
     fg_reference_cube: Optional[str] = None
     use_robust_fg_stats: bool = False
     mae_to_sigma_factor: float = 1.4826
     corr_prior_mean: float = 0.0
-    corr_prior_sigma: float = 0.2
+    corr_prior_sigma: float = DEFAULT_CORR_SIGMA
     corr_weight: float = 1.0
     fft_highfreq_percent: float = 0.7
     fft_prior_mean: float = 0.0
-    fft_prior_sigma: float = 1.0
+    fft_prior_sigma: float = DEFAULT_FFT_SIGMA
     freq_start_mhz: Optional[float] = None
     freq_delta_mhz: Optional[float] = None
     freqs_mhz_path: Optional[str] = None
@@ -313,18 +289,18 @@ def optimize_components(
     dtype: Optional[torch.dtype] = None,
     fg_init_tensor: Optional[Tensor] = None,
     eor_init_tensor: Optional[Tensor] = None,
-    data_error: Union[Tensor, float] = 0.05,
+    data_error: Union[Tensor, float] = DEFAULT_DATA_ERROR,
     eor_prior_mean: Union[Tensor, float] = 0.0,
-    eor_prior_sigma: Union[Tensor, float] = 0.1,
+    eor_prior_sigma: Union[Tensor, float] = DEFAULT_EOR_SIGMA,
     fg_smooth_mean: Optional[Union[Tensor, float]] = 0.0,
     fg_smooth_sigma: Optional[Union[Tensor, float]] = 0.05,
     corr_prior_mean: Union[Tensor, float] = 0.0,
-    corr_prior_sigma: Union[Tensor, float] = 0.2,
+    corr_prior_sigma: Union[Tensor, float] = DEFAULT_CORR_SIGMA,
     corr_weight: float = 1.0,
     fft_weight: float = 1.0,
     poly_weight: float = 1.0,
     poly_degree: int = 3,
-    poly_sigma: Optional[Union[Tensor, float]] = 0.05,
+    poly_sigma: Optional[Union[Tensor, float]] = DEFAULT_POLY_SIGMA,
     loss_mode: str = "base",
     fft_prior_mean: Optional[Union[Tensor, float]] = None,
     fft_prior_sigma: Optional[Union[Tensor, float]] = None,
@@ -368,7 +344,9 @@ def optimize_components(
 
     data_error_tensor = prepare_broadcastable_prior(data_error, y_tensor, "data_error")
     if data_error_tensor is None:
-        data_error_tensor = torch.as_tensor(0.05, device=y_tensor.device, dtype=y_tensor.dtype)
+        data_error_tensor = torch.as_tensor(
+            DEFAULT_DATA_ERROR, device=y_tensor.device, dtype=y_tensor.dtype
+        )
 
     eor_mean_tensor = prepare_broadcastable_prior(eor_prior_mean, y_tensor, "eor_prior_mean")
     if eor_mean_tensor is None:
@@ -376,7 +354,9 @@ def optimize_components(
 
     eor_sigma_tensor = prepare_broadcastable_prior(eor_prior_sigma, y_tensor, "eor_prior_sigma")
     if eor_sigma_tensor is None:
-        eor_sigma_tensor = torch.full((1,), 0.1, device=y_tensor.device, dtype=y_tensor.dtype)
+        eor_sigma_tensor = torch.full(
+            (1,), DEFAULT_EOR_SIGMA, device=y_tensor.device, dtype=y_tensor.dtype
+        )
 
     fg_mean_tensor = ensure_tensor_on(fg_smooth_mean, y_tensor.device, y_tensor.dtype)
     if fg_mean_tensor is None:
@@ -392,7 +372,9 @@ def optimize_components(
 
     corr_sigma_tensor = ensure_tensor_on(corr_prior_sigma, y_tensor.device, y_tensor.dtype)
     if corr_sigma_tensor is None:
-        corr_sigma_tensor = torch.full((1,), 0.2, device=y_tensor.device, dtype=y_tensor.dtype)
+        corr_sigma_tensor = torch.full(
+            (1,), DEFAULT_CORR_SIGMA, device=y_tensor.device, dtype=y_tensor.dtype
+        )
 
     fft_mean_tensor = ensure_tensor_on(fft_prior_mean, y_tensor.device, y_tensor.dtype)
     fft_sigma_tensor = ensure_tensor_on(fft_prior_sigma, y_tensor.device, y_tensor.dtype)
@@ -719,7 +701,11 @@ def _optimize_from_fits(
         fg_mean_value = config.fg_smooth_mean
         fg_sigma_value = config.fg_smooth_sigma
         fft_mean_value = config.fft_prior_mean
-        fft_sigma_value = config.fft_prior_sigma
+        fft_sigma_value = (
+            config.fft_prior_sigma
+            if config.fft_prior_sigma is not None
+            else DEFAULT_FFT_SIGMA
+        )
 
     fg_init_tensor = None
     if config.init_fg_cube:

@@ -104,13 +104,12 @@ def compute_power_spectra(
         norm = np.mean(win3d**2)
     else:
         norm = 1.0
-    Fk = np.fft.fftn(cube_demean)
-    volume = (df_mpc * dx_mpc * dy_mpc)
-    power = np.abs(Fk) ** 2 / (norm * volume)
-
     df_mpc = _frequency_spacing_to_mpc(config, nf)
     dx_mpc = _resolve_spacing(config.dx, config.unit_x)
     dy_mpc = _resolve_spacing(config.dy, config.unit_y)
+    Fk = np.fft.fftn(cube_demean)
+    volume = df_mpc * dx_mpc * dy_mpc
+    power = np.abs(Fk) ** 2 / (norm * volume)
     kf, kx, ky = _compute_k_axes((nf, nx, ny), df_mpc, dx_mpc, dy_mpc)
     kf_grid, kx_grid, ky_grid = np.meshgrid(kf, kx, ky, indexing="ij")
     kperp = np.sqrt(kx_grid**2 + ky_grid**2)

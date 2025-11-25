@@ -9,7 +9,8 @@ import math
 from typing import Dict, Optional, Tuple, Union
 
 import torch
-from utils import ensure_tensor_on, prepare_broadcastable_prior
+from constants import EPS_LOSS, DEFAULT_FFT_SIGMA
+from utils import clamp_eps, ensure_tensor_on, prepare_broadcastable_prior
 
 Tensor = torch.Tensor
 
@@ -196,12 +197,19 @@ def loss_function(
     fft_loss = torch.zeros_like(data_loss)
     if loss_mode == "rfft":
         prior_mean = fft_prior_mean
-        prior_sigma = clamp_eps(fft_prior_sigma, eps=EPS_LOSS) if fft_prior_sigma is not None else None
+        prior_sigma = (
+            clamp_eps(fft_prior_sigma, eps=EPS_LOSS) if fft_prior_sigma is not None else None
+        )
         energy_map = compute_highfreq_energy(fg, freq_axis=freq_axis, percent=fft_percent)
         if prior_mean is None:
             prior_mean = torch.zeros(1, device=energy_map.device, dtype=energy_map.dtype)
         if prior_sigma is None:
-            prior_sigma = torch.ones(1, device=energy_map.device, dtype=energy_map.dtype)
+            prior_sigma = torch.full(
+                (1,),
+                DEFAULT_FFT_SIGMA,
+                device=energy_map.device,
+                dtype=energy_map.dtype,
+            )
         fft_loss = torch.mean(((energy_map - prior_mean) / prior_sigma) ** 2)
     poly_loss = torch.zeros_like(data_loss)
     if loss_mode == "poly":
