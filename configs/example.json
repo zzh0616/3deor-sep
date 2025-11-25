@@ -1,0 +1,49 @@
+{
+  "input_cube": "all_cube1_masked.fits",
+  "fg_output": "outputs/example_fg.fits",
+  "eor_output": "outputs/example_eor.fits",
+  "optim": {
+    "num_iters": 500,
+    "lr": 0.001,
+    "freq_axis": 0,
+    "print_every": 50,
+    "device": "cuda",
+    "dtype": "float32",
+    "loss_mode": "poly_reparam",
+    "optimizer_name": "adam",
+    "momentum": 0.9
+  },
+  "weights": {
+    "alpha": 1.0,
+    "beta": 1.0,
+    "gamma": 1.0,
+    "corr_weight": 1.0,
+    "fft_weight": 1.0,
+    "poly_weight": 1.0
+  },
+  "priors": {
+    "data_error": 0.005,
+    "eor_prior_mean": 0.0,
+    "eor_prior_sigma": 0.1,
+    "fg_smooth_mean": 0.0,
+    "fg_smooth_sigma": 0.05,
+    "fg_reference_cube": "fg_cube1.fits",
+    "use_robust_fg_stats": true,
+    "mae_to_sigma_factor": 1.4826,
+    "corr_prior_mean": 0.0,
+    "corr_prior_sigma": 0.2,
+    "fft_highfreq_percent": 0.7,
+    "fft_prior_mean": 0.0,
+    "fft_prior_sigma": 1.0,
+    "poly_degree": 3,
+    "poly_sigma": 0.1
+  },
+  "evaluation": {
+    "true_eor_cube": "eor_cube1.fits",
+    "corr_plot": "outputs/example_eor_corr.png"
+  },
+  "init": {
+    "init_fg_cube": "",
+    "init_eor_cube": ""
+  }
+}
