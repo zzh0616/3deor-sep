@@ -60,6 +60,8 @@ All weights default to `1.0`. The code prints a warning if you deviate from 1.0.
 
 - `true_eor_cube` (`str`): Reference EoR FITS cube (evaluation only).
 - `corr_plot` (`str`): Output path for the EoR correlation plot.
+- `enable_corr_check` (`bool`): If `true`, periodically compute the mean correlation between the recovered and reference EoR during optimization. Requires `true_eor_cube`.
+- `corr_check_every` (`int`): Iteration interval for correlation checks (default 500).
 
 ## `power` Section
 
@@ -69,4 +71,3 @@ See `docs/powerspec.md` for a dedicated description.
 
 - `init_fg_cube` (`str`): Initial foreground guess (FITS cube).
 - `init_eor_cube` (`str`): Initial EoR guess (FITS cube).
-

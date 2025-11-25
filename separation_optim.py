@@ -140,6 +140,8 @@ class OptimizationConfig:
     fft_highfreq_percent: float = 0.7
     fft_prior_mean: float = 0.0
     fft_prior_sigma: float = DEFAULT_FFT_SIGMA
+    enable_corr_check: bool = False
+    corr_check_every: int = 500
     freq_start_mhz: Optional[float] = None
     freq_delta_mhz: Optional[float] = None
     freqs_mhz_path: Optional[str] = None
@@ -309,6 +311,8 @@ def optimize_components(
     freq_delta_mhz: Optional[float] = None,
     optimizer_name: str = "adam",
     momentum: float = 0.9,
+    eor_true_tensor: Optional[Tensor] = None,
+    corr_check_every: int = 0,
 ) -> Tuple[Tensor, Tensor, List[LossComponents]]:
     """
     Optimize fg and eor to fit the observed cube y.
@@ -341,6 +345,15 @@ def optimize_components(
     if loss_mode not in {"base", "rfft", "poly", "poly_reparam"}:
         raise ValueError("loss_mode must be 'base', 'rfft', 'poly', or 'poly_reparam'.")
     y_tensor, _, _ = _prepare_observation(y, device=device, dtype=dtype)
+
+    aligned_eor_true: Optional[Tensor] = None
+    if eor_true_tensor is not None:
+        tensor = eor_true_tensor if torch.is_tensor(eor_true_tensor) else torch.as_tensor(eor_true_tensor)
+        if tensor.shape != y_tensor.shape:
+            raise ValueError(
+                f"eor_true_tensor shape {tuple(tensor.shape)} does not match observation shape {tuple(y_tensor.shape)}"
+            )
+        aligned_eor_true = tensor.to(device=y_tensor.device, dtype=y_tensor.dtype)
 
     data_error_tensor = prepare_broadcastable_prior(data_error, y_tensor, "data_error")
     if data_error_tensor is None:
@@ -486,6 +499,18 @@ def optimize_components(
         )
         total_loss.backward()
         optimizer.step()
+
+        if (
+            aligned_eor_true is not None
+            and corr_check_every > 0
+            and (it % corr_check_every == 0 or it == num_iters)
+        ):
+            with torch.no_grad():
+                corr_values = compute_frequency_correlations(
+                    eor, aligned_eor_true, freq_axis=freq_axis
+                )
+            mean_corr = float(np.nanmean(corr_values))
+            print(f"[check] iter {it:04d}: mean EoR corr={mean_corr:.4f}")
 
         entry = LossComponents(
             total=float(total_loss.item()),
@@ -658,6 +683,12 @@ def _optimize_from_fits(
     print(f"Loading cube from {input_path} on device {device} ...")
     y_cube = read_fits_cube(input_path)
 
+    eor_true: Optional[Tensor] = None
+    if config.true_eor_cube:
+        true_eor_path = Path(config.true_eor_cube)
+        print(f"Loading reference EoR cube from {true_eor_path} ...")
+        eor_true = read_fits_cube(true_eor_path)
+
     data_error_value: Union[Tensor, float] = config.data_error
     eor_mean_value: Union[Tensor, float] = config.eor_prior_mean
     eor_sigma_value: Union[Tensor, float] = config.eor_prior_sigma
@@ -754,6 +785,8 @@ def _optimize_from_fits(
         momentum=config.momentum,
         freq_start_mhz=config.freq_start_mhz,
         freq_delta_mhz=config.freq_delta_mhz,
+        eor_true_tensor=eor_true if config.enable_corr_check else None,
+        corr_check_every=config.corr_check_every if config.enable_corr_check else 0,
     )
 
     write_fits_cube(fg_est, fg_output)
@@ -770,10 +803,7 @@ def _optimize_from_fits(
     print(f"Saved foreground estimate to {fg_output}")
     print(f"Saved EoR estimate to {eor_output}")
 
-    if config.true_eor_cube:
-        true_eor_path = Path(config.true_eor_cube)
-        print(f"Loading reference EoR cube from {true_eor_path} for evaluation...")
-        eor_true = read_fits_cube(true_eor_path)
+    if config.true_eor_cube and eor_true is not None:
         plot_path = (
             Path(config.corr_plot)
             if config.corr_plot
@@ -862,6 +892,8 @@ def run_synthetic_demo(config: OptimizationConfig) -> None:
         momentum=config.momentum,
         freq_start_mhz=config.freq_start_mhz,
         freq_delta_mhz=config.freq_delta_mhz,
+        eor_true_tensor=eor_true if config.enable_corr_check else None,
+        corr_check_every=config.corr_check_every if config.enable_corr_check else 0,
     )
 
     fg_mse = torch.mean((fg_est - fg_true) ** 2).item()
@@ -1028,6 +1060,19 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         help="File path for saving the per-frequency correlation plot.",
     )
     parser.add_argument(
+        "--enable-corr-check",
+        action="store_true",
+        help=(
+            "Enable periodic correlation checks between the recovered EoR and the reference EoR "
+            "(requires --true-eor-cube or 'true_eor_cube' in the config)."
+        ),
+    )
+    parser.add_argument(
+        "--corr-check-every",
+        type=int,
+        help="Iteration interval for correlation checks (default 500).",
+    )
+    parser.add_argument(
         "--init-fg-cube",
         type=str,
         help="FITS cube providing an initial foreground guess.",
@@ -1093,6 +1138,8 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "corr_plot",
         "init_fg_cube",
         "init_eor_cube",
+        "enable_corr_check",
+        "corr_check_every",
     ]
     overrides = {key: getattr(args, key) for key in keys if getattr(args, key, None) is not None}
     if getattr(args, "fft_percent", None) is not None:

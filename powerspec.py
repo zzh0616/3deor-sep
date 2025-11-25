@@ -22,10 +22,11 @@ class PowerSpecConfig:
     dx: float  # spacing along x
     dy: float  # spacing along y
     df: float  # spacing along frequency axis (Hz or MHz if unit_f is a frequency unit)
-    unit_x: str = "mpc"  # e.g., "mpc" or "mpc/h"
+    unit_x: str = "mpc"  # e.g., "mpc", "mpc/h", "kpc", "arcmin", etc.
     unit_y: str = "mpc"
-    unit_f: str = "mpc"  # "mpc" if already physical, otherwise "mhz" or "hz"
+    unit_f: str = "mpc"  # "mpc"/"mpc/h"/"kpc" if already physical, otherwise "mhz", "hz", or "redshift"
     ref_freq_mhz: Optional[float] = None  # central/starting frequency (MHz) if unit_f is frequency
+    ref_redshift: Optional[float] = None  # reference redshift (for angular units or redshift axis)
     rest_freq_mhz: float = 1420.40575  # HI 21cm default
     H0: float = 70.0
     Om0: float = 0.3
@@ -37,38 +38,140 @@ class PowerSpecConfig:
     output_dir: str = "powerspec"
 
 def _cosmo_from_cfg(cfg: PowerSpecConfig) -> FlatLambdaCDM:
-    ode0 = 1.0 - cfg.Om0 if cfg.Ode0 is None else cfg.Ode0
-    return FlatLambdaCDM(H0=cfg.H0 * u.km / u.s / u.Mpc, Om0=cfg.Om0, Ode0=ode0)
+    """
+    Build a flat LambdaCDM cosmology from configuration.
+    Astropy's FlatLambdaCDM enforces flatness via Om0; Ode0 is implied as 1-Om0.
+    """
+    if cfg.Ode0 is not None:
+        implied = 1.0 - cfg.Om0
+        if abs(cfg.Ode0 - implied) / (abs(implied) + EPS_STD) > 0.05:
+            print(
+                "Warning: Ode0 is ignored by FlatLambdaCDM; using a flat model with "
+                f"Om0={cfg.Om0:.3f} (implied Ode0={implied:.3f})."
+            )
+    return FlatLambdaCDM(H0=cfg.H0 * u.km / u.s / u.Mpc, Om0=cfg.Om0)
 
 
-def _resolve_spacing(value: float, unit: str) -> float:
+def _resolve_length_spacing(value: float, unit: str, cfg: PowerSpecConfig) -> float:
+    """
+    Convert length-like spacings to Mpc.
+    Supports Mpc, Mpc/h, kpc, kpc/h, Gpc, and Gpc/h.
+    """
     unit_low = unit.lower()
-    if unit_low in {"mpc", "mpc/h"}:
-        if unit_low == "mpc/h":
-            return value / 1.0  # assume h=1.0 unless user encoded it in value
+    h = cfg.H0 / 100.0
+    if unit_low == "mpc":
         return value
-    raise ValueError(f"Unsupported spatial unit '{unit}'. Use 'mpc' or 'mpc/h'.")
+    if unit_low == "mpc/h":
+        return value / h
+    if unit_low == "kpc":
+        return value / 1e3
+    if unit_low == "kpc/h":
+        return (value / 1e3) / h
+    if unit_low == "gpc":
+        return value * 1e3
+    if unit_low == "gpc/h":
+        return (value * 1e3) / h
+    raise ValueError(
+        f"Unsupported length unit '{unit}'. Use 'mpc', 'mpc/h', 'kpc', 'kpc/h', 'gpc', or 'gpc/h'."
+    )
+
+
+def _resolve_angular_spacing(value: float, unit: str, cfg: PowerSpecConfig) -> float:
+    """
+    Convert angular spacing on the sky to Mpc using a reference redshift.
+    """
+    unit_low = unit.lower()
+    if unit_low == "rad":
+        angle_rad = value
+    elif unit_low == "deg":
+        angle_rad = math.radians(value)
+    elif unit_low == "arcmin":
+        angle_rad = math.radians(value / 60.0)
+    elif unit_low == "arcsec":
+        angle_rad = math.radians(value / 3600.0)
+    else:
+        raise ValueError(
+            f"Unsupported angular unit '{unit}'. Use 'rad', 'deg', 'arcmin', or 'arcsec'."
+        )
+
+    cosmo = _cosmo_from_cfg(cfg)
+    if cfg.ref_freq_mhz is not None:
+        z_ref = (cfg.rest_freq_mhz / cfg.ref_freq_mhz) - 1.0
+    elif cfg.ref_redshift is not None:
+        z_ref = cfg.ref_redshift
+    else:
+        raise ValueError(
+            "ref_freq_mhz or ref_redshift is required when using angular units for dx/dy."
+        )
+    chi = cosmo.comoving_distance(z_ref).to(u.Mpc).value
+    return float(chi * angle_rad)
+
+
+def _resolve_spatial_spacing(value: float, unit: str, cfg: PowerSpecConfig) -> float:
+    """
+    Convert a spatial spacing along x or y to Mpc, supporting both length and angular units.
+    """
+    unit_low = unit.lower()
+    if unit_low in {"mpc", "mpc/h", "kpc", "kpc/h", "gpc", "gpc/h"}:
+        return _resolve_length_spacing(value, unit_low, cfg)
+    if unit_low in {"rad", "deg", "arcmin", "arcsec"}:
+        return _resolve_angular_spacing(value, unit_low, cfg)
+    raise ValueError(
+        f"Unsupported spatial unit '{unit}'. Use length units "
+        "('mpc', 'mpc/h', 'kpc', 'kpc/h', 'gpc', 'gpc/h') or angular units "
+        "('rad', 'deg', 'arcmin', 'arcsec')."
+    )
 
 
 def _frequency_spacing_to_mpc(cfg: PowerSpecConfig, nf: int) -> float:
-    if cfg.unit_f.lower() in {"mpc", "mpc/h"}:
-        return _resolve_spacing(cfg.df, cfg.unit_f)
-    if cfg.unit_f.lower() not in {"mhz", "hz"}:
-        raise ValueError(f"Unsupported frequency unit '{cfg.unit_f}'. Use 'MHz' or 'Hz'.")
-    if cfg.ref_freq_mhz is None:
-        raise ValueError("ref_freq_mhz is required when unit_f is a frequency unit.")
+    """
+    Convert spacing along the radial axis to Mpc.
+    Supports:
+      - Length units: mpc, mpc/h, kpc, kpc/h, gpc, gpc/h
+      - Frequency units: mhz, hz (needs ref_freq_mhz and rest_freq_mhz)
+      - Redshift units: redshift, z (needs ref_redshift)
+    """
+    unit_low = cfg.unit_f.lower()
+    if unit_low in {"mpc", "mpc/h", "kpc", "kpc/h", "gpc", "gpc/h"}:
+        return _resolve_length_spacing(cfg.df, unit_low, cfg)
 
-    cosmo = _cosmo_from_cfg(cfg)
-    ref_freq = cfg.ref_freq_mhz * u.MHz
-    df = cfg.df * (u.MHz if cfg.unit_f.lower() == "mhz" else u.Hz)
-    freqs = ref_freq + np.arange(nf) * df
-    z = (cfg.rest_freq_mhz * u.MHz / freqs - 1.0).decompose()
-    chi = cosmo.comoving_distance(z).to(u.Mpc).value
-    dchi = np.diff(chi)
-    dchi_mean = float(np.mean(dchi))
-    if np.std(dchi) / (np.abs(dchi_mean) + EPS_STD) > 0.05:
-        print("Warning: frequency spacing is not uniform in comoving distance; using mean spacing.")
-    return dchi_mean
+    if unit_low in {"mhz", "hz"}:
+        if cfg.ref_freq_mhz is None:
+            raise ValueError("ref_freq_mhz is required when unit_f is a frequency unit.")
+
+        cosmo = _cosmo_from_cfg(cfg)
+        ref_freq = cfg.ref_freq_mhz * u.MHz
+        df = cfg.df * (u.MHz if unit_low == "mhz" else u.Hz)
+        freqs = ref_freq + np.arange(nf) * df
+        z = (cfg.rest_freq_mhz * u.MHz / freqs - 1.0).decompose()
+        chi = cosmo.comoving_distance(z).to(u.Mpc).value
+        dchi = np.diff(chi)
+        dchi_mean = float(np.mean(dchi))
+        if np.std(dchi) / (np.abs(dchi_mean) + EPS_STD) > 0.05:
+            print(
+                "Warning: frequency spacing is not uniform in comoving distance; using mean spacing."
+            )
+        return dchi_mean
+
+    if unit_low in {"redshift", "z"}:
+        if cfg.ref_redshift is None:
+            raise ValueError("ref_redshift is required when unit_f is a redshift unit.")
+        cosmo = _cosmo_from_cfg(cfg)
+        z0 = cfg.ref_redshift
+        zs = z0 + np.arange(nf) * cfg.df
+        chi = cosmo.comoving_distance(zs).to(u.Mpc).value
+        dchi = np.diff(chi)
+        dchi_mean = float(np.mean(dchi))
+        if np.std(dchi) / (np.abs(dchi_mean) + EPS_STD) > 0.05:
+            print(
+                "Warning: redshift spacing is not uniform in comoving distance; using mean spacing."
+            )
+        return dchi_mean
+
+    raise ValueError(
+        f"Unsupported radial unit '{cfg.unit_f}'. Use 'mpc', 'mpc/h', 'kpc', 'kpc/h', "
+        "'gpc', 'gpc/h', 'mhz', 'hz', or 'redshift'."
+    )
 
 
 def _compute_k_axes(shape: Tuple[int, int, int], dx: float, dy: float, df: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -105,11 +208,15 @@ def compute_power_spectra(
     else:
         norm = 1.0
     df_mpc = _frequency_spacing_to_mpc(config, nf)
-    dx_mpc = _resolve_spacing(config.dx, config.unit_x)
-    dy_mpc = _resolve_spacing(config.dy, config.unit_y)
+    dx_mpc = _resolve_spatial_spacing(config.dx, config.unit_x, config)
+    dy_mpc = _resolve_spatial_spacing(config.dy, config.unit_y, config)
+    v_cell = df_mpc * dx_mpc * dy_mpc
+    n_vox = float(nf * nx * ny)
     Fk = np.fft.fftn(cube_demean)
-    volume = df_mpc * dx_mpc * dy_mpc
-    power = np.abs(Fk) ** 2 / (norm * volume)
+    # Continuous-limit-inspired normalization:
+    #   P(k) ≈ V_cell * |F(k)|^2 / N_vox,
+    # where F(k) is approximated by the discrete FFT and V_cell is the voxel volume.
+    power = (v_cell / (norm * n_vox)) * (np.abs(Fk) ** 2)
     kf, kx, ky = _compute_k_axes((nf, nx, ny), df_mpc, dx_mpc, dy_mpc)
     kf_grid, kx_grid, ky_grid = np.meshgrid(kf, kx, ky, indexing="ij")
     kperp = np.sqrt(kx_grid**2 + ky_grid**2)
