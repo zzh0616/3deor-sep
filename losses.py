@@ -116,6 +116,7 @@ def polynomial_prior_loss(
     freq_axis: int,
     degree: int,
     sigma: Union[Tensor, float],
+    freqs: Optional[Tensor] = None,
 ) -> Tensor:
     """
     Fit a low-order polynomial along frequency and penalize residuals.
@@ -124,7 +125,12 @@ def polynomial_prior_loss(
         raise ValueError("Polynomial degree must be non-negative.")
     fg_moved = fg.movedim(freq_axis, 0)
     num_freqs = fg_moved.shape[0]
-    freqs = torch.linspace(0.0, 1.0, num_freqs, device=fg.device, dtype=fg.dtype)
+    if freqs is None:
+        freqs = torch.linspace(0.0, 1.0, num_freqs, device=fg.device, dtype=fg.dtype)
+    else:
+        if freqs.numel() != num_freqs:
+            raise ValueError("Frequency array length does not match foreground frequency dimension.")
+        freqs = freqs.to(device=fg.device, dtype=fg.dtype)
     design = torch.stack([freqs**i for i in range(degree + 1)], dim=1)  # (F, degree+1)
     y_flat = fg_moved.reshape(num_freqs, -1)
     safe_dtype = torch.float32 if fg.dtype not in (torch.float32, torch.float64) else fg.dtype
@@ -199,7 +205,13 @@ def loss_function(
         fft_loss = torch.mean(((energy_map - prior_mean) / prior_sigma) ** 2)
     poly_loss = torch.zeros_like(data_loss)
     if loss_mode == "poly":
-        poly_loss = polynomial_prior_loss(fg, freq_axis=freq_axis, degree=poly_degree, sigma=poly_sigma)
+        poly_loss = polynomial_prior_loss(
+            fg,
+            freq_axis=freq_axis,
+            degree=poly_degree,
+            sigma=poly_sigma,
+            freqs=None,
+        )
     elif loss_mode == "poly_reparam":
         if poly_residual is None:
             poly_residual = torch.zeros_like(fg)

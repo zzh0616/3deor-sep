@@ -164,6 +164,9 @@ class OptimizationConfig:
     fft_highfreq_percent: float = 0.7
     fft_prior_mean: float = 0.0
     fft_prior_sigma: float = 1.0
+    freq_start_mhz: Optional[float] = None
+    freq_delta_mhz: Optional[float] = None
+    freqs_mhz_path: Optional[str] = None
 
     def update_from_dict(self, data: Dict[str, Any]) -> None:
         for field in fields(self):
@@ -232,10 +235,21 @@ def _polynomial_design(num_freqs: int, degree: int, device: torch.device, dtype:
     return torch.stack([freqs**i for i in range(degree + 1)], dim=1)  # (F, degree+1)
 
 
-def _fit_polynomial_coeffs(y: Tensor, freq_axis: int, degree: int) -> Tuple[Tensor, Tensor]:
+def _fit_polynomial_coeffs(
+    y: Tensor,
+    freq_axis: int,
+    degree: int,
+    freqs: Optional[Tensor] = None,
+) -> Tuple[Tensor, Tensor]:
     y_front = y.movedim(freq_axis, 0)
     num_freqs = y_front.shape[0]
-    design = _polynomial_design(num_freqs, degree, device=y.device, dtype=y.dtype)
+    if freqs is None:
+        design = _polynomial_design(num_freqs, degree, device=y.device, dtype=y.dtype)
+    else:
+        if freqs.numel() != num_freqs:
+            raise ValueError("Frequency array length does not match cube frequency dimension.")
+        freqs = freqs.to(device=y.device, dtype=y.dtype)
+        design = torch.stack([freqs**i for i in range(degree + 1)], dim=1)
     y_flat = y_front.reshape(num_freqs, -1)
     safe_dtype = torch.float32 if y.dtype not in (torch.float32, torch.float64) else y.dtype
     y_flat_cast = y_flat.to(dtype=safe_dtype)
@@ -315,6 +329,8 @@ def optimize_components(
     fft_prior_mean: Optional[Union[Tensor, float]] = None,
     fft_prior_sigma: Optional[Union[Tensor, float]] = None,
     fft_highfreq_percent: float = 0.7,
+    freq_start_mhz: Optional[float] = None,
+    freq_delta_mhz: Optional[float] = None,
     optimizer_name: str = "adam",
     momentum: float = 0.9,
 ) -> Tuple[Tensor, Tensor, List[LossComponents]]:
@@ -343,6 +359,8 @@ def optimize_components(
         fft_prior_mean: Prior mean for high-frequency energy (scalar or tensor).
         fft_prior_sigma: Prior std for high-frequency energy (scalar or tensor).
         fft_highfreq_percent: Fraction (0-1) of the highest frequency bins to penalize.
+        freq_start_mhz: Starting frequency of the cube (MHz) for polynomial modes.
+        freq_delta_mhz: Frequency spacing of the cube (MHz) for polynomial modes.
     """
     if loss_mode not in {"base", "rfft", "poly", "poly_reparam"}:
         raise ValueError("loss_mode must be 'base', 'rfft', 'poly', or 'poly_reparam'.")
@@ -380,6 +398,14 @@ def optimize_components(
     fft_sigma_tensor = ensure_tensor_on(fft_prior_sigma, y_tensor.device, y_tensor.dtype)
     poly_sigma_tensor = ensure_tensor_on(poly_sigma, y_tensor.device, y_tensor.dtype)
 
+    freqs_tensor: Optional[Tensor] = None
+    if freq_start_mhz is not None and freq_delta_mhz is not None:
+        nfreq = y_tensor.shape[freq_axis]
+        freqs_tensor = (
+            freq_start_mhz
+            + freq_delta_mhz * torch.arange(nfreq, device=y_tensor.device, dtype=y_tensor.dtype)
+        )
+
     if loss_mode == "poly":
         print(
             "Warning: loss_mode=poly runs a full polynomial fit over the foreground; "
@@ -412,7 +438,12 @@ def optimize_components(
         eor_init = eor_override
 
     if loss_mode == "poly_reparam":
-        coeffs_init, fitted = _fit_polynomial_coeffs(fg_init, freq_axis=freq_axis, degree=poly_degree)
+        coeffs_init, fitted = _fit_polynomial_coeffs(
+            fg_init,
+            freq_axis=freq_axis,
+            degree=poly_degree,
+            freqs=freqs_tensor,
+        )
         resid_init = fg_init - fitted
         poly_coeffs_param = torch.nn.Parameter(coeffs_init.clone())
         fg_resid_param = torch.nn.Parameter(resid_init.clone())
@@ -735,6 +766,8 @@ def _optimize_from_fits(
         fft_highfreq_percent=config.fft_highfreq_percent,
         optimizer_name=config.optimizer_name,
         momentum=config.momentum,
+        freq_start_mhz=config.freq_start_mhz,
+        freq_delta_mhz=config.freq_delta_mhz,
     )
 
     write_fits_cube(fg_est, fg_output)
@@ -776,6 +809,11 @@ def _optimize_from_fits(
             if power_cfg_data is None:
                 return
             power_cfg = PowerSpecConfig(**power_cfg_data)
+            power_cfg.freq_axis = config.freq_axis
+            if config.freq_start_mhz is not None and config.freq_delta_mhz is not None:
+                power_cfg.ref_freq_mhz = config.freq_start_mhz
+                power_cfg.df = config.freq_delta_mhz
+                power_cfg.unit_f = "mhz"
             if config.power_output_dir:
                 output_dir = Path(config.power_output_dir)
             else:
@@ -834,6 +872,10 @@ def run_synthetic_demo(config: OptimizationConfig) -> None:
         fft_prior_mean=config.fft_prior_mean,
         fft_prior_sigma=config.fft_prior_sigma,
         fft_highfreq_percent=config.fft_highfreq_percent,
+        optimizer_name=config.optimizer_name,
+        momentum=config.momentum,
+        freq_start_mhz=config.freq_start_mhz,
+        freq_delta_mhz=config.freq_delta_mhz,
     )
 
     fg_mse = torch.mean((fg_est - fg_true) ** 2).item()
@@ -980,6 +1022,16 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         help="Std used to scale polynomial prior residuals (default 0.05).",
     )
     parser.add_argument(
+        "--freq-start-mhz",
+        type=float,
+        help="Starting frequency of the cube in MHz (for polynomial modes).",
+    )
+    parser.add_argument(
+        "--freq-delta-mhz",
+        type=float,
+        help="Frequency spacing of the cube in MHz (for polynomial modes).",
+    )
+    parser.add_argument(
         "--true-eor-cube",
         type=str,
         help="FITS cube containing reference EoR for evaluation plots (not used for training).",
@@ -1047,6 +1099,8 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "poly_weight",
         "poly_degree",
         "poly_sigma",
+        "freq_start_mhz",
+        "freq_delta_mhz",
         "power_config",
         "power_output_dir",
         "true_eor_cube",

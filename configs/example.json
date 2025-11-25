@@ -11,7 +11,10 @@
     "dtype": "float32",
     "loss_mode": "poly_reparam",
     "optimizer_name": "adam",
-    "momentum": 0.9
+    "momentum": 0.9,
+    "freq_start_mhz": 150.0,
+    "freq_delta_mhz": 0.1,
+    "power_config": "configs/power.json"
   },
   "weights": {
     "alpha": 1.0,

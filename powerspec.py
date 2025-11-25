@@ -82,15 +82,31 @@ def _compute_k_axes(shape: Tuple[int, int, int], dx: float, dy: float, df: float
 def compute_power_spectra(
     cube: np.ndarray,
     config: PowerSpecConfig,
+    window: str = "hann",
 ) -> Dict[str, np.ndarray]:
     """
     Compute 1D (spherical) and 2D (kperp, kpar) power spectra for a 3D cube.
     """
+    if hasattr(cube, "detach"):
+        cube = cube.detach().cpu().numpy()
+    if not isinstance(cube, np.ndarray):
+        cube = np.asarray(cube)
     cube_reorder = np.moveaxis(cube, config.freq_axis, 0)
     nf, nx, ny = cube_reorder.shape
     cube_demean = cube_reorder - cube_reorder.mean()
+
+    if window:
+        win_f = np.hanning(nf) if window == "hann" else np.ones(nf)
+        win_x = np.hanning(nx) if window == "hann" else np.ones(nx)
+        win_y = np.hanning(ny) if window == "hann" else np.ones(ny)
+        win3d = win_f[:, None, None] * win_x[None, :, None] * win_y[None, None, :]
+        cube_demean = cube_demean * win3d
+        norm = np.mean(win3d**2)
+    else:
+        norm = 1.0
     Fk = np.fft.fftn(cube_demean)
-    power = np.abs(Fk) ** 2
+    volume = (df_mpc * dx_mpc * dy_mpc)
+    power = np.abs(Fk) ** 2 / (norm * volume)
 
     df_mpc = _frequency_spacing_to_mpc(config, nf)
     dx_mpc = _resolve_spacing(config.dx, config.unit_x)
@@ -168,14 +184,16 @@ def _plot_2d(path: Path, kperp: np.ndarray, kpar: np.ndarray, p2d: np.ndarray, t
 
     path.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(6, 5))
-    vmax = np.nanmax(p2d)
+    finite_vals = p2d[np.isfinite(p2d)]
+    vmax = np.nanmax(finite_vals) if finite_vals.size > 0 else None
+    vmin = 0.0
     im = ax.imshow(
         p2d.T,
         origin="lower",
         aspect="auto",
         extent=[kperp.min(), kperp.max(), kpar.min(), kpar.max()],
-        vmin=0,
-        vmax=vmax if np.isfinite(vmax) else None,
+        vmin=vmin,
+        vmax=vmax if vmax is not None and np.isfinite(vmax) else None,
     )
     ax.set_xlabel("k_perp")
     ax.set_ylabel("k_par")
@@ -219,5 +237,6 @@ def save_power_outputs(
         if rel1d is not None:
             _save_1d_fits(output_dir / "power1d_rel.fits", k, rel1d)
         if rel2d is not None:
-            _save_2d_fits(output_dir / "power2d_rel.fits", rel2d)
-            _plot_2d(output_dir / "power2d_rel.png", kperp, kpar, rel2d, "Relative % 2D Power")
+            rel2d_clip = np.clip(rel2d, -500.0, 500.0)
+            _save_2d_fits(output_dir / "power2d_rel.fits", rel2d_clip)
+            _plot_2d(output_dir / "power2d_rel.png", kperp, kpar, rel2d_clip, "Relative % 2D Power (clipped)")
