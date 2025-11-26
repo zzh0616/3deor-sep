@@ -4,10 +4,10 @@ This document summarizes the main command-line interface and configuration optio
 
 ## Command-Line Interface
 
-The main entry point is `separation_optim.py`. Typical invocation:
+The main entry point is `separation_cli.py`. Typical invocation:
 
 ```bash
-python separation_optim.py \
+python separation_cli.py \
   --config configs/example.json \
   --device cuda:0
 ```
@@ -24,6 +24,8 @@ Key CLI arguments:
 - `--freq-start-mhz` / `--freq-delta-mhz`: Starting frequency and spacing (MHz) for polynomial modes.
 - `--true-eor-cube`: Reference EoR FITS cube (evaluation only, not used in training).
 - `--corr-plot`: Path for saving EoR correlation plot.
+- `--enable-corr-check`: Periodically compute the mean correlation between recovered and reference EoR during optimization (requires a true EoR cube).
+- `--corr-check-every`: Iteration interval for the correlation checks (default 500).
 - `--power-config`: JSON config for power spectra (see `docs/powerspec.md`).
 - `--power-output-dir`: Directory for power-spectrum outputs.
 - `--run-demo`: Run the synthetic demo instead of loading a FITS cube.
@@ -44,4 +46,3 @@ The main config is a JSON file with the following top-level sections:
 - `init`: Optional initial guesses.
 
 See `docs/config.md` for a detailed field reference.
-

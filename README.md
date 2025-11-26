@@ -11,7 +11,8 @@ For a high-level overview and full documentation, see the files under `docs/`:
 
 ## Repository Layout
 
-- `separation_optim.py`: Core module with optimizer loop, CLI, config handling, and a synthetic demo in the `__main__` block.
+- `separation_optim.py`: Core module with optimizer loop, loss wiring, FITS I/O utilities, and a synthetic demo helper.
+- `separation_cli.py`: Command-line entry point that parses arguments, loads configs, and calls the optimizer.
 - `losses.py`: Forward model and all loss/regularization utilities (data, smoothness, correlation, rFFT, polynomial priors).
 - `powerspec.py`: 1D/2D power spectrum utilities (configurable k-grid, FITS/PNG outputs).
 
@@ -51,7 +52,7 @@ pip install matplotlib
 To quickly verify the environment without FITS files, run the demo:
 
 ```bash
-python separation_optim.py --run-demo
+python separation_cli.py --run-demo
 ```
 
 This generates a smooth foreground plus oscillatory EoR cube, adds mild noise, and optimizes the components using Adam while logging the loss terms and final reconstruction errors.
