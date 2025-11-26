@@ -23,7 +23,8 @@ Example (`configs/power.json`):
   "nbins_1d": 30,
   "nbins_kperp": 30,
   "nbins_kpar": 30,
-  "output_dir": "powerspec"
+  "output_dir": "powerspec",
+  "stat_mode": "median"
 }
 ```
 
@@ -74,6 +75,9 @@ When `unit_f` is `"redshift"`/`"z"`, the code:
 - `freq_axis` (`int`): Frequency axis index (should match `freq_axis` in the main config).
 - `nbins_1d` (`int`): Number of k bins for the 1D spherical average.
 - `nbins_kperp`, `nbins_kpar` (`int`): Number of bins in k_perp and k_par for the 2D power spectrum.
+- `stat_mode` (`str`): How to average within each k-bin:
+  - `"median"` (default): Robust median over all modes in the bin (recommended for noisy or non-Gaussian fields).
+  - `"mean"`: Simple arithmetic mean (useful for idealized simulations).
 
 ### Outputs
 
@@ -87,3 +91,8 @@ For a given cube and power config, `powerspec.py` produces:
   - `power2d.png` / `power2d_rel.png` (relative plot is clipped to ±500%).
 
 All power spectra are windowed (Hann) and normalized by the window energy and physical volume.
+
+Internally, only Fourier modes inside the inscribed k-space sphere (where all three spatial
+dimensions have support) are used when forming 1D and 2D averages. A placeholder hook for a
+future uv/PSF/visibility mask is present in the implementation and can be activated when the
+pipeline is extended to interferometric data.

@@ -36,6 +36,7 @@ class PowerSpecConfig:
     nbins_kperp: int = 30
     nbins_kpar: int = 30
     output_dir: str = "powerspec"
+    stat_mode: str = "median"  # "median" (default, robust) or "mean"
 
 def _cosmo_from_cfg(cfg: PowerSpecConfig) -> FlatLambdaCDM:
     """
@@ -146,8 +147,9 @@ def _frequency_spacing_to_mpc(cfg: PowerSpecConfig, nf: int) -> float:
         z = (cfg.rest_freq_mhz * u.MHz / freqs - 1.0).decompose()
         chi = cosmo.comoving_distance(z).to(u.Mpc).value
         dchi = np.diff(chi)
-        dchi_mean = float(np.mean(dchi))
-        if np.std(dchi) / (np.abs(dchi_mean) + EPS_STD) > 0.05:
+        dchi_abs = np.abs(dchi)
+        dchi_mean = float(np.mean(dchi_abs))
+        if np.std(dchi_abs) / (np.abs(dchi_mean) + EPS_STD) > 0.05:
             print(
                 "Warning: frequency spacing is not uniform in comoving distance; using mean spacing."
             )
@@ -161,8 +163,9 @@ def _frequency_spacing_to_mpc(cfg: PowerSpecConfig, nf: int) -> float:
         zs = z0 + np.arange(nf) * cfg.df
         chi = cosmo.comoving_distance(zs).to(u.Mpc).value
         dchi = np.diff(chi)
-        dchi_mean = float(np.mean(dchi))
-        if np.std(dchi) / (np.abs(dchi_mean) + EPS_STD) > 0.05:
+        dchi_abs = np.abs(dchi)
+        dchi_mean = float(np.mean(dchi_abs))
+        if np.std(dchi_abs) / (np.abs(dchi_mean) + EPS_STD) > 0.05:
             print(
                 "Warning: redshift spacing is not uniform in comoving distance; using mean spacing."
             )
@@ -182,6 +185,22 @@ def _compute_k_axes(shape: Tuple[int, int, int], dx: float, dy: float, df: float
     return kf, kx, ky
 
 
+def _apply_uv_mask(power: np.ndarray, config: PowerSpecConfig) -> np.ndarray:
+    """
+    Placeholder for applying a uv / PSF / visibility mask in (kx, ky).
+
+    Currently this is a no-op and simply returns the input power cube.
+    In future, when working with interferometric visibilities or an
+    explicit PSF model, this hook can be used to zero out unsampled
+    transverse modes before cylindrical averaging.
+    """
+    # Example future extension:
+    # - Add uvmin/uvmax fields to PowerSpecConfig (in meters or wavelengths)
+    # - Convert them to k_perp ranges using the cosmology
+    # - Construct a boolean mask in (kx, ky) and apply it here.
+    return power
+
+
 def compute_power_spectra(
     cube: np.ndarray,
     config: PowerSpecConfig,
@@ -189,6 +208,12 @@ def compute_power_spectra(
 ) -> Dict[str, np.ndarray]:
     """
     Compute 1D (spherical) and 2D (kperp, kpar) power spectra for a 3D cube.
+
+    For the 1D spectrum, only Fourier modes inside the inscribed k-space
+    sphere (i.e., where all three dimensions have support) are used when
+    forming averages. For the 2D spectrum, the full line-of-sight range
+    is retained while transverse modes are restricted to the inscribed
+    circle in (kx, ky).
     """
     if hasattr(cube, "detach"):
         cube = cube.detach().cpu().numpy()
@@ -217,31 +242,79 @@ def compute_power_spectra(
     #   P(k) ≈ V_cell * |F(k)|^2 / N_vox,
     # where F(k) is approximated by the discrete FFT and V_cell is the voxel volume.
     power = (v_cell / (norm * n_vox)) * (np.abs(Fk) ** 2)
+    power = _apply_uv_mask(power, config)
     kf, kx, ky = _compute_k_axes((nf, nx, ny), df_mpc, dx_mpc, dy_mpc)
     kf_grid, kx_grid, ky_grid = np.meshgrid(kf, kx, ky, indexing="ij")
     kperp = np.sqrt(kx_grid**2 + ky_grid**2)
     kmag = np.sqrt(kperp**2 + kf_grid**2)
 
-    power_flat = power.flatten()
-    kmag_flat = kmag.flatten()
-    kperp_flat = kperp.flatten()
-    kpar_flat = np.abs(kf_grid).flatten()
+    # Restrict 1D averages to the inscribed k-space sphere where all
+    # three dimensions have support.
+    max_kf = float(np.max(np.abs(kf)))
+    max_kx = float(np.max(np.abs(kx)))
+    max_ky = float(np.max(np.abs(ky)))
+    kmax_sphere = min(max_kf, max_kx, max_ky)
+    sphere_mask = kmag <= kmax_sphere
 
-    # 1D spherical average
-    k_bins = np.linspace(0, kmag_flat.max(), config.nbins_1d + 1)
+    power_1d = power[sphere_mask].reshape(-1)
+    kmag_flat = kmag[sphere_mask].reshape(-1)
+
+    # 1D spherical average (robust or mean) with linear k bins.
+    k_bins = np.linspace(0.0, kmax_sphere, config.nbins_1d + 1)
     k_centers = 0.5 * (k_bins[:-1] + k_bins[1:])
-    counts_1d, _ = np.histogram(kmag_flat, bins=k_bins)
-    weights_1d, _ = np.histogram(kmag_flat, bins=k_bins, weights=power_flat)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        p1d = np.where(counts_1d > 0, weights_1d / counts_1d, 0.0)
+    bin_idx_1d = np.digitize(kmag_flat, k_bins) - 1
+    p1d = np.zeros(config.nbins_1d, dtype=float)
+    stat_mode = config.stat_mode.lower()
+    if stat_mode not in {"median", "mean"}:
+        raise ValueError("stat_mode must be 'median' or 'mean'.")
+    for i in range(config.nbins_1d):
+        mask = bin_idx_1d == i
+        if not np.any(mask):
+            continue
+        vals = power_1d[mask]
+        if stat_mode == "mean":
+            p1d[i] = float(np.mean(vals))
+        else:
+            p1d[i] = float(np.median(vals))
 
-    # 2D (kperp, kpar) average
-    kperp_bins = np.linspace(0, kperp_flat.max(), config.nbins_kperp + 1)
-    kpar_bins = np.linspace(0, kpar_flat.max(), config.nbins_kpar + 1)
-    counts_2d, _, _ = np.histogram2d(kperp_flat, kpar_flat, bins=(kperp_bins, kpar_bins))
-    weights_2d, _, _ = np.histogram2d(kperp_flat, kpar_flat, bins=(kperp_bins, kpar_bins), weights=power_flat)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        p2d = np.where(counts_2d > 0, weights_2d / counts_2d, 0.0)
+    # 2D (kperp, kpar) average (robust or mean).
+    # Relax the inscribed-sphere constraint: keep the full k_par range,
+    # but restrict transverse modes to the inscribed circle in (kx, ky)
+    # so that both spatial dimensions have support.
+    kmax_perp_circle = min(max_kx, max_ky)
+    circle_mask = kperp <= kmax_perp_circle
+    power_2d = power[circle_mask].reshape(-1)
+    kperp_flat = kperp[circle_mask].reshape(-1)
+    kpar_flat = np.abs(kf_grid[circle_mask]).reshape(-1)
+
+    # Use logarithmically spaced bins for 2D plots (k_perp, k_par).
+    # Exclude exact zeros when defining log-space bin edges.
+    valid_kperp = kperp_flat[kperp_flat > 0]
+    valid_kpar = kpar_flat[kpar_flat > 0]
+    if valid_kperp.size == 0 or valid_kpar.size == 0:
+        raise ValueError("No positive k_perp or k_par values available for 2D binning.")
+    kperp_min = float(valid_kperp.min())
+    kperp_max = float(valid_kperp.max())
+    kpar_min = float(valid_kpar.min())
+    kpar_max = float(valid_kpar.max())
+
+    kperp_bins = np.logspace(math.log10(kperp_min), math.log10(kperp_max), config.nbins_kperp + 1)
+    kpar_bins = np.logspace(math.log10(kpar_min), math.log10(kpar_max), config.nbins_kpar + 1)
+
+    bin_kperp = np.digitize(kperp_flat, kperp_bins) - 1
+    bin_kpar = np.digitize(kpar_flat, kpar_bins) - 1
+
+    p2d = np.zeros((config.nbins_kperp, config.nbins_kpar), dtype=float)
+    for ix in range(config.nbins_kperp):
+        for iy in range(config.nbins_kpar):
+            mask = (bin_kperp == ix) & (bin_kpar == iy)
+            if not np.any(mask):
+                continue
+            vals = power_2d[mask]
+            if stat_mode == "mean":
+                p2d[ix, iy] = float(np.mean(vals))
+            else:
+                p2d[ix, iy] = float(np.median(vals))
 
     return {
         "k_centers": k_centers,
@@ -263,7 +336,13 @@ def _save_2d_fits(path: Path, power2d: np.ndarray) -> None:
     fits.PrimaryHDU(data=power2d.astype(np.float32)).writeto(path, overwrite=True)
 
 
-def _plot_1d(path: Path, k: np.ndarray, rec: np.ndarray, true: Optional[np.ndarray], rel: Optional[np.ndarray]) -> None:
+def _plot_1d(
+    path: Path,
+    k: np.ndarray,
+    rec: np.ndarray,
+    true: Optional[np.ndarray],
+    rel: Optional[np.ndarray],
+) -> None:
     import matplotlib.pyplot as plt
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -271,40 +350,57 @@ def _plot_1d(path: Path, k: np.ndarray, rec: np.ndarray, true: Optional[np.ndarr
     ax1.plot(k, rec, label="recovered", color="C0")
     if true is not None:
         ax1.plot(k, true, label="true", color="C1", linestyle="--")
-    ax1.set_xlabel("k")
+    ax1.set_xlabel("k [1/Mpc]")
     ax1.set_ylabel("P(k)")
-    ax1.set_yscale("log")
+    has_positive = np.any(rec > 0) or (true is not None and np.any(true > 0))
+    if has_positive:
+        ax1.set_yscale("log")
     ax1.grid(True, alpha=0.3)
     ax1.legend()
     if rel is not None:
+        rel_clip = np.clip(rel, 1.0, 100.0)
         ax2 = ax1.twinx()
-        ax2.plot(k, rel, color="C2", alpha=0.6, label="rel %")
-        ax2.set_ylabel("Relative %")
+        ax2.plot(k, rel_clip, color="C2", alpha=0.6, label="|rel| %")
+        ax2.set_yscale("log")
+        ax2.set_ylim(1.0, 100.0)
+        ax2.set_ylabel("Relative % (abs, log)")
     fig.tight_layout()
     fig.savefig(path, dpi=200)
     plt.close(fig)
 
 
-def _plot_2d(path: Path, kperp: np.ndarray, kpar: np.ndarray, p2d: np.ndarray, title: str) -> None:
+def _plot_2d(
+    path: Path,
+    kperp: np.ndarray,
+    kpar: np.ndarray,
+    p2d: np.ndarray,
+    title: str,
+    cbar_label: str,
+    log_scale: bool = False,
+) -> None:
     import matplotlib.pyplot as plt
 
     path.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(6, 5))
-    finite_vals = p2d[np.isfinite(p2d)]
+    data = np.array(p2d, copy=True)
+    if log_scale:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            data = np.where(data > 0, np.log10(data), np.nan)
+    finite_vals = data[np.isfinite(data)]
     vmax = np.nanmax(finite_vals) if finite_vals.size > 0 else None
-    vmin = 0.0
+    vmin = np.nanmin(finite_vals) if finite_vals.size > 0 else None
     im = ax.imshow(
-        p2d.T,
+        data.T,
         origin="lower",
         aspect="auto",
         extent=[kperp.min(), kperp.max(), kpar.min(), kpar.max()],
         vmin=vmin,
         vmax=vmax if vmax is not None and np.isfinite(vmax) else None,
     )
-    ax.set_xlabel("k_perp")
-    ax.set_ylabel("k_par")
+    ax.set_xlabel("k_perp [1/Mpc]")
+    ax.set_ylabel("k_par [1/Mpc]")
     ax.set_title(title)
-    fig.colorbar(im, ax=ax, label="P(k)")
+    fig.colorbar(im, ax=ax, label=cbar_label)
     fig.tight_layout()
     fig.savefig(path, dpi=200)
     plt.close(fig)
@@ -328,21 +424,55 @@ def save_power_outputs(
     rel1d = None
     rel2d = None
     if true is not None:
-        rel1d = np.where(np.abs(true_p1d) > EPS_LOSS, 100.0 * (p1d_rec - true_p1d) / true_p1d, 0.0)
         with np.errstate(divide="ignore", invalid="ignore"):
-            rel2d = np.where(np.abs(true_p2d) > EPS_LOSS, 100.0 * (p2d_rec - true_p2d) / true_p2d, 0.0)
+            rel1d = np.where(
+                np.abs(true_p1d) > EPS_LOSS,
+                100.0 * np.abs(p1d_rec - true_p1d) / np.abs(true_p1d),
+                0.0,
+            )
+            rel2d = np.where(
+                np.abs(true_p2d) > EPS_LOSS,
+                100.0 * np.abs(p2d_rec - true_p2d) / np.abs(true_p2d),
+                0.0,
+            )
 
     _save_1d_fits(output_dir / "power1d_rec.fits", k, p1d_rec)
     _plot_1d(output_dir / "power1d.png", k, p1d_rec, true_p1d, rel1d)
     _save_2d_fits(output_dir / "power2d_rec.fits", p2d_rec)
-    _plot_2d(output_dir / "power2d.png", kperp, kpar, p2d_rec, "Recovered 2D Power")
+    _plot_2d(
+        output_dir / "power2d.png",
+        kperp,
+        kpar,
+        p2d_rec,
+        "Recovered 2D Power",
+        cbar_label="log10 P(k)",
+        log_scale=True,
+    )
 
     if true is not None:
         _save_1d_fits(output_dir / "power1d_true.fits", k, true_p1d)
         _save_2d_fits(output_dir / "power2d_true.fits", true_p2d)
+        _plot_2d(
+            output_dir / "power2d_true.png",
+            kperp,
+            kpar,
+            true_p2d,
+            "True 2D Power",
+            cbar_label="log10 P(k)",
+            log_scale=True,
+        )
         if rel1d is not None:
-            _save_1d_fits(output_dir / "power1d_rel.fits", k, rel1d)
+            rel1d_clip = np.clip(rel1d, 1.0, 100.0)
+            _save_1d_fits(output_dir / "power1d_rel.fits", k, rel1d_clip)
         if rel2d is not None:
-            rel2d_clip = np.clip(rel2d, -500.0, 500.0)
+            rel2d_clip = np.clip(rel2d, 1.0, 100.0)
             _save_2d_fits(output_dir / "power2d_rel.fits", rel2d_clip)
-            _plot_2d(output_dir / "power2d_rel.png", kperp, kpar, rel2d_clip, "Relative % 2D Power (clipped)")
+            _plot_2d(
+                output_dir / "power2d_rel.png",
+                kperp,
+                kpar,
+                rel2d_clip,
+                "Relative % 2D Power (clipped, abs)",
+                cbar_label="log10 |rel| %",
+                log_scale=True,
+            )

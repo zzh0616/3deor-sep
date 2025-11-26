@@ -127,12 +127,16 @@ def polynomial_prior_loss(
     fg_moved = fg.movedim(freq_axis, 0)
     num_freqs = fg_moved.shape[0]
     if freqs is None:
-        freqs = torch.linspace(0.0, 1.0, num_freqs, device=fg.device, dtype=fg.dtype)
+        coords = torch.linspace(0.0, 1.0, num_freqs, device=fg.device, dtype=fg.dtype)
     else:
         if freqs.numel() != num_freqs:
             raise ValueError("Frequency array length does not match foreground frequency dimension.")
         freqs = freqs.to(device=fg.device, dtype=fg.dtype)
-    design = torch.stack([freqs**i for i in range(degree + 1)], dim=1)  # (F, degree+1)
+        f_min = freqs.min()
+        f_max = freqs.max()
+        scale = torch.clamp(f_max - f_min, min=1e-8)
+        coords = (freqs - f_min) / scale
+    design = torch.stack([coords**i for i in range(degree + 1)], dim=1)  # (F, degree+1)
     y_flat = fg_moved.reshape(num_freqs, -1)
     safe_dtype = torch.float32 if fg.dtype not in (torch.float32, torch.float64) else fg.dtype
     y_flat_cast = y_flat.to(dtype=safe_dtype)

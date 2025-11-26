@@ -3,18 +3,19 @@
   "fg_output": "outputs/example_fg.fits",
   "eor_output": "outputs/example_eor.fits",
   "optim": {
-    "num_iters": 500,
+    "num_iters": 1000,
     "lr": 0.001,
     "freq_axis": 0,
     "print_every": 50,
-    "device": "cuda",
+    "device": "cuda:2",
     "dtype": "float32",
     "loss_mode": "poly_reparam",
     "optimizer_name": "adam",
     "momentum": 0.9,
-    "freq_start_mhz": 150.0,
+    "freq_start_mhz": 106.0,
     "freq_delta_mhz": 0.1,
-    "power_config": "configs/power.json"
+    "power_config": "configs/power.json",
+    "power_output_dir": "powerspec"
   },
   "weights": {
     "alpha": 1.0,
@@ -39,11 +40,13 @@
     "fft_prior_mean": 0.0,
     "fft_prior_sigma": 1.0,
     "poly_degree": 3,
-    "poly_sigma": 0.1
+    "poly_sigma": 0.01
   },
   "evaluation": {
     "true_eor_cube": "eor_cube1.fits",
-    "corr_plot": "outputs/example_eor_corr.png"
+    "corr_plot": "outputs/example_eor_corr.png",
+    "enable_corr_check": true,
+    "corr_check_every": 500
   },
   "init": {
     "init_fg_cube": "",

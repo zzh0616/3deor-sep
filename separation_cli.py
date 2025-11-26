@@ -171,6 +171,7 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
     parser.add_argument(
         "--enable-corr-check",
         action="store_true",
+        default=None,
         help=(
             "Enable periodic correlation checks between the recovered EoR and the reference EoR "
             "(requires --true-eor-cube or 'true_eor_cube' in the config)."
@@ -325,4 +326,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

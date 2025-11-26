@@ -226,7 +226,11 @@ def _fit_polynomial_coeffs(
         if freqs.numel() != num_freqs:
             raise ValueError("Frequency array length does not match cube frequency dimension.")
         freqs = freqs.to(device=y.device, dtype=y.dtype)
-        design = torch.stack([freqs**i for i in range(degree + 1)], dim=1)
+        f_min = freqs.min()
+        f_max = freqs.max()
+        scale = torch.clamp(f_max - f_min, min=1e-8)
+        coords = (freqs - f_min) / scale
+        design = torch.stack([coords**i for i in range(degree + 1)], dim=1)
     y_flat = y_front.reshape(num_freqs, -1)
     safe_dtype = torch.float32 if y.dtype not in (torch.float32, torch.float64) else y.dtype
     y_flat_cast = y_flat.to(dtype=safe_dtype)
@@ -239,9 +243,33 @@ def _fit_polynomial_coeffs(
     return coeffs, fitted
 
 
-def _eval_polynomial_from_coeffs(coeffs: Tensor, freq_axis: int, target_shape: Sequence[int]) -> Tensor:
+def _eval_polynomial_from_coeffs(
+    coeffs: Tensor,
+    freq_axis: int,
+    target_shape: Sequence[int],
+    freqs: Optional[Tensor] = None,
+) -> Tensor:
+    """
+    Evaluate a polynomial foreground model from coefficients.
+
+    If `freqs` is provided, it is interpreted as the physical frequency grid
+    (1D tensor of length F) and used to build the design matrix; otherwise a
+    normalized [0, 1] grid is used.
+    """
     num_freqs = target_shape[freq_axis]
-    design = _polynomial_design(num_freqs, coeffs.shape[0] - 1, device=coeffs.device, dtype=coeffs.dtype)
+    if freqs is None:
+        design = _polynomial_design(
+            num_freqs, coeffs.shape[0] - 1, device=coeffs.device, dtype=coeffs.dtype
+        )
+    else:
+        if freqs.numel() != num_freqs:
+            raise ValueError("Frequency array length does not match cube frequency dimension.")
+        freqs = freqs.to(device=coeffs.device, dtype=coeffs.dtype)
+        f_min = freqs.min()
+        f_max = freqs.max()
+        scale = torch.clamp(f_max - f_min, min=1e-8)
+        coords = (freqs - f_min) / scale
+        design = torch.stack([coords**i for i in range(coeffs.shape[0])], dim=1)
     poly = torch.tensordot(design, coeffs, dims=([1], [0]))  # (F, spatial...)
     poly = poly.movedim(0, freq_axis)
     return poly
@@ -462,7 +490,9 @@ def optimize_components(
         optimizer.zero_grad()
         if loss_mode == "poly_reparam":
             assert poly_coeffs_param is not None and fg_resid_param is not None
-            poly_component = _eval_polynomial_from_coeffs(poly_coeffs_param, freq_axis, y_tensor.shape)
+            poly_component = _eval_polynomial_from_coeffs(
+                poly_coeffs_param, freq_axis, y_tensor.shape, freqs=freqs_tensor
+            )
             fg_current = poly_component + fg_resid_param
             poly_residual = fg_resid_param
         else:
@@ -534,7 +564,9 @@ def optimize_components(
 
     if loss_mode == "poly_reparam":
         assert poly_coeffs_param is not None and fg_resid_param is not None
-        fg_final = _eval_polynomial_from_coeffs(poly_coeffs_param, freq_axis, y_tensor.shape) + fg_resid_param
+        fg_final = _eval_polynomial_from_coeffs(
+            poly_coeffs_param, freq_axis, y_tensor.shape, freqs=freqs_tensor
+        ) + fg_resid_param
     else:
         fg_final = fg_param
 
@@ -797,7 +829,8 @@ def _optimize_from_fits(
             f"Finished optimization: total={final.total:.4e}, "
             f"data={final.data:.4e}, smooth={final.smooth:.4e}, "
             f"eor={final.eor_reg:.4e}, corr={final.corr:.4e}, "
-            f"corr_coeff={final.corr_coeff:.3f}"
+            f"corr_coeff={final.corr_coeff:.3f}, "
+            f"fft={final.fft_highfreq:.4e}, poly={final.poly:.4e}"
         )
     print(f"Saved foreground estimate to {fg_output}")
     print(f"Saved EoR estimate to {eor_output}")

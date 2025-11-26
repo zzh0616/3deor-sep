@@ -1,11 +1,11 @@
 {
-  "dx": 1.0,
-  "dy": 1.0,
-  "df": 1.0,
-  "unit_x": "mpc",
-  "unit_y": "mpc",
+  "dx": 16.0,
+  "dy": 16.0,
+  "df": 0.1,
+  "unit_x": "arcsec",
+  "unit_y": "arcsec",
   "unit_f": "mhz",
-  "ref_freq_mhz": 150.0,
+  "ref_freq_mhz": 113.5,
   "rest_freq_mhz": 1420.40575,
   "H0": 70.0,
   "Om0": 0.3,
@@ -14,5 +14,6 @@
   "nbins_1d": 30,
   "nbins_kperp": 30,
   "nbins_kpar": 30,
-  "output_dir": "powerspec"
+  "output_dir": "powerspec",
+  "stat_mode": "median"
 }
