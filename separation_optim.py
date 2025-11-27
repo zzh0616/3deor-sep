@@ -867,11 +867,29 @@ def _optimize_from_fits(
             else:
                 output_dir = eor_output.with_name(f"{eor_output.stem}_powerspec")
             print(f"Computing power spectra to {output_dir} ...")
-            rec_power = compute_power_spectra(eor_est.detach().cpu().numpy(), power_cfg)
+            # Keep FFT on the training device when possible by passing
+            # the tensor directly to compute_power_spectra.
+            rec_power = compute_power_spectra(eor_est.detach(), power_cfg)
             true_power = None
             if config.true_eor_cube:
-                true_power = compute_power_spectra(eor_true.detach().cpu().numpy(), power_cfg)
-            save_power_outputs(Path(output_dir), rec_power, true_power)
+                # For the true EoR cube, move to the same device as the
+                # optimizer (if desired) to reuse the GPU FFT path.
+                if device.type == "cuda":
+                    eor_true_eval = eor_true.to(device)
+                else:
+                    eor_true_eval = eor_true
+                true_power = compute_power_spectra(eor_true_eval, power_cfg)
+            # Use PowerSpecConfig.log_power_2d to control whether 2D power
+            # spectra are plotted in log10 or linear scale, and
+            # PowerSpecConfig.log_bins_2d to decide whether to use
+            # logarithmic axes for k_perp / k_par.
+            save_power_outputs(
+                Path(output_dir),
+                rec_power,
+                true_power,
+                log_power_2d=power_cfg.log_power_2d,
+                log_axes_2d=power_cfg.log_bins_2d,
+            )
 
 
 def run_synthetic_demo(config: OptimizationConfig) -> None:

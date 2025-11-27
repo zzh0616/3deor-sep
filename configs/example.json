@@ -3,8 +3,8 @@
   "fg_output": "outputs/example_fg.fits",
   "eor_output": "outputs/example_eor.fits",
   "optim": {
-    "num_iters": 1000,
-    "lr": 0.001,
+    "num_iters": 100,
+    "lr": 0.0008,
     "freq_axis": 0,
     "print_every": 50,
     "device": "cuda:2",

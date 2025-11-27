@@ -12,8 +12,10 @@
   "Ode0": 0.7,
   "freq_axis": 0,
   "nbins_1d": 30,
-  "nbins_kperp": 30,
-  "nbins_kpar": 30,
+  "nbins_kperp": 12,
+  "nbins_kpar": 12,
   "output_dir": "powerspec",
-  "stat_mode": "median"
+  "stat_mode": "median",
+  "log_bins_2d": true,
+  "log_power_2d": true
 }

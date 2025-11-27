@@ -16,6 +16,14 @@ from astropy.cosmology import FlatLambdaCDM
 from astropy.io import fits
 from constants import EPS_LOSS, EPS_STD
 
+try:  # optional torch dependency for GPU FFT
+    import torch  # type: ignore
+
+    _HAS_TORCH = True
+except ImportError:  # pragma: no cover - torch not available
+    torch = None  # type: ignore
+    _HAS_TORCH = False
+
 
 @dataclass
 class PowerSpecConfig:
@@ -37,6 +45,8 @@ class PowerSpecConfig:
     nbins_kpar: int = 30
     output_dir: str = "powerspec"
     stat_mode: str = "median"  # "median" (default, robust) or "mean"
+    log_bins_2d: bool = True  # use log-spaced k_perp/k_par bins for 2D spectra
+    log_power_2d: bool = True  # plot 2D power spectra in log10 scale
 
 def _cosmo_from_cfg(cfg: PowerSpecConfig) -> FlatLambdaCDM:
     """
@@ -213,35 +223,66 @@ def compute_power_spectra(
     sphere (i.e., where all three dimensions have support) are used when
     forming averages. For the 2D spectrum, the full line-of-sight range
     is retained while transverse modes are restricted to the inscribed
-    circle in (kx, ky).
+    circle in (kx, ky). By default, 2D k-bins are logarithmically spaced
+    in both k_perp and k_par.
     """
-    if hasattr(cube, "detach"):
-        cube = cube.detach().cpu().numpy()
-    if not isinstance(cube, np.ndarray):
-        cube = np.asarray(cube)
-    cube_reorder = np.moveaxis(cube, config.freq_axis, 0)
-    nf, nx, ny = cube_reorder.shape
-    cube_demean = cube_reorder - cube_reorder.mean()
+    use_torch = _HAS_TORCH and isinstance(cube, torch.Tensor)  # type: ignore[name-defined]
 
-    if window:
-        win_f = np.hanning(nf) if window == "hann" else np.ones(nf)
-        win_x = np.hanning(nx) if window == "hann" else np.ones(nx)
-        win_y = np.hanning(ny) if window == "hann" else np.ones(ny)
-        win3d = win_f[:, None, None] * win_x[None, :, None] * win_y[None, None, :]
-        cube_demean = cube_demean * win3d
-        norm = np.mean(win3d**2)
+    if use_torch:
+        # Torch/GPU path: keep FFT on the tensor device, then move power to CPU.
+        tensor = cube  # type: ignore[assignment]
+        cube_reorder_t = tensor.movedim(config.freq_axis, 0)
+        nf, nx, ny = cube_reorder_t.shape
+        cube_demean_t = cube_reorder_t - cube_reorder_t.mean()
+
+        if window:
+            win_f = torch.hann_window(nf, periodic=True, device=tensor.device, dtype=tensor.dtype)
+            win_x = torch.hann_window(nx, periodic=True, device=tensor.device, dtype=tensor.dtype)
+            win_y = torch.hann_window(ny, periodic=True, device=tensor.device, dtype=tensor.dtype)
+            win3d = win_f[:, None, None] * win_x[None, :, None] * win_y[None, None, :]
+            cube_demean_t = cube_demean_t * win3d
+            norm = float((win3d**2).mean().item())
+        else:
+            norm = 1.0
+
+        df_mpc = _frequency_spacing_to_mpc(config, nf)
+        dx_mpc = _resolve_spatial_spacing(config.dx, config.unit_x, config)
+        dy_mpc = _resolve_spatial_spacing(config.dy, config.unit_y, config)
+        v_cell = df_mpc * dx_mpc * dy_mpc
+        n_vox = float(nf * nx * ny)
+
+        Fk_t = torch.fft.fftn(cube_demean_t)
+        power = (v_cell / (norm * n_vox)) * (Fk_t.abs() ** 2)
+        power = power.detach().cpu().numpy()
+        cube_reorder = cube_reorder_t.detach().cpu().numpy()
     else:
-        norm = 1.0
-    df_mpc = _frequency_spacing_to_mpc(config, nf)
-    dx_mpc = _resolve_spatial_spacing(config.dx, config.unit_x, config)
-    dy_mpc = _resolve_spatial_spacing(config.dy, config.unit_y, config)
-    v_cell = df_mpc * dx_mpc * dy_mpc
-    n_vox = float(nf * nx * ny)
-    Fk = np.fft.fftn(cube_demean)
-    # Continuous-limit-inspired normalization:
-    #   P(k) ≈ V_cell * |F(k)|^2 / N_vox,
-    # where F(k) is approximated by the discrete FFT and V_cell is the voxel volume.
-    power = (v_cell / (norm * n_vox)) * (np.abs(Fk) ** 2)
+        # NumPy/CPU path.
+        if hasattr(cube, "detach"):
+            cube = cube.detach().cpu().numpy()  # type: ignore[assignment]
+        if not isinstance(cube, np.ndarray):
+            cube = np.asarray(cube)
+        cube_reorder = np.moveaxis(cube, config.freq_axis, 0)
+        nf, nx, ny = cube_reorder.shape
+        cube_demean = cube_reorder - cube_reorder.mean()
+
+        if window:
+            win_f = np.hanning(nf) if window == "hann" else np.ones(nf)
+            win_x = np.hanning(nx) if window == "hann" else np.ones(nx)
+            win_y = np.hanning(ny) if window == "hann" else np.ones(ny)
+            win3d = win_f[:, None, None] * win_x[None, :, None] * win_y[None, None, :]
+            cube_demean = cube_demean * win3d
+            norm = np.mean(win3d**2)
+        else:
+            norm = 1.0
+
+        df_mpc = _frequency_spacing_to_mpc(config, nf)
+        dx_mpc = _resolve_spatial_spacing(config.dx, config.unit_x, config)
+        dy_mpc = _resolve_spatial_spacing(config.dy, config.unit_y, config)
+        v_cell = df_mpc * dx_mpc * dy_mpc
+        n_vox = float(nf * nx * ny)
+
+        Fk = np.fft.fftn(cube_demean)
+        power = (v_cell / (norm * n_vox)) * (np.abs(Fk) ** 2)
     power = _apply_uv_mask(power, config)
     kf, kx, ky = _compute_k_axes((nf, nx, ny), df_mpc, dx_mpc, dy_mpc)
     kf_grid, kx_grid, ky_grid = np.meshgrid(kf, kx, ky, indexing="ij")
@@ -287,22 +328,34 @@ def compute_power_spectra(
     kperp_flat = kperp[circle_mask].reshape(-1)
     kpar_flat = np.abs(kf_grid[circle_mask]).reshape(-1)
 
-    # Use logarithmically spaced bins for 2D plots (k_perp, k_par).
-    # Exclude exact zeros when defining log-space bin edges.
-    valid_kperp = kperp_flat[kperp_flat > 0]
-    valid_kpar = kpar_flat[kpar_flat > 0]
-    if valid_kperp.size == 0 or valid_kpar.size == 0:
-        raise ValueError("No positive k_perp or k_par values available for 2D binning.")
-    kperp_min = float(valid_kperp.min())
-    kperp_max = float(valid_kperp.max())
-    kpar_min = float(valid_kpar.min())
-    kpar_max = float(valid_kpar.max())
-
-    kperp_bins = np.logspace(math.log10(kperp_min), math.log10(kperp_max), config.nbins_kperp + 1)
-    kpar_bins = np.logspace(math.log10(kpar_min), math.log10(kpar_max), config.nbins_kpar + 1)
+    # Define 2D k-bins: log or linear spacing.
+    if config.log_bins_2d:
+        valid_kperp = kperp_flat[kperp_flat > 0]
+        valid_kpar = kpar_flat[kpar_flat > 0]
+        if valid_kperp.size == 0 or valid_kpar.size == 0:
+            raise ValueError("No positive k_perp or k_par values available for 2D binning.")
+        kperp_min = float(valid_kperp.min())
+        kperp_max = float(valid_kperp.max())
+        kpar_min = float(valid_kpar.min())
+        kpar_max = float(valid_kpar.max())
+        kperp_bins = np.logspace(
+            math.log10(kperp_min), math.log10(kperp_max), config.nbins_kperp + 1
+        )
+        kpar_bins = np.logspace(
+            math.log10(kpar_min), math.log10(kpar_max), config.nbins_kpar + 1
+        )
+    else:
+        kperp_bins = np.linspace(0.0, kmax_perp_circle, config.nbins_kperp + 1)
+        kpar_bins = np.linspace(0.0, float(np.max(kpar_flat)), config.nbins_kpar + 1)
 
     bin_kperp = np.digitize(kperp_flat, kperp_bins) - 1
     bin_kpar = np.digitize(kpar_flat, kpar_bins) - 1
+    # Ensure k_perp = 0 and k_par = 0 modes are included in the first bin
+    # when using logarithmic k-bins. This prevents entire first rows/columns
+    # from being empty purely due to the placement of the log-spaced edges.
+    if config.log_bins_2d:
+        bin_kperp[kperp_flat == 0.0] = 0
+        bin_kpar[kpar_flat == 0.0] = 0
 
     p2d = np.zeros((config.nbins_kperp, config.nbins_kpar), dtype=float)
     for ix in range(config.nbins_kperp):
@@ -377,6 +430,7 @@ def _plot_2d(
     title: str,
     cbar_label: str,
     log_scale: bool = False,
+    log_axes: bool = False,
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -384,8 +438,19 @@ def _plot_2d(
     fig, ax = plt.subplots(figsize=(6, 5))
     data = np.array(p2d, copy=True)
     if log_scale:
+        # Map non-positive or empty bins to a small floor value so that
+        # they appear as the darkest color rather than blank. This avoids
+        # large NaN regions in the plot while preserving the dynamic range
+        # of bins with actual measurements.
         with np.errstate(divide="ignore", invalid="ignore"):
-            data = np.where(data > 0, np.log10(data), np.nan)
+            positive = data[data > 0]
+            if positive.size > 0:
+                min_pos = float(np.nanmin(positive))
+                floor = min_pos / 10.0
+                safe = np.where(data > 0, data, floor)
+                data = np.log10(safe)
+            else:  # no positive values; fall back to zeros
+                data = np.zeros_like(data)
     finite_vals = data[np.isfinite(data)]
     vmax = np.nanmax(finite_vals) if finite_vals.size > 0 else None
     vmin = np.nanmin(finite_vals) if finite_vals.size > 0 else None
@@ -397,6 +462,9 @@ def _plot_2d(
         vmin=vmin,
         vmax=vmax if vmax is not None and np.isfinite(vmax) else None,
     )
+    if log_axes:
+        ax.set_xscale("log")
+        ax.set_yscale("log")
     ax.set_xlabel("k_perp [1/Mpc]")
     ax.set_ylabel("k_par [1/Mpc]")
     ax.set_title(title)
@@ -410,6 +478,8 @@ def save_power_outputs(
     output_dir: Path,
     rec: Dict[str, np.ndarray],
     true: Optional[Dict[str, np.ndarray]] = None,
+    log_power_2d: bool = True,
+    log_axes_2d: bool = False,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     k = rec["k_centers"]
@@ -445,8 +515,9 @@ def save_power_outputs(
         kpar,
         p2d_rec,
         "Recovered 2D Power",
-        cbar_label="log10 P(k)",
-        log_scale=True,
+        cbar_label="log10 P(k)" if log_power_2d else "P(k)",
+        log_scale=log_power_2d,
+        log_axes=log_axes_2d,
     )
 
     if true is not None:
@@ -458,8 +529,9 @@ def save_power_outputs(
             kpar,
             true_p2d,
             "True 2D Power",
-            cbar_label="log10 P(k)",
-            log_scale=True,
+            cbar_label="log10 P(k)" if log_power_2d else "P(k)",
+            log_scale=log_power_2d,
+            log_axes=log_axes_2d,
         )
         if rel1d is not None:
             rel1d_clip = np.clip(rel1d, 1.0, 100.0)
@@ -475,4 +547,5 @@ def save_power_outputs(
                 "Relative % 2D Power (clipped, abs)",
                 cbar_label="log10 |rel| %",
                 log_scale=True,
+                log_axes=log_axes_2d,
             )

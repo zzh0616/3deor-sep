@@ -22,7 +22,8 @@ The prototype is written in PyTorch and is designed to be modular so that loss t
 
 ## Repository Layout
 
-- `separation_optim.py`: Main entry point. Handles CLI, configuration, optimization loop, and synthetic demo.
+- `separation_optim.py`: Core optimization module. Implements the optimizer loop, loss wiring, FITS I/O helpers, and the synthetic demo.
+- `separation_cli.py`: Command-line entry point. Parses arguments, loads JSON configs, and calls the optimizer.
 - `losses.py`: All forward-model and loss/regularization logic (data term, smoothness, EoR prior, correlation prior, rFFT, polynomial priors).
 - `powerspec.py`: 1D/2D power-spectrum utilities (physical k-axes, FITS/PNG outputs).
 - `utils.py`: Shared helpers (tensor/device management, broadcasted priors, numeric clamps).
@@ -41,11 +42,11 @@ The prototype is written in PyTorch and is designed to be modular so that loss t
 3. Run:
 
    ```bash
-   python separation_optim.py --config configs/example.json
+   python separation_cli.py --config configs/example.json
    ```
 
 4. Inspect:
    - Optimization logs (per-iteration loss terms)
+   - Optional per-interval EoR correlation checks (if a true EoR cube and `enable_corr_check` are configured)
    - Recovered foreground/EoR cubes (FITS)
-   - Power spectra (1D/2D FITS and PNG)
-
+   - Power spectra (1D/2D FITS and PNG; 2D k-bins and log/linear plotting are controlled via `configs/power.json`)

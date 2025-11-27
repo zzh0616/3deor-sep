@@ -24,7 +24,9 @@ Example (`configs/power.json`):
   "nbins_kperp": 30,
   "nbins_kpar": 30,
   "output_dir": "powerspec",
-  "stat_mode": "median"
+  "stat_mode": "median",
+  "log_bins_2d": true,
+  "log_power_2d": true
 }
 ```
 
@@ -78,6 +80,8 @@ When `unit_f` is `"redshift"`/`"z"`, the code:
 - `stat_mode` (`str`): How to average within each k-bin:
   - `"median"` (default): Robust median over all modes in the bin (recommended for noisy or non-Gaussian fields).
   - `"mean"`: Simple arithmetic mean (useful for idealized simulations).
+- `log_bins_2d` (`bool`): If `true` (default), use logarithmically spaced k_perp/k_par bins for the 2D spectrum; if `false`, use linear spacing.
+- `log_power_2d` (`bool`): If `true` (default), plot 2D power spectra in log10 scale; if `false`, plot linear P(k).
 
 ### Outputs
 
@@ -93,6 +97,10 @@ For a given cube and power config, `powerspec.py` produces:
 All power spectra are windowed (Hann) and normalized by the window energy and physical volume.
 
 Internally, only Fourier modes inside the inscribed k-space sphere (where all three spatial
-dimensions have support) are used when forming 1D and 2D averages. A placeholder hook for a
-future uv/PSF/visibility mask is present in the implementation and can be activated when the
-pipeline is extended to interferometric data.
+dimensions have support) are used when forming the 1D spectrum. For the 2D spectrum, the full
+line-of-sight range is retained while transverse modes are restricted to the inscribed circle in
+(kx, ky). A placeholder hook for a future uv/PSF/visibility mask is present in the implementation
+and can be activated when the
+pipeline is extended to interferometric data. When `compute_power_spectra` is given a CUDA tensor
+as input (e.g., from the training pipeline), the 3D FFT is evaluated on the GPU via `torch.fft`
+before results are moved back to CPU/NumPy for binning and plotting.
