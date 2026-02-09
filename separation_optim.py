@@ -581,10 +581,15 @@ def optimize_components(
         params.extend([fg_resid_param, poly_coeffs_param])
     else:
         params.append(fg_param)
-    if optimizer_name.lower() == "sgd":
+    optimizer_name_norm = str(optimizer_name).strip().lower()
+    if optimizer_name_norm == "sgd":
         optimizer = torch.optim.SGD(params, lr=lr, momentum=momentum)
-    else:
+    elif optimizer_name_norm == "adam":
         optimizer = torch.optim.Adam(params, lr=lr)
+    else:
+        raise ValueError(
+            f"Unsupported optimizer_name '{optimizer_name}'. Supported values are 'adam' and 'sgd'."
+        )
     history: List[LossComponents] = []
 
     for it in range(1, num_iters + 1):

@@ -236,9 +236,10 @@ def compute_power_spectra(
         cube_demean_t = cube_reorder_t - cube_reorder_t.mean()
 
         if window:
-            win_f = torch.hann_window(nf, periodic=True, device=tensor.device, dtype=tensor.dtype)
-            win_x = torch.hann_window(nx, periodic=True, device=tensor.device, dtype=tensor.dtype)
-            win_y = torch.hann_window(ny, periodic=True, device=tensor.device, dtype=tensor.dtype)
+            # Use non-periodic Hann windows to match np.hanning in the CPU path.
+            win_f = torch.hann_window(nf, periodic=False, device=tensor.device, dtype=tensor.dtype)
+            win_x = torch.hann_window(nx, periodic=False, device=tensor.device, dtype=tensor.dtype)
+            win_y = torch.hann_window(ny, periodic=False, device=tensor.device, dtype=tensor.dtype)
             win3d = win_f[:, None, None] * win_x[None, :, None] * win_y[None, None, :]
             cube_demean_t = cube_demean_t * win3d
             norm = float((win3d**2).mean().item())

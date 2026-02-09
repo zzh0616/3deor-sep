@@ -92,7 +92,7 @@ For a given cube and power config, `powerspec.py` produces:
   - `power1d.png`
 - 2D:
   - `power2d_rec.fits` / `power2d_true.fits` / `power2d_rel.fits`
-  - `power2d.png` / `power2d_rel.png` (relative plot is clipped to ±500%).
+  - `power2d.png` / `power2d_rel.png` (relative plot uses absolute relative error clipped to 1%-100% for log display).
 
 All power spectra are windowed (Hann) and normalized by the window energy and physical volume.
 

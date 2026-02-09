@@ -174,8 +174,12 @@ def compute_highfreq_energy(
     num_bins = rfft.shape[freq_axis]
     if num_bins == 0:
         return torch.zeros_like(tensor.sum(dim=freq_axis))
+    if percent == 0.0:
+        return torch.zeros_like(tensor.sum(dim=freq_axis))
     # percent means the fraction of highest-frequency bins to penalize.
-    num_high = max(1, int(math.ceil(percent * num_bins)))
+    num_high = int(math.ceil(percent * num_bins))
+    if num_high <= 0:
+        return torch.zeros_like(tensor.sum(dim=freq_axis))
     start_idx = max(num_bins - num_high, 0)
     freq_slice = [slice(None)] * rfft.ndim
     freq_slice[freq_axis] = slice(start_idx, None)
