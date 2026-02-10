@@ -159,6 +159,19 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         help="Maximum number of frequency-slice pairs used per lag (lagcorr mode).",
     )
     parser.add_argument(
+        "--lagcorr-pair-sampling",
+        dest="lagcorr_pair_sampling",
+        choices=["head", "random"],
+        type=str,
+        help="Pair sampling strategy when lagcorr_max_pairs limits pairs (default head).",
+    )
+    parser.add_argument(
+        "--lagcorr-random-seed",
+        dest="lagcorr_random_seed",
+        type=int,
+        help="Optional random seed used when lagcorr_pair_sampling=random.",
+    )
+    parser.add_argument(
         "--fft-weight",
         dest="fft_weight",
         type=float,
@@ -190,6 +203,19 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         dest="fft_prior_sigma",
         type=float,
         help="Scalar prior std for high-frequency energy (default 1.0).",
+    )
+    parser.add_argument(
+        "--fft-use-log-energy",
+        dest="fft_use_log_energy",
+        action="store_true",
+        default=None,
+        help="Apply log1p transform to high-frequency energy before rFFT prior matching.",
+    )
+    parser.add_argument(
+        "--fft-z-clip",
+        dest="fft_z_clip",
+        type=float,
+        help="Optional absolute z-score clip for rFFT residuals (robust against outliers).",
     )
     parser.add_argument(
         "--optimizer",
@@ -325,8 +351,12 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "corr_weight",
         "lagcorr_weight",
         "lagcorr_unit",
+        "lagcorr_pair_sampling",
+        "lagcorr_random_seed",
         "lagcorr_max_pairs",
         "fft_highfreq_percent",
+        "fft_use_log_energy",
+        "fft_z_clip",
         "fft_prior_mean",
         "fft_prior_sigma",
         "poly_weight",

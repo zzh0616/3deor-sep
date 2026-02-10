@@ -28,6 +28,10 @@ Key CLI arguments:
 - `--lagcorr-weight`: Weight for the frequency-lag autocorrelation prior (lagcorr mode).
 - `--lagcorr-unit`: Units for `lagcorr_intervals` (`mhz` requires `--freq-delta-mhz`; `chan` requires integer intervals, lagcorr mode).
 - `--lagcorr-max-pairs`: Cap the number of pairs evaluated per lag (lagcorr mode).
+- `--lagcorr-pair-sampling`: Pair sampling strategy when `--lagcorr-max-pairs` is set (`head` or `random`).
+- `--lagcorr-random-seed`: Optional seed for reproducible random lag-pair sampling.
+- `--fft-use-log-energy`: Apply `log1p` to rFFT high-frequency energy before prior matching.
+- `--fft-z-clip`: Clip rFFT residual z-scores before squaring (robust against extreme outliers).
 - `--true-eor-cube`: Reference EoR FITS cube (evaluation only, not used in training).
 - `--diagnose-input`: Compute FG↔FG and EoR↔EoR frequency-lag correlations for the true cubes over lags `1..floor((F-1)/2)` and write a summary + CSV + plot, plus a loss breakdown and FG smoothness stats (requires `fg_reference_cube` and `true_eor_cube`), then exit. (`--report-true-signal-corr` is a deprecated alias.)
 - `--corr-plot`: Path for saving EoR correlation plot.

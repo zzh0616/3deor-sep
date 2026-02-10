@@ -153,6 +153,8 @@ class OptimizationConfig:
     corr_weight: float = 1.0
     lagcorr_weight: float = 1.0
     lagcorr_unit: str = "mhz"
+    lagcorr_pair_sampling: str = "head"
+    lagcorr_random_seed: Optional[int] = None
     lagcorr_intervals: List[float] = field(
         default_factory=lambda: [0.1, 0.2, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 7.5]
     )
@@ -162,6 +164,8 @@ class OptimizationConfig:
     eor_lagcorr_sigma: List[float] = field(default_factory=lambda: [1.0] * 9)
     lagcorr_max_pairs: Optional[int] = None
     fft_highfreq_percent: float = 0.7
+    fft_use_log_energy: bool = False
+    fft_z_clip: Optional[float] = None
     fft_prior_mean: float = 0.0
     fft_prior_sigma: float = DEFAULT_FFT_SIGMA
     enable_corr_check: bool = False
@@ -356,6 +360,8 @@ def optimize_components(
     corr_weight: float = 1.0,
     lagcorr_weight: float = 1.0,
     lagcorr_unit: str = "mhz",
+    lagcorr_pair_sampling: str = "head",
+    lagcorr_random_seed: Optional[int] = None,
     lagcorr_intervals: Optional[Sequence[float]] = None,
     fg_lagcorr_mean: Optional[Sequence[float]] = None,
     fg_lagcorr_sigma: Optional[Sequence[float]] = None,
@@ -372,6 +378,8 @@ def optimize_components(
     fft_prior_mean: Optional[Union[Tensor, float]] = None,
     fft_prior_sigma: Optional[Union[Tensor, float]] = None,
     fft_highfreq_percent: float = 0.7,
+    fft_use_log_energy: bool = False,
+    fft_z_clip: Optional[float] = None,
     freq_start_mhz: Optional[float] = None,
     freq_delta_mhz: Optional[float] = None,
     optimizer_name: str = "adam",
@@ -462,6 +470,10 @@ def optimize_components(
     fg_lagcorr_sigma_tensor: Optional[Tensor] = None
     eor_lagcorr_mean_tensor: Optional[Tensor] = None
     eor_lagcorr_sigma_tensor: Optional[Tensor] = None
+    lagcorr_pair_sampling_norm = str(lagcorr_pair_sampling).strip().lower()
+    if lagcorr_pair_sampling_norm not in {"head", "random"}:
+        raise ValueError("lagcorr_pair_sampling must be 'head' or 'random'.")
+    lagcorr_rng: Optional[torch.Generator] = None
     if loss_mode == "lagcorr":
         unit_norm = lagcorr_unit.strip().lower()
         if unit_norm not in {"mhz", "chan"}:
@@ -516,9 +528,17 @@ def optimize_components(
 
         if lagcorr_max_pairs is not None and lagcorr_max_pairs <= 0:
             raise ValueError("lagcorr_max_pairs must be a positive int or None.")
+        if lagcorr_pair_sampling_norm == "random":
+            lagcorr_rng = torch.Generator(device="cpu")
+            if lagcorr_random_seed is not None:
+                lagcorr_rng.manual_seed(int(lagcorr_random_seed))
 
     fft_mean_tensor = ensure_tensor_on(fft_prior_mean, y_tensor.device, y_tensor.dtype)
     fft_sigma_tensor = ensure_tensor_on(fft_prior_sigma, y_tensor.device, y_tensor.dtype)
+    if fft_z_clip is not None:
+        clip_val = float(fft_z_clip)
+        if not math.isfinite(clip_val) or clip_val <= 0:
+            raise ValueError("fft_z_clip must be a finite positive value when provided.")
     poly_sigma_tensor = ensure_tensor_on(poly_sigma, y_tensor.device, y_tensor.dtype)
 
     freqs_tensor: Optional[Tensor] = None
@@ -639,9 +659,13 @@ def optimize_components(
             eor_lagcorr_mean=eor_lagcorr_mean_tensor,
             eor_lagcorr_sigma=eor_lagcorr_sigma_tensor,
             lagcorr_max_pairs=lagcorr_max_pairs,
+            lagcorr_pair_sampling=lagcorr_pair_sampling_norm,
+            lagcorr_rng=lagcorr_rng,
             fft_prior_mean=fft_mean_tensor,
             fft_prior_sigma=fft_sigma_tensor,
             fft_percent=fft_highfreq_percent,
+            fft_use_log_energy=fft_use_log_energy,
+            fft_z_clip=fft_z_clip,
             poly_degree=poly_degree,
             poly_sigma=poly_sigma_tensor,
             poly_residual=poly_residual,
@@ -1459,10 +1483,18 @@ def write_input_diagnostics_report(
             energy_map = compute_highfreq_energy(
                 fg_true, freq_axis=config.freq_axis, percent=float(config.fft_highfreq_percent)
             )
+            if config.fft_use_log_energy:
+                energy_map = torch.log1p(torch.clamp(energy_map, min=0.0))
             prior_mean_t = torch.as_tensor(float(config.fft_prior_mean), device=device, dtype=diag_dtype)
             prior_sigma_t = torch.as_tensor(float(config.fft_prior_sigma), device=device, dtype=diag_dtype)
             prior_sigma_t = torch.clamp(prior_sigma_t, min=1e-8)
-            fft_loss_val = float(torch.mean(((energy_map - prior_mean_t) / prior_sigma_t) ** 2).item())
+            fft_z = (energy_map - prior_mean_t) / prior_sigma_t
+            if config.fft_z_clip is not None:
+                clip = float(config.fft_z_clip)
+                if not math.isfinite(clip) or clip <= 0:
+                    raise ValueError("fft_z_clip must be a finite positive value when provided.")
+                fft_z = torch.clamp(fft_z, min=-clip, max=clip)
+            fft_loss_val = float(torch.mean(fft_z**2).item())
             fft_weighted_val = float(config.fft_weight) * fft_loss_val
         except Exception as exc:
             fft_error = str(exc)
@@ -1490,6 +1522,14 @@ def write_input_diagnostics_report(
         lagcorr_used_lags: Optional[int] = None
         lagcorr_total_lags: Optional[int] = None
         try:
+            pair_sampling = str(config.lagcorr_pair_sampling).strip().lower()
+            if pair_sampling not in {"head", "random"}:
+                raise ValueError("lagcorr_pair_sampling must be 'head' or 'random'.")
+            lag_rng: Optional[torch.Generator] = None
+            if pair_sampling == "random":
+                lag_rng = torch.Generator(device="cpu")
+                if config.lagcorr_random_seed is not None:
+                    lag_rng.manual_seed(int(config.lagcorr_random_seed))
             unit_norm = str(config.lagcorr_unit).strip().lower()
             if unit_norm not in {"mhz", "chan"}:
                 raise ValueError("lagcorr_unit must be 'mhz' or 'chan'.")
@@ -1559,6 +1599,8 @@ def write_input_diagnostics_report(
                 prior_mean=fg_mean_t,
                 prior_sigma=fg_sigma_t,
                 max_pairs=config.lagcorr_max_pairs,
+                pair_sampling=pair_sampling,
+                rng=lag_rng,
             )
             eor_lag_loss = _frequency_lag_correlation_loss(
                 eor_true,
@@ -1567,6 +1609,8 @@ def write_input_diagnostics_report(
                 prior_mean=eor_mean_t,
                 prior_sigma=eor_sigma_t,
                 max_pairs=config.lagcorr_max_pairs,
+                pair_sampling=pair_sampling,
+                rng=lag_rng,
             )
             lagcorr_loss_val = float((0.5 * (fg_lag_loss + eor_lag_loss)).item())
             lagcorr_weighted_val = float(config.lagcorr_weight) * lagcorr_loss_val
@@ -1836,6 +1880,15 @@ def write_input_diagnostics_report(
             "extra loss schedule (during optimization): "
             f"start_iter={config.extra_loss_start_iter}, ramp_iters={config.extra_loss_ramp_iters}\n\n"
         )
+        handle.write(
+            "lagcorr sampling: "
+            f"mode={config.lagcorr_pair_sampling}, max_pairs={config.lagcorr_max_pairs}, "
+            f"seed={config.lagcorr_random_seed}\n"
+        )
+        handle.write(
+            "rfft robust options: "
+            f"log_energy={config.fft_use_log_energy}, fft_z_clip={config.fft_z_clip}\n\n"
+        )
 
         handle.write("lagcorr distributions (configured intervals; pairs match lagcorr_max_pairs):\n")
         if lagcorr_rows_error:
@@ -2038,10 +2091,12 @@ def _optimize_from_fits(
                 freq_axis=config.freq_axis,
                 percent=config.fft_highfreq_percent,
                 use_robust=config.use_robust_fg_stats,
+                use_log_energy=config.fft_use_log_energy,
                 mae_to_sigma_factor=config.mae_to_sigma_factor,
             )
             print(
-                f"High-frequency energy stats (reference): mean={float(fft_mean_value.item()):.4e}, "
+                f"High-frequency energy stats (reference, log={config.fft_use_log_energy}): "
+                f"mean={float(fft_mean_value.item()):.4e}, "
                 f"sigma={float(fft_sigma_value.item()):.4e}"
             )
         else:
@@ -2103,6 +2158,8 @@ def _optimize_from_fits(
         corr_weight=config.corr_weight,
         lagcorr_weight=config.lagcorr_weight,
         lagcorr_unit=config.lagcorr_unit,
+        lagcorr_pair_sampling=config.lagcorr_pair_sampling,
+        lagcorr_random_seed=config.lagcorr_random_seed,
         lagcorr_intervals=config.lagcorr_intervals,
         fg_lagcorr_mean=config.fg_lagcorr_mean,
         fg_lagcorr_sigma=config.fg_lagcorr_sigma,
@@ -2119,6 +2176,8 @@ def _optimize_from_fits(
         fft_prior_mean=fft_mean_value,
         fft_prior_sigma=fft_sigma_value,
         fft_highfreq_percent=config.fft_highfreq_percent,
+        fft_use_log_energy=config.fft_use_log_energy,
+        fft_z_clip=config.fft_z_clip,
         optimizer_name=config.optimizer_name,
         momentum=config.momentum,
         freq_start_mhz=config.freq_start_mhz,
@@ -2251,6 +2310,8 @@ def run_synthetic_demo(config: OptimizationConfig) -> None:
         corr_weight=config.corr_weight,
         lagcorr_weight=config.lagcorr_weight,
         lagcorr_unit=config.lagcorr_unit,
+        lagcorr_pair_sampling=config.lagcorr_pair_sampling,
+        lagcorr_random_seed=config.lagcorr_random_seed,
         lagcorr_intervals=config.lagcorr_intervals,
         fg_lagcorr_mean=config.fg_lagcorr_mean,
         fg_lagcorr_sigma=config.fg_lagcorr_sigma,
@@ -2267,6 +2328,8 @@ def run_synthetic_demo(config: OptimizationConfig) -> None:
         fft_prior_mean=config.fft_prior_mean,
         fft_prior_sigma=config.fft_prior_sigma,
         fft_highfreq_percent=config.fft_highfreq_percent,
+        fft_use_log_energy=config.fft_use_log_energy,
+        fft_z_clip=config.fft_z_clip,
         optimizer_name=config.optimizer_name,
         momentum=config.momentum,
         freq_start_mhz=config.freq_start_mhz,

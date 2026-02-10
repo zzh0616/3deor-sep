@@ -67,6 +67,8 @@ All weights default to `1.0`. The code prints a warning if you deviate from 1.0.
 - `corr_prior_mean` (`float`): Correlation prior mean.
 - `corr_prior_sigma` (`float`): Correlation prior sigma.
 - `lagcorr_unit` (`str`): Units for `lagcorr_intervals`, one of `"mhz"` or `"chan"` (`"mhz"` requires `freq_delta_mhz`; `"chan"` requires integer intervals).
+- `lagcorr_pair_sampling` (`str`): Pair sampling strategy when `lagcorr_max_pairs` is set. One of `"head"` (first pairs) or `"random"` (uniform without replacement).
+- `lagcorr_random_seed` (`int`): Optional seed used when `lagcorr_pair_sampling="random"` for reproducible lag-pair sampling.
 - `lagcorr_intervals` (`list[float]`): Frequency-lag list (default `[0.1, 0.2, 0.5, 1, 1.5, 2, 3, 5, 7.5]` in MHz).
 - `fg_lagcorr_mean` (`list[float]`): Expected FG autocorrelation for each lag (same length as `lagcorr_intervals`).
 - `fg_lagcorr_sigma` (`list[float]`): Expected FG autocorrelation sigma for each lag (same length as `lagcorr_intervals`).
@@ -74,6 +76,8 @@ All weights default to `1.0`. The code prints a warning if you deviate from 1.0.
 - `eor_lagcorr_sigma` (`list[float]`): Expected EoR autocorrelation sigma for each lag (same length as `lagcorr_intervals`).
 - `lagcorr_max_pairs` (`int`): Optional cap on the number of slice pairs used per lag (default: use all available pairs).
 - `fft_highfreq_percent` (`float`): Fraction of highest-frequency bins to penalize in rFFT mode (0–1).
+- `fft_use_log_energy` (`bool`): If `true`, apply `log(1 + energy)` before rFFT prior matching to reduce dynamic-range dominance.
+- `fft_z_clip` (`float`): Optional absolute z-score clip for the rFFT residual before squaring (robust against extreme outliers).
 - `fft_prior_mean` (`float`): High-frequency energy prior mean.
 - `fft_prior_sigma` (`float`): High-frequency energy prior sigma.
 - `poly_degree` (`int`): Polynomial degree for polynomial priors.

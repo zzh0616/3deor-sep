@@ -79,6 +79,8 @@ def _frequency_lag_correlation_loss(
     prior_mean: Tensor,
     prior_sigma: Tensor,
     max_pairs: Optional[int] = None,
+    pair_sampling: str = "head",
+    rng: Optional[torch.Generator] = None,
     eps: float = 1e-8,
 ) -> Tensor:
     """
@@ -106,6 +108,9 @@ def _frequency_lag_correlation_loss(
             raise TypeError("max_pairs must be an int or None.")
         if max_pairs <= 0:
             max_pairs = None
+    pair_sampling_norm = str(pair_sampling).strip().lower()
+    if pair_sampling_norm not in {"head", "random"}:
+        raise ValueError("pair_sampling must be 'head' or 'random'.")
 
     mean_tensor = prior_mean if torch.is_tensor(prior_mean) else torch.as_tensor(prior_mean, device=cube.device)
     sigma_tensor = prior_sigma if torch.is_tensor(prior_sigma) else torch.as_tensor(prior_sigma, device=cube.device)
@@ -142,7 +147,12 @@ def _frequency_lag_correlation_loss(
         if num_pairs <= 0:
             continue
 
-        pair_idx = torch.arange(num_pairs, device=cube.device)
+        if max_pairs is None or num_pairs == num_total or pair_sampling_norm == "head":
+            pair_idx = torch.arange(num_pairs, device=cube.device)
+        else:
+            # Sample uniformly without replacement to avoid fixed early-frequency bias.
+            pair_idx = torch.randperm(num_total, device="cpu", generator=rng)[:num_pairs]
+            pair_idx = pair_idx.to(device=cube.device, dtype=torch.int64)
         pair_j = pair_idx + lag
 
         a = centered.index_select(0, pair_idx)
@@ -194,9 +204,12 @@ def derive_fft_prior_from_cube(
     freq_axis: int,
     percent: float,
     use_robust: bool = False,
+    use_log_energy: bool = False,
     mae_to_sigma_factor: float = 1.4826,
 ) -> Tuple[Tensor, Tensor]:
     energy_map = compute_highfreq_energy(fg_cube, freq_axis=freq_axis, percent=percent)
+    if use_log_energy:
+        energy_map = torch.log1p(torch.clamp(energy_map, min=0.0))
     if use_robust:
         median = energy_map.median().view(1)
         mae = (energy_map - median).abs().mean().view(1)
@@ -281,9 +294,13 @@ def loss_function(
     fft_prior_mean: Optional[Tensor] = None,
     fft_prior_sigma: Optional[Tensor] = None,
     fft_percent: float = 0.7,
+    fft_use_log_energy: bool = False,
+    fft_z_clip: Optional[float] = None,
     poly_degree: int = 3,
     poly_sigma: Optional[Union[Tensor, float]] = None,
     poly_residual: Optional[Tensor] = None,
+    lagcorr_pair_sampling: str = "head",
+    lagcorr_rng: Optional[torch.Generator] = None,
 ) -> Tuple[Tensor, Dict[str, Tensor]]:
     """
     Combined loss used for optimizing foreground and EoR components.
@@ -326,6 +343,8 @@ def loss_function(
             prior_mean=fg_lagcorr_mean,
             prior_sigma=fg_lagcorr_sigma,
             max_pairs=lagcorr_max_pairs,
+            pair_sampling=lagcorr_pair_sampling,
+            rng=lagcorr_rng,
         )
         eor_loss = _frequency_lag_correlation_loss(
             eor,
@@ -334,6 +353,8 @@ def loss_function(
             prior_mean=eor_lagcorr_mean,
             prior_sigma=eor_lagcorr_sigma,
             max_pairs=lagcorr_max_pairs,
+            pair_sampling=lagcorr_pair_sampling,
+            rng=lagcorr_rng,
         )
         lagcorr_loss = 0.5 * (fg_loss + eor_loss)
 
@@ -353,7 +374,15 @@ def loss_function(
                 device=energy_map.device,
                 dtype=energy_map.dtype,
             )
-        fft_loss = torch.mean(((energy_map - prior_mean) / prior_sigma) ** 2)
+        if fft_use_log_energy:
+            energy_map = torch.log1p(torch.clamp(energy_map, min=0.0))
+        z = (energy_map - prior_mean) / prior_sigma
+        if fft_z_clip is not None:
+            clip = float(fft_z_clip)
+            if not math.isfinite(clip) or clip <= 0:
+                raise ValueError("fft_z_clip must be a finite positive value when provided.")
+            z = torch.clamp(z, min=-clip, max=clip)
+        fft_loss = torch.mean(z**2)
     poly_loss = torch.zeros_like(data_loss)
     if loss_mode == "poly_reparam" and extra_scale > 0.0:
         if poly_residual is None:
