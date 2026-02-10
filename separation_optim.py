@@ -119,7 +119,7 @@ class OptimizationConfig:
     poly_weight: float = 1.0
     poly_degree: int = 3
     poly_sigma: float = DEFAULT_POLY_SIGMA
-    loss_mode: str = "base"  # "base", "rfft", "poly", "poly_reparam", or "lagcorr"
+    loss_mode: str = "base"  # "base", "rfft", "poly_reparam", or "lagcorr"
     optimizer_name: str = "adam"
     momentum: float = 0.9
     power_config: Optional[str] = None
@@ -403,15 +403,15 @@ def optimize_components(
         poly_weight: Weight for the polynomial prior term.
         poly_degree: Degree for polynomial priors.
         poly_sigma: Std for polynomial prior residuals.
-        loss_mode: "base" (default), "rfft", "poly", "poly_reparam", or "lagcorr".
+        loss_mode: "base" (default), "rfft", "poly_reparam", or "lagcorr".
         fft_prior_mean: Prior mean for high-frequency energy (scalar or tensor).
         fft_prior_sigma: Prior std for high-frequency energy (scalar or tensor).
         fft_highfreq_percent: Fraction (0-1) of the highest frequency bins to penalize.
-        freq_start_mhz: Starting frequency of the cube (MHz) for polynomial modes.
-        freq_delta_mhz: Frequency spacing of the cube (MHz) for polynomial modes.
+        freq_start_mhz: Starting frequency of the cube (MHz) for poly_reparam mode.
+        freq_delta_mhz: Frequency spacing of the cube (MHz) for poly_reparam mode.
     """
-    if loss_mode not in {"base", "rfft", "poly", "poly_reparam", "lagcorr"}:
-        raise ValueError("loss_mode must be 'base', 'rfft', 'poly', 'poly_reparam', or 'lagcorr'.")
+    if loss_mode not in {"base", "rfft", "poly_reparam", "lagcorr"}:
+        raise ValueError("loss_mode must be 'base', 'rfft', 'poly_reparam', or 'lagcorr'.")
     y_tensor, _, _ = _prepare_observation(y, device=device, dtype=dtype)
 
     aligned_eor_true: Optional[Tensor] = None
@@ -527,12 +527,6 @@ def optimize_components(
         freqs_tensor = (
             freq_start_mhz
             + freq_delta_mhz * torch.arange(nfreq, device=y_tensor.device, dtype=y_tensor.dtype)
-        )
-
-    if loss_mode == "poly":
-        print(
-            "Warning: loss_mode=poly runs a full polynomial fit over the foreground; "
-            "this can be slow on large cubes and is recommended only for testing or small inputs."
         )
 
     fg_init, eor_init = initialize_components(y_tensor, freq_axis=freq_axis)

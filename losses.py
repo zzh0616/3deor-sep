@@ -355,15 +355,7 @@ def loss_function(
             )
         fft_loss = torch.mean(((energy_map - prior_mean) / prior_sigma) ** 2)
     poly_loss = torch.zeros_like(data_loss)
-    if loss_mode == "poly" and extra_scale > 0.0:
-        poly_loss = polynomial_prior_loss(
-            fg,
-            freq_axis=freq_axis,
-            degree=poly_degree,
-            sigma=poly_sigma,
-            freqs=None,
-        )
-    elif loss_mode == "poly_reparam" and extra_scale > 0.0:
+    if loss_mode == "poly_reparam" and extra_scale > 0.0:
         if poly_residual is None:
             poly_residual = torch.zeros_like(fg)
         sigma_tensor = prepare_broadcastable_prior(poly_sigma, poly_residual, "poly_sigma_reparam")

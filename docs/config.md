@@ -20,13 +20,12 @@ This document describes the JSON configuration fields used by the optimizer.
 - `loss_mode` (`str`): One of:
   - `"base"`: Only the base loss (data + smoothness + EoR prior + correlation).
   - `"rfft"`: Base loss + high-frequency (rFFT) penalty.
-  - `"poly"`: Base loss + polynomial prior (fitted on the recovered foreground).
   - `"poly_reparam"`: Base loss with foreground parameterized as polynomial coefficients + residual.
   - `"lagcorr"`: Base loss + frequency-lag autocorrelation priors for FG and EoR (see lagcorr settings below).
 - `optimizer_name` (`str`): `"adam"` (default) or `"sgd"`.
 - `momentum` (`float`): SGD momentum (ignored for Adam).
-- `freq_start_mhz` (`float`): Starting frequency of the cube (MHz) for polynomial modes.
-- `freq_delta_mhz` (`float`): Frequency spacing of the cube (MHz) for polynomial modes.
+- `freq_start_mhz` (`float`): Starting frequency of the cube (MHz) for `poly_reparam`.
+- `freq_delta_mhz` (`float`): Frequency spacing of the cube (MHz) for `poly_reparam`.
 - `freqs_mhz_path` (`str`): Optional path to a 1D array (text or `.npy`) containing the cube frequency values in MHz.
 - `power_config` (`str`): Path to power-spectrum config JSON (optional).
 - `extra_loss_start_iter` (`int`): When `loss_mode != "base"`, only base loss terms are used before this iteration (default 500).

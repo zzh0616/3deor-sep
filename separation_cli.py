@@ -167,10 +167,10 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
     parser.add_argument(
         "--loss-mode",
         type=str,
-        choices=["base", "rfft", "poly", "poly_reparam", "lagcorr"],
+        choices=["base", "rfft", "poly_reparam", "lagcorr"],
         help=(
             "Loss mode: 'base' (default), 'rfft' with high-frequency penalty, "
-            "'poly' polynomial prior on the recovered foreground, 'poly_reparam' polynomial reparameterization, "
+            "'poly_reparam' polynomial reparameterization, "
             "or 'lagcorr' frequency-lag autocorrelation prior."
         ),
     )
@@ -206,12 +206,12 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         "--poly-weight",
         dest="poly_weight",
         type=float,
-        help="Weight applied to the polynomial prior term (poly mode).",
+        help="Weight applied to the polynomial residual prior term (poly_reparam mode).",
     )
     parser.add_argument(
         "--poly-degree",
         type=int,
-        help="Polynomial degree for the foreground prior in poly mode (default 3).",
+        help="Polynomial degree for foreground reparameterization in poly_reparam mode (default 3).",
     )
     parser.add_argument(
         "--poly-sigma",
@@ -221,12 +221,12 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
     parser.add_argument(
         "--freq-start-mhz",
         type=float,
-        help="Starting frequency of the cube in MHz (for polynomial modes).",
+        help="Starting frequency of the cube in MHz (for poly_reparam mode).",
     )
     parser.add_argument(
         "--freq-delta-mhz",
         type=float,
-        help="Frequency spacing of the cube in MHz (for polynomial modes).",
+        help="Frequency spacing of the cube in MHz (for poly_reparam mode).",
     )
     parser.add_argument(
         "--true-eor-cube",
