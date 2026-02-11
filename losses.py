@@ -6,13 +6,52 @@ Loss computation utilities for foreground/EoR separation.
 from __future__ import annotations
 
 import math
-from typing import Dict, Optional, Sequence, Tuple, Union
+import re
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 from constants import EPS_LOSS, DEFAULT_FFT_SIGMA
 from utils import clamp_eps, ensure_tensor_on, prepare_broadcastable_prior
 
 Tensor = torch.Tensor
+VALID_EXTRA_LOSS_TERMS: Tuple[str, ...] = ("corr", "rfft", "poly_reparam", "lagcorr")
+
+
+def normalize_extra_loss_terms(
+    *,
+    loss_mode: Optional[str] = None,
+    extra_loss_terms: Optional[Union[str, Sequence[str]]] = None,
+) -> Tuple[str, ...]:
+    """
+    Normalize active extra loss terms.
+
+    Backward compatibility:
+      - legacy `loss_mode` values ("base"/single extra term) still work.
+      - comma/plus separated strings are supported.
+    """
+    if extra_loss_terms is None:
+        if loss_mode is None:
+            return ()
+        raw_items: List[str] = [str(loss_mode)]
+    elif isinstance(extra_loss_terms, str):
+        raw_items = [extra_loss_terms]
+    else:
+        raw_items = [str(item) for item in extra_loss_terms]
+
+    normalized: List[str] = []
+    seen = set()
+    for raw in raw_items:
+        for token in re.split(r"[,+]", raw):
+            term = token.strip().lower()
+            if not term or term == "base":
+                continue
+            if term not in VALID_EXTRA_LOSS_TERMS:
+                valid = ", ".join(["base", *VALID_EXTRA_LOSS_TERMS])
+                raise ValueError(f"Unsupported loss term '{term}'. Valid values: {valid}.")
+            if term not in seen:
+                seen.add(term)
+                normalized.append(term)
+    return tuple(normalized)
 
 
 def forward_model(fg: Tensor, eor: Tensor, psf: Optional[callable] = None) -> Tensor:
@@ -69,6 +108,54 @@ def correlation_penalty(
     sigma = torch.clamp(prior_sigma, min=1e-8)
     penalty = ((corr - prior_mean) / sigma) ** 2
     return penalty, corr
+
+
+def frequency_slice_correlation_penalty(
+    fg: Tensor,
+    eor: Tensor,
+    *,
+    freq_axis: int,
+    prior_mean: Tensor,
+    prior_sigma: Tensor,
+) -> Tuple[Tensor, Tensor]:
+    """
+    Penalize FG/EoR correlation per frequency slice (no cross-frequency coupling).
+
+    The correlation is computed independently at each frequency slice over spatial
+    pixels, then averaged:
+
+        loss = mean_f [ ((corr_f - mu_f) / sigma_f)^2 ].
+    """
+    if fg.shape != eor.shape:
+        raise ValueError(
+            f"fg/eor shape mismatch for correlation penalty: {tuple(fg.shape)} vs {tuple(eor.shape)}"
+        )
+    if fg.ndim != 3:
+        raise ValueError(f"Expected 3D cubes for correlation penalty, got shape {tuple(fg.shape)}")
+
+    fg_moved = fg.movedim(freq_axis, 0)
+    eor_moved = eor.movedim(freq_axis, 0)
+    fg_flat = fg_moved.reshape(fg_moved.shape[0], -1)
+    eor_flat = eor_moved.reshape(eor_moved.shape[0], -1)
+
+    fg_centered = fg_flat - fg_flat.mean(dim=1, keepdim=True)
+    eor_centered = eor_flat - eor_flat.mean(dim=1, keepdim=True)
+    dot = torch.sum(fg_centered * eor_centered, dim=1)
+    denom = torch.norm(fg_centered, dim=1) * torch.norm(eor_centered, dim=1)
+    denom = torch.clamp(denom, min=1e-8)
+    corr_per_freq = dot / denom
+
+    mean_tensor = prepare_broadcastable_prior(prior_mean, corr_per_freq, "corr_prior_mean")
+    sigma_tensor = prepare_broadcastable_prior(prior_sigma, corr_per_freq, "corr_prior_sigma")
+    if mean_tensor is None:
+        mean_tensor = torch.zeros(1, device=corr_per_freq.device, dtype=corr_per_freq.dtype)
+    if sigma_tensor is None:
+        sigma_tensor = torch.ones(1, device=corr_per_freq.device, dtype=corr_per_freq.dtype)
+    sigma_tensor = clamp_eps(sigma_tensor, eps=EPS_LOSS)
+
+    penalty = torch.mean(((corr_per_freq - mean_tensor) / sigma_tensor) ** 2)
+    corr_mean = torch.mean(corr_per_freq)
+    return penalty, corr_mean
 
 
 def _frequency_lag_correlation_loss(
@@ -172,6 +259,17 @@ def _frequency_lag_correlation_loss(
     return torch.mean(torch.stack(losses))
 
 
+def _apply_lagcorr_feature(cube: Tensor, *, freq_axis: int, feature: str) -> Tensor:
+    feature_norm = str(feature).strip().lower()
+    if feature_norm == "raw":
+        return cube
+    if feature_norm == "diff1":
+        if cube.shape[freq_axis] < 2:
+            raise ValueError("lagcorr_feature='diff1' requires at least 2 frequency channels.")
+        return torch.diff(cube, n=1, dim=freq_axis)
+    raise ValueError("lagcorr_feature must be 'raw' or 'diff1'.")
+
+
 def compute_highfreq_energy(
     tensor: Tensor, freq_axis: int, percent: float
 ) -> Tensor:
@@ -270,10 +368,13 @@ def loss_function(
     alpha: float = 1.0,
     beta: float = 1.0,
     gamma: float = 0.0,
-    delta: float = 1.0,
+    corr_weight: float = 1.0,
+    delta: Optional[float] = None,
     fft_weight: float = 1.0,
     poly_weight: float = 1.0,
     lagcorr_weight: float = 1.0,
+    lagcorr_fg_component_weight: float = 0.5,
+    lagcorr_eor_component_weight: float = 0.5,
     extra_loss_scale: float = 1.0,
     freq_axis: int = 0,
     data_error: Tensor,
@@ -284,7 +385,9 @@ def loss_function(
     corr_prior_mean: Tensor,
     corr_prior_sigma: Tensor,
     loss_mode: str = "base",
+    active_extra_terms: Optional[Union[str, Sequence[str]]] = None,
     lagcorr_unit: str = "mhz",
+    lagcorr_feature: str = "raw",
     lagcorr_lags: Optional[Tensor] = None,
     fg_lagcorr_mean: Optional[Tensor] = None,
     fg_lagcorr_sigma: Optional[Tensor] = None,
@@ -317,7 +420,20 @@ def loss_function(
     eor_sigma_tensor = clamp_eps(eor_sigma, eps=EPS_LOSS)
     eor_reg = torch.mean(((eor - eor_mean_tensor) / eor_sigma_tensor) ** 2)
 
-    corr_loss, corr_coeff = correlation_penalty(fg, eor, corr_prior_mean, corr_prior_sigma)
+    if delta is not None:
+        corr_weight = float(delta)
+    active_terms = normalize_extra_loss_terms(
+        loss_mode=loss_mode, extra_loss_terms=active_extra_terms
+    )
+    active_term_set = set(active_terms)
+
+    corr_loss, corr_coeff = frequency_slice_correlation_penalty(
+        fg,
+        eor,
+        freq_axis=freq_axis,
+        prior_mean=corr_prior_mean,
+        prior_sigma=corr_prior_sigma,
+    )
 
     extra_scale = float(extra_loss_scale)
     if not math.isfinite(extra_scale):
@@ -325,41 +441,68 @@ def loss_function(
     extra_scale = max(0.0, min(1.0, extra_scale))
 
     lagcorr_loss = torch.zeros_like(data_loss)
-    if loss_mode == "lagcorr" and extra_scale > 0.0:
+    if "lagcorr" in active_term_set and extra_scale > 0.0:
         unit_norm = lagcorr_unit.strip().lower()
         if unit_norm not in {"mhz", "chan"}:
             raise ValueError("lagcorr_unit must be 'mhz' or 'chan'.")
         if lagcorr_lags is None:
-            raise ValueError("lagcorr_lags must be provided when loss_mode='lagcorr'.")
-        if fg_lagcorr_mean is None or fg_lagcorr_sigma is None:
-            raise ValueError("fg_lagcorr_mean/fg_lagcorr_sigma must be provided when loss_mode='lagcorr'.")
-        if eor_lagcorr_mean is None or eor_lagcorr_sigma is None:
-            raise ValueError("eor_lagcorr_mean/eor_lagcorr_sigma must be provided when loss_mode='lagcorr'.")
+            raise ValueError("lagcorr_lags must be provided when enabling 'lagcorr'.")
+        fg_component = float(lagcorr_fg_component_weight)
+        eor_component = float(lagcorr_eor_component_weight)
+        if not math.isfinite(fg_component) or fg_component < 0:
+            raise ValueError("lagcorr_fg_component_weight must be a finite non-negative value.")
+        if not math.isfinite(eor_component) or eor_component < 0:
+            raise ValueError("lagcorr_eor_component_weight must be a finite non-negative value.")
+        total_component = fg_component + eor_component
+        if total_component <= 0.0:
+            raise ValueError(
+                "At least one lagcorr component weight must be > 0 "
+                "(lagcorr_fg_component_weight or lagcorr_eor_component_weight)."
+            )
 
-        fg_loss = _frequency_lag_correlation_loss(
-            fg,
-            freq_axis=freq_axis,
-            lag_channels=lagcorr_lags,
-            prior_mean=fg_lagcorr_mean,
-            prior_sigma=fg_lagcorr_sigma,
-            max_pairs=lagcorr_max_pairs,
-            pair_sampling=lagcorr_pair_sampling,
-            rng=lagcorr_rng,
-        )
-        eor_loss = _frequency_lag_correlation_loss(
-            eor,
-            freq_axis=freq_axis,
-            lag_channels=lagcorr_lags,
-            prior_mean=eor_lagcorr_mean,
-            prior_sigma=eor_lagcorr_sigma,
-            max_pairs=lagcorr_max_pairs,
-            pair_sampling=lagcorr_pair_sampling,
-            rng=lagcorr_rng,
-        )
-        lagcorr_loss = 0.5 * (fg_loss + eor_loss)
+        fg_for_lag = _apply_lagcorr_feature(fg, freq_axis=freq_axis, feature=lagcorr_feature)
+        eor_for_lag = _apply_lagcorr_feature(eor, freq_axis=freq_axis, feature=lagcorr_feature)
+
+        fg_loss = torch.zeros_like(data_loss)
+        if fg_component > 0.0:
+            if fg_lagcorr_mean is None or fg_lagcorr_sigma is None:
+                raise ValueError(
+                    "fg_lagcorr_mean/fg_lagcorr_sigma must be provided when "
+                    "lagcorr_fg_component_weight > 0."
+                )
+            fg_loss = _frequency_lag_correlation_loss(
+                fg_for_lag,
+                freq_axis=freq_axis,
+                lag_channels=lagcorr_lags,
+                prior_mean=fg_lagcorr_mean,
+                prior_sigma=fg_lagcorr_sigma,
+                max_pairs=lagcorr_max_pairs,
+                pair_sampling=lagcorr_pair_sampling,
+                rng=lagcorr_rng,
+            )
+
+        eor_loss = torch.zeros_like(data_loss)
+        if eor_component > 0.0:
+            if eor_lagcorr_mean is None or eor_lagcorr_sigma is None:
+                raise ValueError(
+                    "eor_lagcorr_mean/eor_lagcorr_sigma must be provided when "
+                    "lagcorr_eor_component_weight > 0."
+                )
+            eor_loss = _frequency_lag_correlation_loss(
+                eor_for_lag,
+                freq_axis=freq_axis,
+                lag_channels=lagcorr_lags,
+                prior_mean=eor_lagcorr_mean,
+                prior_sigma=eor_lagcorr_sigma,
+                max_pairs=lagcorr_max_pairs,
+                pair_sampling=lagcorr_pair_sampling,
+                rng=lagcorr_rng,
+            )
+
+        lagcorr_loss = (fg_component * fg_loss + eor_component * eor_loss) / total_component
 
     fft_loss = torch.zeros_like(data_loss)
-    if loss_mode == "rfft" and extra_scale > 0.0:
+    if "rfft" in active_term_set and extra_scale > 0.0:
         prior_mean = fft_prior_mean
         prior_sigma = (
             clamp_eps(fft_prior_sigma, eps=EPS_LOSS) if fft_prior_sigma is not None else None
@@ -384,7 +527,7 @@ def loss_function(
             z = torch.clamp(z, min=-clip, max=clip)
         fft_loss = torch.mean(z**2)
     poly_loss = torch.zeros_like(data_loss)
-    if loss_mode == "poly_reparam" and extra_scale > 0.0:
+    if "poly_reparam" in active_term_set and extra_scale > 0.0:
         if poly_residual is None:
             poly_residual = torch.zeros_like(fg)
         sigma_tensor = prepare_broadcastable_prior(poly_sigma, poly_residual, "poly_sigma_reparam")
@@ -393,18 +536,9 @@ def loss_function(
         sigma_tensor = clamp_eps(sigma_tensor, eps=EPS_LOSS)
         poly_loss = torch.mean((poly_residual / sigma_tensor) ** 2)
 
-    total_loss = (
-        alpha * data_loss
-        + beta * smooth_loss
-        + gamma * eor_reg
-        + delta * corr_loss
-        + extra_scale
-        * (
-            lagcorr_weight * lagcorr_loss
-            + fft_weight * fft_loss
-            + poly_weight * poly_loss
-        )
-    )
+    corr_term = corr_weight * corr_loss if "corr" in active_term_set else torch.zeros_like(data_loss)
+    extra_terms = corr_term + lagcorr_weight * lagcorr_loss + fft_weight * fft_loss + poly_weight * poly_loss
+    total_loss = alpha * data_loss + beta * smooth_loss + gamma * eor_reg + extra_scale * extra_terms
     return total_loss, {
         "data": data_loss,
         "smooth": smooth_loss,

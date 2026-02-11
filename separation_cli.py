@@ -47,7 +47,7 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         "--extra-loss-start-iter",
         type=int,
         help=(
-            "When loss_mode != 'base', only base loss terms are used before this iteration (default 500)."
+            "When extra loss terms are enabled, only base terms are used before this iteration (default 500)."
         ),
     )
     parser.add_argument(
@@ -146,6 +146,25 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         help="Weight applied to the frequency-lag autocorrelation prior term (lagcorr mode).",
     )
     parser.add_argument(
+        "--lagcorr-fg-component-weight",
+        dest="lagcorr_fg_component_weight",
+        type=float,
+        help="Relative weight of the FG lagcorr component (lagcorr mode, default 0.5).",
+    )
+    parser.add_argument(
+        "--lagcorr-eor-component-weight",
+        dest="lagcorr_eor_component_weight",
+        type=float,
+        help="Relative weight of the EoR lagcorr component (lagcorr mode, default 0.5).",
+    )
+    parser.add_argument(
+        "--lagcorr-feature",
+        dest="lagcorr_feature",
+        choices=["raw", "diff1"],
+        type=str,
+        help="Feature transform used by lagcorr: raw cube or first frequency difference.",
+    )
+    parser.add_argument(
         "--lagcorr-unit",
         dest="lagcorr_unit",
         choices=["mhz", "chan"],
@@ -180,11 +199,17 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
     parser.add_argument(
         "--loss-mode",
         type=str,
-        choices=["base", "rfft", "poly_reparam", "lagcorr"],
         help=(
-            "Loss mode: 'base' (default), 'rfft' with high-frequency penalty, "
-            "'poly_reparam' polynomial reparameterization, "
-            "or 'lagcorr' frequency-lag autocorrelation prior."
+            "Legacy selector for loss terms. Accepts 'base' or single/combined terms "
+            "such as 'rfft', 'lagcorr', or 'rfft,lagcorr'."
+        ),
+    )
+    parser.add_argument(
+        "--extra-loss-terms",
+        type=str,
+        help=(
+            "Comma/plus-separated extra terms to add on top of base, e.g. "
+            "'corr', 'rfft+lagcorr', 'corr,rfft,lagcorr'."
         ),
     )
     parser.add_argument(
@@ -327,6 +352,7 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "gamma",
         "fft_weight",
         "loss_mode",
+        "extra_loss_terms",
         "freq_axis",
         "print_every",
         "device",
@@ -350,6 +376,9 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "corr_prior_sigma",
         "corr_weight",
         "lagcorr_weight",
+        "lagcorr_fg_component_weight",
+        "lagcorr_eor_component_weight",
+        "lagcorr_feature",
         "lagcorr_unit",
         "lagcorr_pair_sampling",
         "lagcorr_random_seed",

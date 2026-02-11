@@ -19,13 +19,17 @@ Key CLI arguments:
 - `--mask-cube`: Optional FITS mask (2D or 3D) applied to all inputs before `cut_xy` and loss evaluation.
 - `--fg-output` / `--eor-output`: Output FITS paths for foreground/EoR estimates.
 - `--device`: Device string, e.g., `cuda:0` or `cpu`.
-- `--loss-mode`: `base`, `rfft`, `poly_reparam`, or `lagcorr`.
-- `--extra-loss-start-iter` / `--extra-loss-ramp-iters`: Delay and (optionally) ramp extra loss terms for non-base modes.
+- `--loss-mode`: Legacy selector; accepts `base` or terms like `corr`, `rfft`, `poly_reparam`, `lagcorr`, and comma/plus combinations.
+- `--extra-loss-terms`: Preferred explicit multi-select extras, e.g. `corr,rfft` or `rfft+lagcorr`.
+- `--extra-loss-start-iter` / `--extra-loss-ramp-iters`: Delay and (optionally) ramp extra loss terms when extras are enabled.
 - `--cut-xy-enabled` / `--cut-xy-unit` / `--cut-xy-center-x` / `--cut-xy-center-y` / `--cut-xy-size`: Spatial XY cropping controls (see `docs/config.md`).
 - `--optimizer`: `adam` (default) or `sgd`.
 - `--momentum`: Momentum for SGD (default 0.9).
 - `--freq-start-mhz` / `--freq-delta-mhz`: Starting frequency and spacing (MHz) for `poly_reparam`.
 - `--lagcorr-weight`: Weight for the frequency-lag autocorrelation prior (lagcorr mode).
+- `--lagcorr-fg-component-weight`: Relative weight of FG lagcorr component (lagcorr mode).
+- `--lagcorr-eor-component-weight`: Relative weight of EoR lagcorr component (lagcorr mode).
+- `--lagcorr-feature`: Feature transform used before lagcorr matching (`raw` or `diff1`).
 - `--lagcorr-unit`: Units for `lagcorr_intervals` (`mhz` requires `--freq-delta-mhz`; `chan` requires integer intervals, lagcorr mode).
 - `--lagcorr-max-pairs`: Cap the number of pairs evaluated per lag (lagcorr mode).
 - `--lagcorr-pair-sampling`: Pair sampling strategy when `--lagcorr-max-pairs` is set (`head` or `random`).

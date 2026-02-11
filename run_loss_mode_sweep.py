@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Run a mode sweep (base/rfft/poly_reparam/lagcorr) on two datasets with
+Run a loss-term sweep (base and selectable extra-term combinations) on two datasets with
 temperature-aware throttling.
 """
 
@@ -30,10 +30,11 @@ try:
 except ImportError:  # pragma: no cover - optional dependency on remote hosts
     psutil = None
 
+from losses import VALID_EXTRA_LOSS_TERMS, normalize_extra_loss_terms
 from separation_optim import OptimizationConfig, build_cut_xy_indices
 
 
-LOSS_MODES: Tuple[str, ...] = ("base", "rfft", "poly_reparam", "lagcorr")
+DEFAULT_MODE_SPECS: Tuple[str, ...] = ("base", "corr", "rfft", "poly_reparam", "lagcorr")
 
 
 @dataclass
@@ -94,8 +95,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--modes",
         type=str,
-        default=",".join(LOSS_MODES),
-        help="Comma-separated modes to run. Available: base,rfft,poly_reparam,lagcorr.",
+        default=",".join(DEFAULT_MODE_SPECS),
+        help=(
+            "Comma-separated mode specs. Each spec can be 'base' or a '+'-joined extra-term set, "
+            "e.g. 'corr', 'rfft+lagcorr', 'corr+rfft+lagcorr'."
+        ),
     )
     parser.add_argument(
         "--datasets",
@@ -106,6 +110,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-iters", type=int, default=300, help="Iterations per run.")
     parser.add_argument("--print-every", type=int, default=50, help="Iteration log interval.")
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate.")
+    parser.add_argument(
+        "--corr-weight",
+        type=float,
+        default=1.0,
+        help="Weight for per-frequency FG/EoR correlation term when 'corr' is enabled.",
+    )
+    parser.add_argument(
+        "--corr-prior-mean",
+        type=float,
+        default=0.0,
+        help="Prior mean for per-frequency FG/EoR correlation term.",
+    )
+    parser.add_argument(
+        "--corr-prior-sigma",
+        type=float,
+        default=0.5,
+        help="Prior sigma for per-frequency FG/EoR correlation term.",
+    )
     parser.add_argument(
         "--cut-size-frac",
         type=float,
@@ -223,7 +245,8 @@ def query_max_cpu_temp() -> Optional[float]:
 
 def _build_base_config(
     dataset: DatasetSpec,
-    mode: str,
+    mode_label: str,
+    extra_terms: Sequence[str],
     run_dir: Path,
     args: argparse.Namespace,
 ) -> Dict[str, object]:
@@ -239,7 +262,8 @@ def _build_base_config(
             "print_every": int(args.print_every),
             "device": f"cuda:{int(args.gpu_index)}",
             "dtype": "float32",
-            "loss_mode": mode,
+            "loss_mode": "base",
+            "extra_loss_terms": list(extra_terms),
             "extra_loss_start_iter": int(args.extra_loss_start_iter),
             "extra_loss_ramp_iters": int(args.extra_loss_ramp_iters),
             "optimizer_name": "adam",
@@ -258,7 +282,7 @@ def _build_base_config(
             "alpha": 1.0,
             "beta": 1.0,
             "gamma": 1.0,
-            "corr_weight": 1.0,
+            "corr_weight": float(args.corr_weight),
             "lagcorr_weight": 1.0,
             "fft_weight": 1.0,
             "poly_weight": 1.0,
@@ -272,9 +296,12 @@ def _build_base_config(
             "fg_reference_cube": str(dataset.fg_true_cube),
             "use_robust_fg_stats": True,
             "mae_to_sigma_factor": 1.4826,
-            "corr_prior_mean": 0.0,
-            "corr_prior_sigma": 0.5,
+            "corr_prior_mean": float(args.corr_prior_mean),
+            "corr_prior_sigma": float(args.corr_prior_sigma),
+            "lagcorr_feature": "raw",
             "lagcorr_unit": "mhz",
+            "lagcorr_fg_component_weight": 0.5,
+            "lagcorr_eor_component_weight": 0.5,
             "lagcorr_pair_sampling": "random",
             "lagcorr_random_seed": 20260210,
             "lagcorr_intervals": [0.1, 0.2, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 7.5],
@@ -303,6 +330,7 @@ def _build_base_config(
             "init_eor_cube": "",
         },
     }
+    cfg["mode_label"] = mode_label
     if args.power_config is not None:
         cfg["power_config"] = str(args.power_config)
         cfg["power_output_dir"] = str(run_dir / "powerspec")
@@ -853,16 +881,20 @@ def main() -> None:
         )
     datasets = [dataset_map[name] for name in selected_dataset_names]
 
-    selected_modes = [x.strip() for x in str(args.modes).split(",") if x.strip()]
-    if not selected_modes:
+    selected_mode_specs = [x.strip() for x in str(args.modes).split(",") if x.strip()]
+    if not selected_mode_specs:
         raise ValueError(
-            "No modes selected. Use --modes base,rfft,poly_reparam,lagcorr (or subset)."
+            "No modes selected. Use --modes base,corr,rfft,poly_reparam,lagcorr (or '+' combinations)."
         )
-    unknown_modes = [mode for mode in selected_modes if mode not in LOSS_MODES]
-    if unknown_modes:
-        raise ValueError(
-            f"Unknown modes {unknown_modes}. Available modes: {list(LOSS_MODES)}"
-        )
+    selected_modes: List[Tuple[str, Tuple[str, ...]]] = []
+    for spec in selected_mode_specs:
+        try:
+            extras = normalize_extra_loss_terms(loss_mode=spec, extra_loss_terms=None)
+        except ValueError as exc:
+            valid = ", ".join(["base", *VALID_EXTRA_LOSS_TERMS])
+            raise ValueError(f"Invalid mode spec '{spec}'. Valid terms: {valid}.") from exc
+        label = "base" if not extras else "+".join(extras)
+        selected_modes.append((label, extras))
 
     manifest_path = _write_run_manifest(
         output_dir=output_dir,
@@ -894,18 +926,20 @@ def main() -> None:
         eor_true = _apply_mask(_load_cube_cut(ds.eor_true_cube, cut=cut), mask_arr)
         obs_true = fg_true + eor_true
 
-        for mode in selected_modes:
-            run_dir = output_dir / ds.name / mode
+        for mode_label, mode_terms in selected_modes:
+            run_dir = output_dir / ds.name / mode_label
             run_dir.mkdir(parents=True, exist_ok=True)
 
-            cfg = _build_base_config(ds, mode, run_dir=run_dir, args=args)
+            cfg = _build_base_config(
+                ds, mode_label=mode_label, extra_terms=mode_terms, run_dir=run_dir, args=args
+            )
             cfg_path = run_dir / "config.json"
             with cfg_path.open("w", encoding="utf-8") as handle:
                 json.dump(cfg, handle, indent=2)
 
             log_path = run_dir / "run.log"
             cmd = [sys.executable, str(d3_root / "separation_cli.py"), "--config", str(cfg_path)]
-            print(f"[run] dataset={ds.name}, mode={mode}, cmd={' '.join(cmd)}")
+            print(f"[run] dataset={ds.name}, mode={mode_label}, cmd={' '.join(cmd)}")
 
             wait_for_cooldown(
                 gpu_index=int(args.gpu_index),
@@ -930,7 +964,8 @@ def main() -> None:
             eor_out_path = run_dir / "eor_est.fits"
             record: Dict[str, object] = {
                 "dataset": ds.name,
-                "mode": mode,
+                "mode": mode_label,
+                "extra_loss_terms": ",".join(mode_terms),
                 "input_cube": str(ds.input_cube),
                 "input_cube_realpath": str(ds.input_cube.resolve()),
                 "full_shape": "x".join(str(v) for v in full_shape),
@@ -956,7 +991,7 @@ def main() -> None:
                 eor_est = np.asarray(fits.getdata(eor_out_path), dtype=np.float32)
                 if fg_est.shape != fg_true.shape or eor_est.shape != eor_true.shape:
                     raise ValueError(
-                        f"Output/true shape mismatch for {ds.name}/{mode}: "
+                        f"Output/true shape mismatch for {ds.name}/{mode_label}: "
                         f"fg_est={fg_est.shape}, fg_true={fg_true.shape}, "
                         f"eor_est={eor_est.shape}, eor_true={eor_true.shape}"
                     )
@@ -1001,7 +1036,7 @@ def main() -> None:
                 json.dump(record, handle, indent=2)
 
             print(
-                f"[done] dataset={ds.name}, mode={mode}, status={record['status']}, "
+                f"[done] dataset={ds.name}, mode={mode_label}, status={record['status']}, "
                 f"runtime={thermal.runtime_sec:.1f}s, pause_count={thermal.pause_count}, "
                 f"max_gpu_temp={thermal.max_gpu_temp_c}"
             )

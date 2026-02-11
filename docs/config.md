@@ -17,18 +17,17 @@ This document describes the JSON configuration fields used by the optimizer.
 - `print_every` (`int`): Logging frequency (iterations).
 - `device` (`str`): Device string, e.g. `cuda:0` or `cpu`.
 - `dtype` (`str`): Torch dtype name (e.g., `float32`).
-- `loss_mode` (`str`): One of:
-  - `"base"`: Only the base loss (data + smoothness + EoR prior + correlation).
-  - `"rfft"`: Base loss + high-frequency (rFFT) penalty.
-  - `"poly_reparam"`: Base loss with foreground parameterized as polynomial coefficients + residual.
-  - `"lagcorr"`: Base loss + frequency-lag autocorrelation priors for FG and EoR (see lagcorr settings below).
+- `loss_mode` (`str`): Legacy selector. Supports `"base"` and single-term modes (`"corr"`, `"rfft"`, `"poly_reparam"`, `"lagcorr"`), and comma/plus combos for compatibility (e.g. `"rfft,lagcorr"`).
+- `extra_loss_terms` (`list[str]` or `str`): Preferred multi-select extra terms added on top of base loss. Valid terms: `"corr"`, `"rfft"`, `"poly_reparam"`, `"lagcorr"`.
+- Base loss is always: `data + foreground_smoothness + eor_prior`.
+- Extra terms are optional and can be combined.
 - `optimizer_name` (`str`): `"adam"` (default) or `"sgd"`.
 - `momentum` (`float`): SGD momentum (ignored for Adam).
 - `freq_start_mhz` (`float`): Starting frequency of the cube (MHz) for `poly_reparam`.
 - `freq_delta_mhz` (`float`): Frequency spacing of the cube (MHz) for `poly_reparam`.
 - `freqs_mhz_path` (`str`): Optional path to a 1D array (text or `.npy`) containing the cube frequency values in MHz.
 - `power_config` (`str`): Path to power-spectrum config JSON (optional).
-- `extra_loss_start_iter` (`int`): When `loss_mode != "base"`, only base loss terms are used before this iteration (default 500).
+- `extra_loss_start_iter` (`int`): When any extra term is enabled, only base loss terms are used before this iteration (default 500).
 - `extra_loss_ramp_iters` (`int`): If > 0, ramp the extra loss scale from 0 to 1 over this many iterations after `extra_loss_start_iter` (default 0 = hard switch).
 
 ## `cut_xy` Section
@@ -47,7 +46,7 @@ The crop indices are saved into the output FITS headers (e.g., `CUTX0/CUTX1/CUTY
 - `alpha` (`float`): Data term weight.
 - `beta` (`float`): Foreground smoothness weight.
 - `gamma` (`float`): EoR prior weight.
-- `corr_weight` (`float`): Correlation prior weight.
+- `corr_weight` (`float`): Per-frequency FG/EoR correlation prior weight (effective only when extra term `"corr"` is enabled).
 - `lagcorr_weight` (`float`): Frequency-lag autocorrelation prior weight (lagcorr mode).
 - `fft_weight` (`float`): rFFT high-frequency penalty weight.
 - `poly_weight` (`float`): Polynomial prior weight.
@@ -64,8 +63,11 @@ All weights default to `1.0`. The code prints a warning if you deviate from 1.0.
 - `fg_reference_cube` (`str`): FITS cube used to derive foreground smoothness stats (mean/std of third differences). If `fg_smooth_mean` or `fg_smooth_sigma` are explicitly set, those values take precedence and the derivation is skipped.
 - `use_robust_fg_stats` (`bool`): If `true`, use median/MAE (scaled) instead of mean/std for smoothness/FFT priors.
 - `mae_to_sigma_factor` (`float`): MAE-to-sigma scaling (default ~1.48).
-- `corr_prior_mean` (`float`): Correlation prior mean.
-- `corr_prior_sigma` (`float`): Correlation prior sigma.
+- `corr_prior_mean` (`float`): Prior mean for per-frequency FG/EoR correlation.
+- `corr_prior_sigma` (`float`): Prior sigma for per-frequency FG/EoR correlation.
+- `lagcorr_fg_component_weight` (`float`): Relative weight of FG lagcorr component (default `0.5`).
+- `lagcorr_eor_component_weight` (`float`): Relative weight of EoR lagcorr component (default `0.5`).
+- `lagcorr_feature` (`str`): Feature transform used before lag-correlation matching. One of `"raw"` (default) or `"diff1"` (first difference along frequency).
 - `lagcorr_unit` (`str`): Units for `lagcorr_intervals`, one of `"mhz"` or `"chan"` (`"mhz"` requires `freq_delta_mhz`; `"chan"` requires integer intervals).
 - `lagcorr_pair_sampling` (`str`): Pair sampling strategy when `lagcorr_max_pairs` is set. One of `"head"` (first pairs) or `"random"` (uniform without replacement).
 - `lagcorr_random_seed` (`int`): Optional seed used when `lagcorr_pair_sampling="random"` for reproducible lag-pair sampling.
