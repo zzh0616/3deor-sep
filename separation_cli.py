@@ -216,6 +216,27 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         help="Optional random seed used when lagcorr_pair_sampling=random.",
     )
     parser.add_argument(
+        "--lagcorr-lag-weights",
+        dest="lagcorr_lag_weights",
+        type=float,
+        help=(
+            "Scalar per-lag weight multiplier for lagcorr residual aggregation. "
+            "For vector weights, set in config JSON."
+        ),
+    )
+    parser.add_argument(
+        "--lagcorr-eor-start-iter",
+        dest="lagcorr_eor_start_iter",
+        type=int,
+        help="Iteration at which EoR lagcorr sub-term starts (defaults to extra_loss_start_iter).",
+    )
+    parser.add_argument(
+        "--lagcorr-eor-ramp-iters",
+        dest="lagcorr_eor_ramp_iters",
+        type=int,
+        help="Ramp iterations for EoR lagcorr sub-term after lagcorr_eor_start_iter.",
+    )
+    parser.add_argument(
         "--fft-weight",
         dest="fft_weight",
         type=float,
@@ -412,6 +433,9 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "lagcorr_pair_sampling",
         "lagcorr_random_seed",
         "lagcorr_max_pairs",
+        "lagcorr_lag_weights",
+        "lagcorr_eor_start_iter",
+        "lagcorr_eor_ramp_iters",
         "fft_highfreq_percent",
         "fft_use_log_energy",
         "fft_z_clip",

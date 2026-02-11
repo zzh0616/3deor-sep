@@ -165,6 +165,7 @@ def _frequency_lag_correlation_loss(
     lag_channels: Tensor,
     prior_mean: Tensor,
     prior_sigma: Tensor,
+    lag_weights: Optional[Tensor] = None,
     max_pairs: Optional[int] = None,
     pair_sampling: str = "head",
     rng: Optional[torch.Generator] = None,
@@ -203,6 +204,12 @@ def _frequency_lag_correlation_loss(
     sigma_tensor = prior_sigma if torch.is_tensor(prior_sigma) else torch.as_tensor(prior_sigma, device=cube.device)
     mean_tensor = mean_tensor.to(device=cube.device, dtype=cube.dtype)
     sigma_tensor = sigma_tensor.to(device=cube.device, dtype=cube.dtype)
+    lag_weight_tensor: Optional[Tensor] = None
+    if lag_weights is not None:
+        lag_weight_tensor = (
+            lag_weights if torch.is_tensor(lag_weights) else torch.as_tensor(lag_weights, device=cube.device)
+        )
+        lag_weight_tensor = lag_weight_tensor.to(device=cube.device, dtype=cube.dtype).reshape(-1)
     if mean_tensor.ndim == 0:
         mean_tensor = mean_tensor.view(1)
     if sigma_tensor.ndim == 0:
@@ -213,6 +220,8 @@ def _frequency_lag_correlation_loss(
         raise ValueError("lagcorr prior_mean must be a scalar or match lag_channels length.")
     if sigma_tensor.numel() not in (1, lag_tensor.numel()):
         raise ValueError("lagcorr prior_sigma must be a scalar or match lag_channels length.")
+    if lag_weight_tensor is not None and lag_weight_tensor.numel() not in (1, lag_tensor.numel()):
+        raise ValueError("lagcorr lag_weights must be a scalar or match lag_channels length.")
 
     moved = cube.movedim(freq_axis, 0)
     num_freqs = moved.shape[0]
@@ -223,6 +232,7 @@ def _frequency_lag_correlation_loss(
     norms = torch.clamp(norms, min=eps)
 
     losses = []
+    lag_w = []
     for idx, lag in enumerate(lag_tensor.tolist()):
         if lag < 1:
             raise ValueError(f"lag_channels entries must be >= 1, got {lag}.")
@@ -253,10 +263,19 @@ def _frequency_lag_correlation_loss(
         sigma_k = sigma_tensor[idx] if sigma_tensor.numel() > 1 else sigma_tensor[0]
         sigma_k = clamp_eps(sigma_k, eps=EPS_LOSS)
         losses.append(torch.mean(((corr - mean_k) / sigma_k) ** 2))
+        if lag_weight_tensor is not None:
+            w_k = lag_weight_tensor[idx] if lag_weight_tensor.numel() > 1 else lag_weight_tensor[0]
+            lag_w.append(torch.clamp(w_k, min=0.0))
 
     if not losses:
         return torch.zeros((), device=cube.device, dtype=cube.dtype)
-    return torch.mean(torch.stack(losses))
+    losses_t = torch.stack(losses)
+    if lag_w:
+        lag_w_t = torch.stack(lag_w)
+        w_sum = torch.sum(lag_w_t)
+        if bool(torch.isfinite(w_sum)) and float(w_sum.item()) > 0.0:
+            return torch.sum(losses_t * lag_w_t) / w_sum
+    return torch.mean(losses_t)
 
 
 def _frequency_lag_correlation_stats(
@@ -266,6 +285,7 @@ def _frequency_lag_correlation_stats(
     lag_channels: Tensor,
     prior_mean: Tensor,
     prior_sigma: Tensor,
+    lag_weights: Optional[Tensor] = None,
     max_pairs: Optional[int] = None,
     pair_sampling: str = "head",
     rng: Optional[torch.Generator] = None,
@@ -301,6 +321,12 @@ def _frequency_lag_correlation_stats(
     sigma_tensor = prior_sigma if torch.is_tensor(prior_sigma) else torch.as_tensor(prior_sigma, device=cube.device)
     mean_tensor = mean_tensor.to(device=cube.device, dtype=cube.dtype)
     sigma_tensor = sigma_tensor.to(device=cube.device, dtype=cube.dtype)
+    lag_weight_tensor: Optional[Tensor] = None
+    if lag_weights is not None:
+        lag_weight_tensor = (
+            lag_weights if torch.is_tensor(lag_weights) else torch.as_tensor(lag_weights, device=cube.device)
+        )
+        lag_weight_tensor = lag_weight_tensor.to(device=cube.device, dtype=cube.dtype).reshape(-1)
     if mean_tensor.ndim == 0:
         mean_tensor = mean_tensor.view(1)
     if sigma_tensor.ndim == 0:
@@ -311,6 +337,8 @@ def _frequency_lag_correlation_stats(
         raise ValueError("lagcorr prior_mean must be a scalar or match lag_channels length.")
     if sigma_tensor.numel() not in (1, lag_tensor.numel()):
         raise ValueError("lagcorr prior_sigma must be a scalar or match lag_channels length.")
+    if lag_weight_tensor is not None and lag_weight_tensor.numel() not in (1, lag_tensor.numel()):
+        raise ValueError("lagcorr lag_weights must be a scalar or match lag_channels length.")
 
     moved = cube.movedim(freq_axis, 0)
     num_freqs = moved.shape[0]
@@ -322,6 +350,7 @@ def _frequency_lag_correlation_stats(
     losses = []
     lag_means = []
     lag_vars = []
+    lag_w = []
     for idx, lag in enumerate(lag_tensor.tolist()):
         if lag < 1:
             raise ValueError(f"lag_channels entries must be >= 1, got {lag}.")
@@ -353,12 +382,25 @@ def _frequency_lag_correlation_stats(
         losses.append(torch.mean(((corr - mean_k) / sigma_k) ** 2))
         lag_means.append(torch.mean(corr))
         lag_vars.append(torch.var(corr, unbiased=False))
+        if lag_weight_tensor is not None:
+            w_k = lag_weight_tensor[idx] if lag_weight_tensor.numel() > 1 else lag_weight_tensor[0]
+            lag_w.append(torch.clamp(w_k, min=0.0))
 
     if not losses:
         zero = torch.zeros((), device=cube.device, dtype=cube.dtype)
         empty = torch.empty((0,), device=cube.device, dtype=cube.dtype)
         return zero, empty, empty
-    return torch.mean(torch.stack(losses)), torch.stack(lag_means), torch.stack(lag_vars)
+    losses_t = torch.stack(losses)
+    if lag_w:
+        lag_w_t = torch.stack(lag_w)
+        w_sum = torch.sum(lag_w_t)
+        if bool(torch.isfinite(w_sum)) and float(w_sum.item()) > 0.0:
+            loss_val = torch.sum(losses_t * lag_w_t) / w_sum
+        else:
+            loss_val = torch.mean(losses_t)
+    else:
+        loss_val = torch.mean(losses_t)
+    return loss_val, torch.stack(lag_means), torch.stack(lag_vars)
 
 
 def _resolve_lag_vector_prior(
@@ -530,6 +572,8 @@ def loss_function(
     poly_residual: Optional[Tensor] = None,
     lagcorr_pair_sampling: str = "head",
     lagcorr_rng: Optional[torch.Generator] = None,
+    lagcorr_prior_weights: Optional[Union[Tensor, Sequence[float], float]] = None,
+    lagcorr_eor_scale: float = 1.0,
     lagcorr_gap_weight: float = 0.0,
     lagcorr_gap_margin: Optional[Union[Tensor, Sequence[float], float]] = 0.0,
     lagcorr_gap_sigma: Optional[Union[Tensor, Sequence[float], float]] = 1.0,
@@ -584,12 +628,36 @@ def loss_function(
             raise ValueError("lagcorr_fg_component_weight must be a finite non-negative value.")
         if not math.isfinite(eor_component) or eor_component < 0:
             raise ValueError("lagcorr_eor_component_weight must be a finite non-negative value.")
-        total_component = fg_component + eor_component
+        eor_component_scale = float(lagcorr_eor_scale)
+        if not math.isfinite(eor_component_scale):
+            raise ValueError("lagcorr_eor_scale must be finite.")
+        eor_component_scale = max(0.0, min(1.0, eor_component_scale))
+        effective_eor_component = eor_component * eor_component_scale
+        total_component = fg_component + effective_eor_component
         if total_component <= 0.0:
             raise ValueError(
                 "At least one lagcorr component weight must be > 0 "
-                "(lagcorr_fg_component_weight or lagcorr_eor_component_weight)."
+                "(lagcorr_fg_component_weight or lagcorr_eor_component_weight*lagcorr_eor_scale)."
             )
+        gap_weight = float(lagcorr_gap_weight)
+        if not math.isfinite(gap_weight) or gap_weight < 0.0:
+            raise ValueError("lagcorr_gap_weight must be a finite non-negative value.")
+        effective_gap_weight = gap_weight * eor_component_scale
+        lag_weight_vec = _resolve_lag_vector_prior(
+            lagcorr_prior_weights,
+            lag_count=int(lagcorr_lags.numel()),
+            device=fg.device,
+            dtype=fg.dtype,
+            name="lagcorr_prior_weights",
+            default=1.0,
+        )
+        assert lag_weight_vec is not None
+        if torch.any(~torch.isfinite(lag_weight_vec)):
+            raise ValueError("lagcorr_prior_weights must be finite.")
+        if torch.any(lag_weight_vec < 0.0):
+            raise ValueError("lagcorr_prior_weights must be non-negative.")
+        if float(torch.sum(lag_weight_vec).item()) <= 0.0:
+            raise ValueError("lagcorr_prior_weights must contain at least one positive entry.")
 
         fg_for_lag = _apply_lagcorr_feature(fg, freq_axis=freq_axis, feature=lagcorr_feature)
         eor_for_lag = _apply_lagcorr_feature(eor, freq_axis=freq_axis, feature=lagcorr_feature)
@@ -608,6 +676,7 @@ def loss_function(
                 lag_channels=lagcorr_lags,
                 prior_mean=fg_lagcorr_mean,
                 prior_sigma=fg_lagcorr_sigma,
+                lag_weights=lag_weight_vec,
                 max_pairs=lagcorr_max_pairs,
                 pair_sampling=lagcorr_pair_sampling,
                 rng=lagcorr_rng,
@@ -615,7 +684,7 @@ def loss_function(
 
         eor_loss = torch.zeros_like(data_loss)
         eor_corr_lag_mean: Optional[Tensor] = None
-        if eor_component > 0.0:
+        if eor_component > 0.0 and (effective_eor_component > 0.0 or effective_gap_weight > 0.0):
             if eor_lagcorr_mean is None or eor_lagcorr_sigma is None:
                 raise ValueError(
                     "eor_lagcorr_mean/eor_lagcorr_sigma must be provided when "
@@ -627,20 +696,18 @@ def loss_function(
                 lag_channels=lagcorr_lags,
                 prior_mean=eor_lagcorr_mean,
                 prior_sigma=eor_lagcorr_sigma,
+                lag_weights=lag_weight_vec,
                 max_pairs=lagcorr_max_pairs,
                 pair_sampling=lagcorr_pair_sampling,
                 rng=lagcorr_rng,
             )
 
-        lagcorr_loss = (fg_component * fg_loss + eor_component * eor_loss) / total_component
+        lagcorr_loss = (fg_component * fg_loss + effective_eor_component * eor_loss) / total_component
 
-        gap_weight = float(lagcorr_gap_weight)
-        if not math.isfinite(gap_weight) or gap_weight < 0.0:
-            raise ValueError("lagcorr_gap_weight must be a finite non-negative value.")
         gap_mode = str(lagcorr_gap_mode).strip().lower()
         if gap_mode not in {"hinge", "squared"}:
             raise ValueError("lagcorr_gap_mode must be 'hinge' or 'squared'.")
-        if gap_weight > 0.0:
+        if effective_gap_weight > 0.0:
             if fg_corr_lag_mean is None or eor_corr_lag_mean is None:
                 raise ValueError(
                     "lagcorr_gap_weight > 0 requires both FG and EoR lagcorr components enabled."
@@ -670,7 +737,7 @@ def loss_function(
             else:
                 residual = lag_gap - margin_vec
             lagcorr_gap_loss = torch.mean((residual / sigma_vec) ** 2)
-            lagcorr_loss = lagcorr_loss + gap_weight * lagcorr_gap_loss
+            lagcorr_loss = lagcorr_loss + effective_gap_weight * lagcorr_gap_loss
 
     fft_loss = torch.zeros_like(data_loss)
     if "rfft" in active_term_set and extra_scale > 0.0:

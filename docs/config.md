@@ -77,6 +77,9 @@ All weights default to `1.0`. The code prints a warning if you deviate from 1.0.
 - `eor_lagcorr_mean` (`list[float]`): Expected EoR autocorrelation for each lag (same length as `lagcorr_intervals`).
 - `eor_lagcorr_sigma` (`list[float]`): Expected EoR autocorrelation sigma for each lag (same length as `lagcorr_intervals`).
 - `lagcorr_max_pairs` (`int`): Optional cap on the number of slice pairs used per lag (default: use all available pairs).
+- `lagcorr_lag_weights` (`float` or `list[float]`): Per-lag aggregation weights for lagcorr residuals. Scalar means uniform weighting; vector must match `lagcorr_intervals`.
+- `lagcorr_eor_start_iter` (`int`): Iteration to start the EoR lagcorr sub-term (defaults to `extra_loss_start_iter` when omitted).
+- `lagcorr_eor_ramp_iters` (`int`): Ramp length (in iterations) for EoR lagcorr sub-term scaling after `lagcorr_eor_start_iter`.
 - `fft_highfreq_percent` (`float`): Fraction of highest-frequency bins to penalize in rFFT mode (0–1).
 - `fft_use_log_energy` (`bool`): If `true`, apply `log(1 + energy)` before rFFT prior matching to reduce dynamic-range dominance.
 - `fft_z_clip` (`float`): Optional absolute z-score clip for the rFFT residual before squaring (robust against extreme outliers).

@@ -183,6 +183,9 @@ class OptimizationConfig:
     eor_lagcorr_mean: List[float] = field(default_factory=lambda: [0.0] * 9)
     eor_lagcorr_sigma: List[float] = field(default_factory=lambda: [1.0] * 9)
     lagcorr_max_pairs: Optional[int] = None
+    lagcorr_lag_weights: Union[float, List[float]] = 1.0
+    lagcorr_eor_start_iter: Optional[int] = None
+    lagcorr_eor_ramp_iters: int = 0
     fft_highfreq_percent: float = 0.7
     fft_use_log_energy: bool = False
     fft_z_clip: Optional[float] = None
@@ -395,6 +398,9 @@ def optimize_components(
     eor_lagcorr_mean: Optional[Sequence[float]] = None,
     eor_lagcorr_sigma: Optional[Sequence[float]] = None,
     lagcorr_max_pairs: Optional[int] = None,
+    lagcorr_lag_weights: Union[Tensor, Sequence[float], float] = 1.0,
+    lagcorr_eor_start_iter: Optional[int] = None,
+    lagcorr_eor_ramp_iters: int = 0,
     extra_loss_start_iter: int = 500,
     extra_loss_ramp_iters: int = 0,
     fft_weight: float = 1.0,
@@ -440,6 +446,11 @@ def optimize_components(
         lagcorr_gap_sigma: Scale for lag-gap residual normalization, scalar or per-lag.
         lagcorr_gap_mode: Gap residual mode ("hinge" or "squared").
         lagcorr_feature: Feature transform used by lagcorr ("raw" or "diff1").
+        lagcorr_lag_weights: Relative per-lag weights for lagcorr residual aggregation.
+            Scalar for uniform weighting or vector matching lagcorr_intervals.
+        lagcorr_eor_start_iter: Optional start iteration for EoR lagcorr sub-term.
+            Defaults to extra_loss_start_iter when not provided.
+        lagcorr_eor_ramp_iters: If >0, ramp EoR lagcorr sub-term from 0 to 1.
         extra_loss_start_iter: Iteration at which extra loss terms activate.
         extra_loss_ramp_iters: If >0, ramp extra loss scale from 0 to 1 over this many iters after start.
         fft_weight: Weight for the high-frequency penalty (rFFT mode).
@@ -511,6 +522,7 @@ def optimize_components(
     fg_lagcorr_sigma_tensor: Optional[Tensor] = None
     eor_lagcorr_mean_tensor: Optional[Tensor] = None
     eor_lagcorr_sigma_tensor: Optional[Tensor] = None
+    lagcorr_weight_tensor: Optional[Tensor] = None
     lagcorr_pair_sampling_norm = str(lagcorr_pair_sampling).strip().lower()
     if lagcorr_pair_sampling_norm not in {"head", "random"}:
         raise ValueError("lagcorr_pair_sampling must be 'head' or 'random'.")
@@ -588,6 +600,23 @@ def optimize_components(
         if lagcorr_eor_component_weight_val > 0.0:
             eor_lagcorr_mean_tensor = _require_vec("eor_lagcorr_mean", eor_lagcorr_mean)
             eor_lagcorr_sigma_tensor = _require_vec("eor_lagcorr_sigma", eor_lagcorr_sigma)
+        lagcorr_weight_tensor = ensure_tensor_on(lagcorr_lag_weights, y_tensor.device, y_tensor.dtype)
+        if lagcorr_weight_tensor is None:
+            lagcorr_weight_tensor = torch.ones_like(interval_tensor)
+        lagcorr_weight_tensor = lagcorr_weight_tensor.reshape(-1)
+        if lagcorr_weight_tensor.numel() == 1:
+            lagcorr_weight_tensor = lagcorr_weight_tensor.repeat(interval_tensor.numel())
+        if lagcorr_weight_tensor.numel() != interval_tensor.numel():
+            raise ValueError(
+                "lagcorr_lag_weights must be scalar or match lagcorr_intervals length "
+                f"({lagcorr_weight_tensor.numel()} vs {interval_tensor.numel()})."
+            )
+        if torch.any(~torch.isfinite(lagcorr_weight_tensor)):
+            raise ValueError("lagcorr_lag_weights must be finite.")
+        if torch.any(lagcorr_weight_tensor < 0):
+            raise ValueError("lagcorr_lag_weights must be non-negative.")
+        if float(torch.sum(lagcorr_weight_tensor).item()) <= 0.0:
+            raise ValueError("lagcorr_lag_weights must contain at least one positive entry.")
 
         if lagcorr_max_pairs is not None and lagcorr_max_pairs <= 0:
             raise ValueError("lagcorr_max_pairs must be a positive int or None.")
@@ -595,6 +624,12 @@ def optimize_components(
             lagcorr_rng = torch.Generator(device="cpu")
             if lagcorr_random_seed is not None:
                 lagcorr_rng.manual_seed(int(lagcorr_random_seed))
+    lagcorr_eor_start_iter_val = (
+        int(extra_loss_start_iter) if lagcorr_eor_start_iter is None else int(lagcorr_eor_start_iter)
+    )
+    if lagcorr_eor_start_iter_val < 0:
+        raise ValueError("lagcorr_eor_start_iter must be >= 0 when provided.")
+    lagcorr_eor_ramp_iters_val = max(0, int(lagcorr_eor_ramp_iters))
 
     fft_mean_tensor = ensure_tensor_on(fft_prior_mean, y_tensor.device, y_tensor.dtype)
     fft_sigma_tensor = ensure_tensor_on(fft_prior_sigma, y_tensor.device, y_tensor.dtype)
@@ -682,6 +717,17 @@ def optimize_components(
                     extra_scale = min(1.0, float(it - start_iter) / float(ramp_iters))
                 else:
                     extra_scale = 1.0
+        lagcorr_eor_scale_val = 1.0
+        if "lagcorr" in active_term_set and lagcorr_eor_component_weight_val > 0.0:
+            if it < lagcorr_eor_start_iter_val:
+                lagcorr_eor_scale_val = 0.0
+            elif lagcorr_eor_ramp_iters_val > 0:
+                lagcorr_eor_scale_val = min(
+                    1.0,
+                    float(it - lagcorr_eor_start_iter_val) / float(lagcorr_eor_ramp_iters_val),
+                )
+            else:
+                lagcorr_eor_scale_val = 1.0
         if "poly_reparam" in active_term_set:
             assert poly_coeffs_param is not None and fg_resid_param is not None
             poly_component = _eval_polynomial_from_coeffs(
@@ -732,6 +778,8 @@ def optimize_components(
             lagcorr_max_pairs=lagcorr_max_pairs,
             lagcorr_pair_sampling=lagcorr_pair_sampling_norm,
             lagcorr_rng=lagcorr_rng,
+            lagcorr_prior_weights=lagcorr_weight_tensor,
+            lagcorr_eor_scale=lagcorr_eor_scale_val,
             fft_prior_mean=fft_mean_tensor,
             fft_prior_sigma=fft_sigma_tensor,
             fft_percent=fft_highfreq_percent,
@@ -1645,6 +1693,18 @@ def write_input_diagnostics_report(
             lagcorr_total_lags = int(len(intervals))
 
             interval_t = torch.as_tensor(intervals, device=device, dtype=diag_dtype).reshape(-1)
+            lag_weight_t_full = torch.as_tensor(config.lagcorr_lag_weights, device=device, dtype=diag_dtype).reshape(-1)
+            if lag_weight_t_full.numel() == 1:
+                lag_weight_t_full = lag_weight_t_full.repeat(interval_t.numel())
+            if lag_weight_t_full.numel() != interval_t.numel():
+                raise ValueError(
+                    "lagcorr_lag_weights must be scalar or match lagcorr_intervals length "
+                    f"({lag_weight_t_full.numel()} vs {interval_t.numel()})."
+                )
+            if torch.any(~torch.isfinite(lag_weight_t_full)):
+                raise ValueError("lagcorr_lag_weights must be finite.")
+            if torch.any(lag_weight_t_full < 0):
+                raise ValueError("lagcorr_lag_weights must be non-negative.")
             if unit_norm == "chan":
                 lag_t = torch.round(interval_t).to(dtype=torch.int64)
                 if not torch.allclose(interval_t, lag_t.to(dtype=diag_dtype), rtol=0.0, atol=1e-6):
@@ -1690,6 +1750,9 @@ def write_input_diagnostics_report(
                     f"All lagcorr intervals produce lag_channels >= num_freqs ({num_freqs})."
                 )
             lagcorr_used_lags = int(lag_t.numel())
+            lag_weight_t = lag_weight_t_full[valid_lags]
+            if float(torch.sum(lag_weight_t).item()) <= 0.0:
+                raise ValueError("lagcorr_lag_weights must contain at least one positive entry.")
 
             fg_lag_loss = torch.zeros((), device=device, dtype=diag_dtype)
             fg_corr_mean_vec: Optional[Tensor] = None
@@ -1710,6 +1773,7 @@ def write_input_diagnostics_report(
                     lag_channels=lag_t,
                     prior_mean=fg_mean_t,
                     prior_sigma=fg_sigma_t,
+                    lag_weights=lag_weight_t,
                     max_pairs=config.lagcorr_max_pairs,
                     pair_sampling=pair_sampling,
                     rng=lag_rng,
@@ -1734,6 +1798,7 @@ def write_input_diagnostics_report(
                     lag_channels=lag_t,
                     prior_mean=eor_mean_t,
                     prior_sigma=eor_sigma_t,
+                    lag_weights=lag_weight_t,
                     max_pairs=config.lagcorr_max_pairs,
                     pair_sampling=pair_sampling,
                     rng=lag_rng,
@@ -2068,9 +2133,14 @@ def write_input_diagnostics_report(
             f"seed={config.lagcorr_random_seed}\n"
         )
         handle.write(f"lagcorr feature: {config.lagcorr_feature}\n")
+        handle.write(f"lagcorr lag_weights: {config.lagcorr_lag_weights}\n")
         handle.write(
             "lagcorr component weights: "
             f"fg={config.lagcorr_fg_component_weight}, eor={config.lagcorr_eor_component_weight}\n"
+        )
+        handle.write(
+            "lagcorr EoR schedule: "
+            f"start_iter={config.lagcorr_eor_start_iter}, ramp_iters={config.lagcorr_eor_ramp_iters}\n"
         )
         handle.write(
             "lagcorr gap: "
@@ -2372,6 +2442,9 @@ def _optimize_from_fits(
         eor_lagcorr_mean=config.eor_lagcorr_mean,
         eor_lagcorr_sigma=config.eor_lagcorr_sigma,
         lagcorr_max_pairs=config.lagcorr_max_pairs,
+        lagcorr_lag_weights=config.lagcorr_lag_weights,
+        lagcorr_eor_start_iter=config.lagcorr_eor_start_iter,
+        lagcorr_eor_ramp_iters=config.lagcorr_eor_ramp_iters,
         extra_loss_start_iter=config.extra_loss_start_iter,
         extra_loss_ramp_iters=config.extra_loss_ramp_iters,
         fft_weight=config.fft_weight,
@@ -2538,6 +2611,9 @@ def run_synthetic_demo(config: OptimizationConfig) -> None:
         eor_lagcorr_mean=config.eor_lagcorr_mean,
         eor_lagcorr_sigma=config.eor_lagcorr_sigma,
         lagcorr_max_pairs=config.lagcorr_max_pairs,
+        lagcorr_lag_weights=config.lagcorr_lag_weights,
+        lagcorr_eor_start_iter=config.lagcorr_eor_start_iter,
+        lagcorr_eor_ramp_iters=config.lagcorr_eor_ramp_iters,
         extra_loss_start_iter=config.extra_loss_start_iter,
         extra_loss_ramp_iters=config.extra_loss_ramp_iters,
         fft_weight=config.fft_weight,

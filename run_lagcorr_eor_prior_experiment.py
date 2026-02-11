@@ -48,6 +48,9 @@ class CandidateSpec:
     lagcorr_gap_margin_scale: float
     lagcorr_gap_sigma: float
     lagcorr_gap_mode: str
+    lagcorr_lag_weights: List[float]
+    lagcorr_eor_start_iter: int
+    lagcorr_eor_ramp_iters: int
     fg_lagcorr_sigma_scale: float
     gamma: float
     eor_prior_sigma: float
@@ -69,6 +72,24 @@ class JobSpec:
 
 
 LAG_INTERVALS_MHZ: List[float] = [0.1, 0.2, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 7.5]
+
+
+def _short_lag_weights(
+    lag_intervals_mhz: Sequence[float],
+    *,
+    power: float,
+    pivot_mhz: float = 0.5,
+    min_weight: float = 0.25,
+) -> List[float]:
+    lag = np.asarray(list(lag_intervals_mhz), dtype=np.float64)
+    pivot = max(float(pivot_mhz), 1e-6)
+    raw = (1.0 + lag / pivot) ** (-float(power))
+    raw = np.clip(raw, a_min=float(min_weight), a_max=None)
+    raw_mean = float(np.mean(raw))
+    if not math.isfinite(raw_mean) or raw_mean <= 0:
+        return [1.0] * lag.size
+    normed = raw / raw_mean
+    return [float(v) for v in normed]
 
 
 def _parse_extra_terms(loss_mode: str) -> List[str]:
@@ -170,6 +191,10 @@ def build_candidates() -> List[CandidateSpec]:
     # mean close to 0 (rapid decorrelation after differencing),
     # with different prior widths for loose/mid/strict tests.
     loose_sigma = [0.35, 0.30, 0.25, 0.20, 0.18, 0.15, 0.12, 0.12, 0.12]
+    uniform_w = [1.0] * len(LAG_INTERVALS_MHZ)
+    short_w_p10 = _short_lag_weights(LAG_INTERVALS_MHZ, power=1.0, pivot_mhz=0.5, min_weight=0.30)
+    short_w_p15 = _short_lag_weights(LAG_INTERVALS_MHZ, power=1.5, pivot_mhz=0.5, min_weight=0.25)
+
     return [
         CandidateSpec(
             name="base_noeorprior",
@@ -181,6 +206,9 @@ def build_candidates() -> List[CandidateSpec]:
             lagcorr_gap_margin_scale=0.0,
             lagcorr_gap_sigma=1.0,
             lagcorr_gap_mode="hinge",
+            lagcorr_lag_weights=uniform_w,
+            lagcorr_eor_start_iter=0,
+            lagcorr_eor_ramp_iters=0,
             fg_lagcorr_sigma_scale=2.0,
             gamma=0.0,
             eor_prior_sigma=0.02,
@@ -198,6 +226,9 @@ def build_candidates() -> List[CandidateSpec]:
             lagcorr_gap_margin_scale=0.0,
             lagcorr_gap_sigma=1.0,
             lagcorr_gap_mode="hinge",
+            lagcorr_lag_weights=uniform_w,
+            lagcorr_eor_start_iter=0,
+            lagcorr_eor_ramp_iters=0,
             fg_lagcorr_sigma_scale=2.0,
             gamma=0.0,
             eor_prior_sigma=0.02,
@@ -206,7 +237,7 @@ def build_candidates() -> List[CandidateSpec]:
             note="best previous fg-only lagcorr baseline",
         ),
         CandidateSpec(
-            name="lag_diff1_eor_phys_loose",
+            name="lag_diff1_eor_sched_uniform",
             loss_mode="lagcorr",
             lagcorr_feature="diff1",
             lagcorr_fg_component_weight=1.0,
@@ -215,80 +246,75 @@ def build_candidates() -> List[CandidateSpec]:
             lagcorr_gap_margin_scale=0.0,
             lagcorr_gap_sigma=1.0,
             lagcorr_gap_mode="hinge",
+            lagcorr_lag_weights=uniform_w,
+            lagcorr_eor_start_iter=300,
+            lagcorr_eor_ramp_iters=700,
             fg_lagcorr_sigma_scale=2.0,
             gamma=0.2,
             eor_prior_sigma=0.02,
             eor_lagcorr_mean=zeros,
             eor_lagcorr_sigma=loose_sigma,
-            note="10-20mK scale, fast decorrelation, loose bounds",
+            note="EoR lag term delayed and ramped (uniform lag weights)",
         ),
         CandidateSpec(
-            name="lag_diff1_eor_phys_loose_gap_s03",
+            name="lag_diff1_eor_sched_shortlag_p10",
             loss_mode="lagcorr",
             lagcorr_feature="diff1",
             lagcorr_fg_component_weight=1.0,
             lagcorr_eor_component_weight=0.3,
-            lagcorr_gap_weight=0.4,
-            lagcorr_gap_margin_scale=0.3,
-            lagcorr_gap_sigma=0.2,
+            lagcorr_gap_weight=0.0,
+            lagcorr_gap_margin_scale=0.0,
+            lagcorr_gap_sigma=1.0,
             lagcorr_gap_mode="hinge",
+            lagcorr_lag_weights=short_w_p10,
+            lagcorr_eor_start_iter=300,
+            lagcorr_eor_ramp_iters=700,
             fg_lagcorr_sigma_scale=2.0,
             gamma=0.2,
             eor_prior_sigma=0.02,
             eor_lagcorr_mean=zeros,
             eor_lagcorr_sigma=loose_sigma,
-            note="FG-EoR lag gap prior (moderate margin)",
+            note="EoR lag term delayed+ramped with short-lag emphasis (p=1.0)",
         ),
         CandidateSpec(
-            name="lag_diff1_eor_phys_loose_gap_s05",
+            name="lag_diff1_eor_sched_shortlag_p10_gap",
             loss_mode="lagcorr",
             lagcorr_feature="diff1",
             lagcorr_fg_component_weight=1.0,
             lagcorr_eor_component_weight=0.3,
-            lagcorr_gap_weight=0.6,
-            lagcorr_gap_margin_scale=0.5,
-            lagcorr_gap_sigma=0.2,
-            lagcorr_gap_mode="hinge",
-            fg_lagcorr_sigma_scale=2.0,
-            gamma=0.2,
-            eor_prior_sigma=0.02,
-            eor_lagcorr_mean=zeros,
-            eor_lagcorr_sigma=loose_sigma,
-            note="FG-EoR lag gap prior (stronger margin)",
-        ),
-        CandidateSpec(
-            name="lag_diff1_eor_phys_loose_gap_s08",
-            loss_mode="lagcorr",
-            lagcorr_feature="diff1",
-            lagcorr_fg_component_weight=1.0,
-            lagcorr_eor_component_weight=0.3,
-            lagcorr_gap_weight=0.8,
-            lagcorr_gap_margin_scale=0.8,
-            lagcorr_gap_sigma=0.15,
-            lagcorr_gap_mode="hinge",
-            fg_lagcorr_sigma_scale=2.0,
-            gamma=0.2,
-            eor_prior_sigma=0.02,
-            eor_lagcorr_mean=zeros,
-            eor_lagcorr_sigma=loose_sigma,
-            note="FG-EoR lag gap prior (aggressive margin)",
-        ),
-        CandidateSpec(
-            name="lag_diff1_eor_phys_loose_gap_s08_sq",
-            loss_mode="lagcorr",
-            lagcorr_feature="diff1",
-            lagcorr_fg_component_weight=1.0,
-            lagcorr_eor_component_weight=0.3,
-            lagcorr_gap_weight=0.4,
-            lagcorr_gap_margin_scale=0.8,
+            lagcorr_gap_weight=0.3,
+            lagcorr_gap_margin_scale=0.25,
             lagcorr_gap_sigma=0.25,
-            lagcorr_gap_mode="squared",
+            lagcorr_gap_mode="hinge",
+            lagcorr_lag_weights=short_w_p10,
+            lagcorr_eor_start_iter=500,
+            lagcorr_eor_ramp_iters=900,
             fg_lagcorr_sigma_scale=2.0,
             gamma=0.2,
             eor_prior_sigma=0.02,
             eor_lagcorr_mean=zeros,
             eor_lagcorr_sigma=loose_sigma,
-            note="FG-EoR lag gap prior (squared target matching)",
+            note="Short-lag weighting + delayed mild lag-gap constraint",
+        ),
+        CandidateSpec(
+            name="lag_diff1_eor_sched_shortlag_p15",
+            loss_mode="lagcorr",
+            lagcorr_feature="diff1",
+            lagcorr_fg_component_weight=1.0,
+            lagcorr_eor_component_weight=0.25,
+            lagcorr_gap_weight=0.0,
+            lagcorr_gap_margin_scale=0.0,
+            lagcorr_gap_sigma=1.0,
+            lagcorr_gap_mode="hinge",
+            lagcorr_lag_weights=short_w_p15,
+            lagcorr_eor_start_iter=350,
+            lagcorr_eor_ramp_iters=900,
+            fg_lagcorr_sigma_scale=2.0,
+            gamma=0.2,
+            eor_prior_sigma=0.02,
+            eor_lagcorr_mean=zeros,
+            eor_lagcorr_sigma=loose_sigma,
+            note="Stronger short-lag emphasis (p=1.5), reduced EoR weight",
         ),
     ]
 
@@ -441,10 +467,13 @@ def build_config(
             "lagcorr_pair_sampling": "random",
             "lagcorr_random_seed": 20260211,
             "lagcorr_intervals": lag_intervals,
+            "lagcorr_lag_weights": list(cand.lagcorr_lag_weights),
             "fg_lagcorr_mean": fg_means,
             "fg_lagcorr_sigma": fg_sigmas,
             "eor_lagcorr_mean": list(cand.eor_lagcorr_mean),
             "eor_lagcorr_sigma": list(cand.eor_lagcorr_sigma),
+            "lagcorr_eor_start_iter": int(cand.lagcorr_eor_start_iter),
+            "lagcorr_eor_ramp_iters": int(cand.lagcorr_eor_ramp_iters),
             "lagcorr_gap_margin": lag_gap_margin,
             "lagcorr_gap_sigma": [float(cand.lagcorr_gap_sigma)] * len(lag_intervals),
             "lagcorr_gap_mode": str(cand.lagcorr_gap_mode),
@@ -805,10 +834,13 @@ def write_summary(output_dir: Path, rows: Sequence[Dict[str, object]]) -> Tuple[
         "eor_prior_sigma",
         "lagcorr_fg_component_weight",
         "lagcorr_eor_component_weight",
+        "lagcorr_eor_start_iter",
+        "lagcorr_eor_ramp_iters",
         "lagcorr_gap_weight",
         "lagcorr_gap_margin_scale",
         "lagcorr_gap_sigma",
         "lagcorr_gap_mode",
+        "lagcorr_lag_weights",
         "status",
         "return_code",
         "runtime_sec",
@@ -865,14 +897,15 @@ def write_summary(output_dir: Path, rows: Sequence[Dict[str, object]]) -> Tuple[
     with md_path.open("w", encoding="utf-8") as handle:
         handle.write("# lagcorr EoR prior design experiment\n\n")
         handle.write(
-            "| candidate | dataset | feature | gamma | eor_sigma | w_fg | w_eor | w_gap | status | runtime_sec | eor_mse | eor_corr_mean | std_ratio | gap_hit | gap_shortfall | lag_diff1_rmse | lag_diff1_corr |\n"
+            "| candidate | dataset | feature | gamma | eor_sigma | w_fg | w_eor | eor_start | eor_ramp | w_gap | status | runtime_sec | eor_mse | eor_corr_mean | std_ratio | gap_hit | gap_shortfall | lag_diff1_rmse | lag_diff1_corr |\n"
         )
-        handle.write("|---|---|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+        handle.write("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|\n")
         for row in rows:
             handle.write(
                 f"| {row.get('candidate')} | {row.get('dataset')} | {row.get('lagcorr_feature')} | "
                 f"{_fmt(row.get('gamma'))} | {_fmt(row.get('eor_prior_sigma'))} | "
                 f"{_fmt(row.get('lagcorr_fg_component_weight'))} | {_fmt(row.get('lagcorr_eor_component_weight'))} | "
+                f"{_fmt(row.get('lagcorr_eor_start_iter'))} | {_fmt(row.get('lagcorr_eor_ramp_iters'))} | "
                 f"{_fmt(row.get('lagcorr_gap_weight'))} | "
                 f"{row.get('status')} | {_fmt(row.get('runtime_sec'))} | {_fmt(row.get('eor_mse'))} | "
                 f"{_fmt(row.get('eor_corr_mean'))} | {_fmt(row.get('eor_std_ratio'))} | "
@@ -998,10 +1031,13 @@ def main() -> int:
                     "eor_prior_sigma": job.candidate.eor_prior_sigma,
                     "lagcorr_fg_component_weight": job.candidate.lagcorr_fg_component_weight,
                     "lagcorr_eor_component_weight": job.candidate.lagcorr_eor_component_weight,
+                    "lagcorr_eor_start_iter": job.candidate.lagcorr_eor_start_iter,
+                    "lagcorr_eor_ramp_iters": job.candidate.lagcorr_eor_ramp_iters,
                     "lagcorr_gap_weight": job.candidate.lagcorr_gap_weight,
                     "lagcorr_gap_margin_scale": job.candidate.lagcorr_gap_margin_scale,
                     "lagcorr_gap_sigma": job.candidate.lagcorr_gap_sigma,
                     "lagcorr_gap_mode": job.candidate.lagcorr_gap_mode,
+                    "lagcorr_lag_weights": json.dumps(job.candidate.lagcorr_lag_weights),
                     "status": status,
                     "return_code": ret,
                     "runtime_sec": runtime,

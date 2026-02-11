@@ -34,6 +34,9 @@ Key CLI arguments:
 - `--lagcorr-max-pairs`: Cap the number of pairs evaluated per lag (lagcorr mode).
 - `--lagcorr-pair-sampling`: Pair sampling strategy when `--lagcorr-max-pairs` is set (`head` or `random`).
 - `--lagcorr-random-seed`: Optional seed for reproducible random lag-pair sampling.
+- `--lagcorr-lag-weights`: Scalar multiplier for lagcorr per-lag aggregation weights (vector form via config JSON).
+- `--lagcorr-eor-start-iter`: Start iteration for EoR lagcorr sub-term (defaults to `extra_loss_start_iter`).
+- `--lagcorr-eor-ramp-iters`: Ramp iterations for EoR lagcorr sub-term after start.
 - `--fft-use-log-energy`: Apply `log1p` to rFFT high-frequency energy before prior matching.
 - `--fft-z-clip`: Clip rFFT residual z-scores before squaring (robust against extreme outliers).
 - `--true-eor-cube`: Reference EoR FITS cube (evaluation only, not used in training).
