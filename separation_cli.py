@@ -158,6 +158,31 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         help="Relative weight of the EoR lagcorr component (lagcorr mode, default 0.5).",
     )
     parser.add_argument(
+        "--lagcorr-gap-weight",
+        dest="lagcorr_gap_weight",
+        type=float,
+        help="Weight for FG-vs-EoR lag-gap constraint (requires both lagcorr components).",
+    )
+    parser.add_argument(
+        "--lagcorr-gap-margin",
+        dest="lagcorr_gap_margin",
+        type=float,
+        help="Target margin for FG lagcorr mean minus EoR lagcorr mean (scalar CLI value).",
+    )
+    parser.add_argument(
+        "--lagcorr-gap-sigma",
+        dest="lagcorr_gap_sigma",
+        type=float,
+        help="Scale for lag-gap residual normalization (scalar CLI value).",
+    )
+    parser.add_argument(
+        "--lagcorr-gap-mode",
+        dest="lagcorr_gap_mode",
+        choices=["hinge", "squared"],
+        type=str,
+        help="Residual mode for lag-gap constraint (default hinge).",
+    )
+    parser.add_argument(
         "--lagcorr-feature",
         dest="lagcorr_feature",
         choices=["raw", "diff1"],
@@ -378,6 +403,10 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "lagcorr_weight",
         "lagcorr_fg_component_weight",
         "lagcorr_eor_component_weight",
+        "lagcorr_gap_weight",
+        "lagcorr_gap_margin",
+        "lagcorr_gap_sigma",
+        "lagcorr_gap_mode",
         "lagcorr_feature",
         "lagcorr_unit",
         "lagcorr_pair_sampling",

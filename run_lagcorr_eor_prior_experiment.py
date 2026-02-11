@@ -16,6 +16,7 @@ import argparse
 import csv
 import json
 import math
+import re
 import subprocess
 import sys
 import time
@@ -43,6 +44,10 @@ class CandidateSpec:
     lagcorr_feature: str
     lagcorr_fg_component_weight: float
     lagcorr_eor_component_weight: float
+    lagcorr_gap_weight: float
+    lagcorr_gap_margin_scale: float
+    lagcorr_gap_sigma: float
+    lagcorr_gap_mode: str
     fg_lagcorr_sigma_scale: float
     gamma: float
     eor_prior_sigma: float
@@ -64,6 +69,17 @@ class JobSpec:
 
 
 LAG_INTERVALS_MHZ: List[float] = [0.1, 0.2, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 7.5]
+
+
+def _parse_extra_terms(loss_mode: str) -> List[str]:
+    terms: List[str] = []
+    for token in re.split(r"[,+]", str(loss_mode).strip().lower()):
+        term = token.strip()
+        if not term or term == "base":
+            continue
+        if term not in terms:
+            terms.append(term)
+    return terms
 
 
 def parse_args() -> argparse.Namespace:
@@ -154,9 +170,6 @@ def build_candidates() -> List[CandidateSpec]:
     # mean close to 0 (rapid decorrelation after differencing),
     # with different prior widths for loose/mid/strict tests.
     loose_sigma = [0.35, 0.30, 0.25, 0.20, 0.18, 0.15, 0.12, 0.12, 0.12]
-    mid_sigma = [0.20, 0.18, 0.14, 0.12, 0.10, 0.09, 0.08, 0.08, 0.08]
-    strict_sigma = [0.12, 0.10, 0.08, 0.06, 0.05, 0.05, 0.04, 0.04, 0.04]
-
     return [
         CandidateSpec(
             name="base_noeorprior",
@@ -164,6 +177,10 @@ def build_candidates() -> List[CandidateSpec]:
             lagcorr_feature="raw",
             lagcorr_fg_component_weight=0.0,
             lagcorr_eor_component_weight=0.0,
+            lagcorr_gap_weight=0.0,
+            lagcorr_gap_margin_scale=0.0,
+            lagcorr_gap_sigma=1.0,
+            lagcorr_gap_mode="hinge",
             fg_lagcorr_sigma_scale=2.0,
             gamma=0.0,
             eor_prior_sigma=0.02,
@@ -177,6 +194,10 @@ def build_candidates() -> List[CandidateSpec]:
             lagcorr_feature="diff1",
             lagcorr_fg_component_weight=1.0,
             lagcorr_eor_component_weight=0.0,
+            lagcorr_gap_weight=0.0,
+            lagcorr_gap_margin_scale=0.0,
+            lagcorr_gap_sigma=1.0,
+            lagcorr_gap_mode="hinge",
             fg_lagcorr_sigma_scale=2.0,
             gamma=0.0,
             eor_prior_sigma=0.02,
@@ -190,6 +211,10 @@ def build_candidates() -> List[CandidateSpec]:
             lagcorr_feature="diff1",
             lagcorr_fg_component_weight=1.0,
             lagcorr_eor_component_weight=0.3,
+            lagcorr_gap_weight=0.0,
+            lagcorr_gap_margin_scale=0.0,
+            lagcorr_gap_sigma=1.0,
+            lagcorr_gap_mode="hinge",
             fg_lagcorr_sigma_scale=2.0,
             gamma=0.2,
             eor_prior_sigma=0.02,
@@ -198,30 +223,72 @@ def build_candidates() -> List[CandidateSpec]:
             note="10-20mK scale, fast decorrelation, loose bounds",
         ),
         CandidateSpec(
-            name="lag_diff1_eor_phys_mid",
+            name="lag_diff1_eor_phys_loose_gap_s03",
             loss_mode="lagcorr",
             lagcorr_feature="diff1",
             lagcorr_fg_component_weight=1.0,
-            lagcorr_eor_component_weight=0.6,
+            lagcorr_eor_component_weight=0.3,
+            lagcorr_gap_weight=0.4,
+            lagcorr_gap_margin_scale=0.3,
+            lagcorr_gap_sigma=0.2,
+            lagcorr_gap_mode="hinge",
             fg_lagcorr_sigma_scale=2.0,
-            gamma=0.4,
-            eor_prior_sigma=0.015,
+            gamma=0.2,
+            eor_prior_sigma=0.02,
             eor_lagcorr_mean=zeros,
-            eor_lagcorr_sigma=mid_sigma,
-            note="moderate EoR lag prior strength",
+            eor_lagcorr_sigma=loose_sigma,
+            note="FG-EoR lag gap prior (moderate margin)",
         ),
         CandidateSpec(
-            name="lag_diff1_eor_phys_strict",
+            name="lag_diff1_eor_phys_loose_gap_s05",
             loss_mode="lagcorr",
             lagcorr_feature="diff1",
             lagcorr_fg_component_weight=1.0,
-            lagcorr_eor_component_weight=1.0,
+            lagcorr_eor_component_weight=0.3,
+            lagcorr_gap_weight=0.6,
+            lagcorr_gap_margin_scale=0.5,
+            lagcorr_gap_sigma=0.2,
+            lagcorr_gap_mode="hinge",
             fg_lagcorr_sigma_scale=2.0,
-            gamma=0.6,
-            eor_prior_sigma=0.01,
+            gamma=0.2,
+            eor_prior_sigma=0.02,
             eor_lagcorr_mean=zeros,
-            eor_lagcorr_sigma=strict_sigma,
-            note="~10mK tight amplitude prior + tighter lag prior",
+            eor_lagcorr_sigma=loose_sigma,
+            note="FG-EoR lag gap prior (stronger margin)",
+        ),
+        CandidateSpec(
+            name="lag_diff1_eor_phys_loose_gap_s08",
+            loss_mode="lagcorr",
+            lagcorr_feature="diff1",
+            lagcorr_fg_component_weight=1.0,
+            lagcorr_eor_component_weight=0.3,
+            lagcorr_gap_weight=0.8,
+            lagcorr_gap_margin_scale=0.8,
+            lagcorr_gap_sigma=0.15,
+            lagcorr_gap_mode="hinge",
+            fg_lagcorr_sigma_scale=2.0,
+            gamma=0.2,
+            eor_prior_sigma=0.02,
+            eor_lagcorr_mean=zeros,
+            eor_lagcorr_sigma=loose_sigma,
+            note="FG-EoR lag gap prior (aggressive margin)",
+        ),
+        CandidateSpec(
+            name="lag_diff1_eor_phys_loose_gap_s08_sq",
+            loss_mode="lagcorr",
+            lagcorr_feature="diff1",
+            lagcorr_fg_component_weight=1.0,
+            lagcorr_eor_component_weight=0.3,
+            lagcorr_gap_weight=0.4,
+            lagcorr_gap_margin_scale=0.8,
+            lagcorr_gap_sigma=0.25,
+            lagcorr_gap_mode="squared",
+            fg_lagcorr_sigma_scale=2.0,
+            gamma=0.2,
+            eor_prior_sigma=0.02,
+            eor_lagcorr_mean=zeros,
+            eor_lagcorr_sigma=loose_sigma,
+            note="FG-EoR lag gap prior (squared target matching)",
         ),
     ]
 
@@ -311,8 +378,14 @@ def build_config(
         cache=fg_cache,
     )
     fg_sigmas = [max(float(v) * float(cand.fg_lagcorr_sigma_scale), 1e-6) for v in fg_sigmas_native]
+    lag_gap_margin: List[float] = []
+    for idx, fg_mu in enumerate(fg_means):
+        eor_mu = float(cand.eor_lagcorr_mean[idx]) if idx < len(cand.eor_lagcorr_mean) else 0.0
+        target_gap = max(float(fg_mu) - eor_mu, 0.0)
+        lag_gap_margin.append(float(cand.lagcorr_gap_margin_scale) * target_gap)
 
-    lagcorr_weight = 1.0 if cand.loss_mode == "lagcorr" else 0.0
+    extra_terms = _parse_extra_terms(cand.loss_mode)
+    lagcorr_weight = 1.0 if "lagcorr" in extra_terms else 0.0
 
     cfg: Dict[str, object] = {
         "input_cube": str(ds.input_cube),
@@ -329,7 +402,8 @@ def build_config(
         "print_every": int(args.print_every),
         "device": f"cuda:{gpu_index}",
         "dtype": "float32",
-        "loss_mode": cand.loss_mode,
+        "loss_mode": "base",
+        "extra_loss_terms": extra_terms,
         "extra_loss_start_iter": int(args.extra_loss_start_iter),
         "extra_loss_ramp_iters": int(args.extra_loss_ramp_iters),
         "cut_xy": {
@@ -347,6 +421,7 @@ def build_config(
             "lagcorr_weight": float(lagcorr_weight),
             "lagcorr_fg_component_weight": float(cand.lagcorr_fg_component_weight),
             "lagcorr_eor_component_weight": float(cand.lagcorr_eor_component_weight),
+            "lagcorr_gap_weight": float(cand.lagcorr_gap_weight),
             "fft_weight": 0.0,
             "poly_weight": 0.0,
         },
@@ -370,6 +445,9 @@ def build_config(
             "fg_lagcorr_sigma": fg_sigmas,
             "eor_lagcorr_mean": list(cand.eor_lagcorr_mean),
             "eor_lagcorr_sigma": list(cand.eor_lagcorr_sigma),
+            "lagcorr_gap_margin": lag_gap_margin,
+            "lagcorr_gap_sigma": [float(cand.lagcorr_gap_sigma)] * len(lag_intervals),
+            "lagcorr_gap_mode": str(cand.lagcorr_gap_mode),
             "lagcorr_max_pairs": 256,
             "fft_highfreq_percent": 0.7,
             "fft_use_log_energy": True,
@@ -512,6 +590,11 @@ def _empty_metrics() -> Dict[str, Optional[float]]:
         "eor_corr_mean": None,
         "eor_std_ratio": None,
         "recon_mse": None,
+        "lag_gap_diff1_mae": None,
+        "lag_gap_diff1_rmse": None,
+        "lag_gap_diff1_profile_corr": None,
+        "lag_gap_diff1_hit_ratio": None,
+        "lag_gap_diff1_shortfall_mean": None,
         "eor_lag_raw_mae": None,
         "eor_lag_raw_rmse": None,
         "eor_lag_raw_profile_corr": None,
@@ -541,6 +624,7 @@ def compute_metrics(
     run_dir: Optional[Path] = None,
     lag_intervals_mhz: Sequence[float] = LAG_INTERVALS_MHZ,
     freq_delta_mhz: float = 0.1,
+    gap_margin_target_diff1: Optional[Sequence[float]] = None,
 ) -> Dict[str, Optional[float]]:
     metrics = _empty_metrics()
     if not eor_est_path.exists() or not fg_est_path.exists():
@@ -552,10 +636,13 @@ def compute_metrics(
         fg_est = np.asarray(hdul[0].data, dtype=np.float32)
     with fits.open(ds.eor_true_cube, memmap=True) as hdul:
         eor_true_full = np.asarray(hdul[0].data, dtype=np.float32)
+    with fits.open(ds.fg_true_cube, memmap=True) as hdul:
+        fg_true_full = np.asarray(hdul[0].data, dtype=np.float32)
     with fits.open(ds.input_cube, memmap=True) as hdul:
         y_full = np.asarray(hdul[0].data, dtype=np.float32)
 
     eor_true = _center_crop_to_shape(eor_true_full, eor_est.shape)
+    fg_true = _center_crop_to_shape(fg_true_full, fg_est.shape)
     y_obs = _center_crop_to_shape(y_full, eor_est.shape)
 
     eor_mse = float(np.mean((eor_est - eor_true) ** 2))
@@ -588,9 +675,38 @@ def compute_metrics(
         freq_delta_mhz=freq_delta_mhz,
         feature="diff1",
     )
+    fg_diff1_est = _lag_profile_for_cube(
+        fg_est,
+        lag_intervals_mhz=lag_intervals_mhz,
+        freq_delta_mhz=freq_delta_mhz,
+        feature="diff1",
+    )
+    fg_diff1_true = _lag_profile_for_cube(
+        fg_true,
+        lag_intervals_mhz=lag_intervals_mhz,
+        freq_delta_mhz=freq_delta_mhz,
+        feature="diff1",
+    )
+    gap_diff1_est = [float(fg_diff1_est[i] - diff1_est[i]) for i in range(len(diff1_est))]
+    gap_diff1_true = [float(fg_diff1_true[i] - diff1_true[i]) for i in range(len(diff1_true))]
 
     raw_metrics = _lag_profile_metrics(raw_est, raw_true, lag_intervals_mhz=lag_intervals_mhz)
     diff1_metrics = _lag_profile_metrics(diff1_est, diff1_true, lag_intervals_mhz=lag_intervals_mhz)
+    gap_diff1_metrics = _lag_profile_metrics(
+        gap_diff1_est,
+        gap_diff1_true,
+        lag_intervals_mhz=lag_intervals_mhz,
+    )
+
+    gap_hit_ratio: Optional[float] = None
+    gap_shortfall_mean: Optional[float] = None
+    if gap_margin_target_diff1 is not None:
+        target = np.asarray(list(gap_margin_target_diff1), dtype=np.float64).reshape(-1)
+        est = np.asarray(gap_diff1_est, dtype=np.float64).reshape(-1)
+        if target.size == est.size and target.size > 0:
+            hit = est >= target
+            gap_hit_ratio = float(np.mean(hit))
+            gap_shortfall_mean = float(np.mean(np.clip(target - est, a_min=0.0, a_max=None)))
 
     metrics.update(
         {
@@ -598,6 +714,11 @@ def compute_metrics(
         "eor_corr_mean": eor_corr_mean,
         "eor_std_ratio": eor_std_ratio,
         "recon_mse": recon_mse,
+        "lag_gap_diff1_mae": gap_diff1_metrics["mae"],
+        "lag_gap_diff1_rmse": gap_diff1_metrics["rmse"],
+        "lag_gap_diff1_profile_corr": gap_diff1_metrics["profile_corr"],
+        "lag_gap_diff1_hit_ratio": gap_hit_ratio,
+        "lag_gap_diff1_shortfall_mean": gap_shortfall_mean,
         "eor_lag_raw_mae": raw_metrics["mae"],
         "eor_lag_raw_rmse": raw_metrics["rmse"],
         "eor_lag_raw_profile_corr": raw_metrics["profile_corr"],
@@ -624,7 +745,11 @@ def compute_metrics(
             "lag_intervals_mhz": [float(v) for v in lag_intervals_mhz],
             "raw": {"est": [float(v) for v in raw_est], "true": [float(v) for v in raw_true]},
             "diff1": {"est": [float(v) for v in diff1_est], "true": [float(v) for v in diff1_true]},
+            "fg_diff1": {"est": [float(v) for v in fg_diff1_est], "true": [float(v) for v in fg_diff1_true]},
+            "gap_diff1": {"est": [float(v) for v in gap_diff1_est], "true": [float(v) for v in gap_diff1_true]},
         }
+        if gap_margin_target_diff1 is not None:
+            payload["gap_diff1_target"] = [float(v) for v in gap_margin_target_diff1]
         with (run_dir / "eor_lag_profile.json").open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)
 
@@ -680,6 +805,10 @@ def write_summary(output_dir: Path, rows: Sequence[Dict[str, object]]) -> Tuple[
         "eor_prior_sigma",
         "lagcorr_fg_component_weight",
         "lagcorr_eor_component_weight",
+        "lagcorr_gap_weight",
+        "lagcorr_gap_margin_scale",
+        "lagcorr_gap_sigma",
+        "lagcorr_gap_mode",
         "status",
         "return_code",
         "runtime_sec",
@@ -687,6 +816,11 @@ def write_summary(output_dir: Path, rows: Sequence[Dict[str, object]]) -> Tuple[
         "eor_corr_mean",
         "eor_std_ratio",
         "recon_mse",
+        "lag_gap_diff1_mae",
+        "lag_gap_diff1_rmse",
+        "lag_gap_diff1_profile_corr",
+        "lag_gap_diff1_hit_ratio",
+        "lag_gap_diff1_shortfall_mean",
         "eor_lag_raw_mae",
         "eor_lag_raw_rmse",
         "eor_lag_raw_profile_corr",
@@ -731,17 +865,18 @@ def write_summary(output_dir: Path, rows: Sequence[Dict[str, object]]) -> Tuple[
     with md_path.open("w", encoding="utf-8") as handle:
         handle.write("# lagcorr EoR prior design experiment\n\n")
         handle.write(
-            "| candidate | dataset | feature | gamma | eor_sigma | w_fg | w_eor | status | runtime_sec | eor_mse | eor_corr_mean | std_ratio | lag_raw_rmse | lag_raw_corr | lag_diff1_rmse | lag_diff1_corr |\n"
+            "| candidate | dataset | feature | gamma | eor_sigma | w_fg | w_eor | w_gap | status | runtime_sec | eor_mse | eor_corr_mean | std_ratio | gap_hit | gap_shortfall | lag_diff1_rmse | lag_diff1_corr |\n"
         )
-        handle.write("|---|---|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+        handle.write("|---|---|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|\n")
         for row in rows:
             handle.write(
                 f"| {row.get('candidate')} | {row.get('dataset')} | {row.get('lagcorr_feature')} | "
                 f"{_fmt(row.get('gamma'))} | {_fmt(row.get('eor_prior_sigma'))} | "
                 f"{_fmt(row.get('lagcorr_fg_component_weight'))} | {_fmt(row.get('lagcorr_eor_component_weight'))} | "
+                f"{_fmt(row.get('lagcorr_gap_weight'))} | "
                 f"{row.get('status')} | {_fmt(row.get('runtime_sec'))} | {_fmt(row.get('eor_mse'))} | "
                 f"{_fmt(row.get('eor_corr_mean'))} | {_fmt(row.get('eor_std_ratio'))} | "
-                f"{_fmt(row.get('eor_lag_raw_rmse'))} | {_fmt(row.get('eor_lag_raw_profile_corr'))} | "
+                f"{_fmt(row.get('lag_gap_diff1_hit_ratio'))} | {_fmt(row.get('lag_gap_diff1_shortfall_mean'))} | "
                 f"{_fmt(row.get('eor_lag_diff1_rmse'))} | {_fmt(row.get('eor_lag_diff1_profile_corr'))} |\n"
             )
     return csv_path, md_path
@@ -833,18 +968,26 @@ def main() -> int:
                 runtime = time.time() - t0
                 close_job_process(proc)
                 status = "ok" if ret == 0 else "failed"
-                metrics = (
-                    compute_metrics(
+                metrics: Dict[str, Optional[float]]
+                if ret == 0:
+                    gap_margin_target = None
+                    try:
+                        with job.config_path.open("r", encoding="utf-8") as handle:
+                            cfg_data = json.load(handle)
+                        gap_margin_target = cfg_data.get("priors", {}).get("lagcorr_gap_margin")
+                    except Exception:
+                        gap_margin_target = None
+                    metrics = compute_metrics(
                         job.eor_output,
                         job.fg_output,
                         job.dataset,
                         run_dir=job.run_dir,
                         lag_intervals_mhz=LAG_INTERVALS_MHZ,
                         freq_delta_mhz=0.1,
+                        gap_margin_target_diff1=gap_margin_target,
                     )
-                    if ret == 0
-                    else _empty_metrics()
-                )
+                else:
+                    metrics = _empty_metrics()
 
                 row: Dict[str, object] = {
                     "candidate": job.candidate.name,
@@ -855,6 +998,10 @@ def main() -> int:
                     "eor_prior_sigma": job.candidate.eor_prior_sigma,
                     "lagcorr_fg_component_weight": job.candidate.lagcorr_fg_component_weight,
                     "lagcorr_eor_component_weight": job.candidate.lagcorr_eor_component_weight,
+                    "lagcorr_gap_weight": job.candidate.lagcorr_gap_weight,
+                    "lagcorr_gap_margin_scale": job.candidate.lagcorr_gap_margin_scale,
+                    "lagcorr_gap_sigma": job.candidate.lagcorr_gap_sigma,
+                    "lagcorr_gap_mode": job.candidate.lagcorr_gap_mode,
                     "status": status,
                     "return_code": ret,
                     "runtime_sec": runtime,

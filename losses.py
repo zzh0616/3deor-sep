@@ -259,6 +259,132 @@ def _frequency_lag_correlation_loss(
     return torch.mean(torch.stack(losses))
 
 
+def _frequency_lag_correlation_stats(
+    cube: Tensor,
+    *,
+    freq_axis: int,
+    lag_channels: Tensor,
+    prior_mean: Tensor,
+    prior_sigma: Tensor,
+    max_pairs: Optional[int] = None,
+    pair_sampling: str = "head",
+    rng: Optional[torch.Generator] = None,
+    eps: float = 1e-8,
+) -> Tuple[Tensor, Tensor, Tensor]:
+    """
+    Return lagcorr prior loss plus per-lag correlation mean/variance.
+
+    The first return value matches `_frequency_lag_correlation_loss`:
+    mean over configured lags of normalized squared residuals.
+    """
+    if cube.ndim != 3:
+        raise ValueError(f"Expected a 3D cube, got shape {tuple(cube.shape)}")
+
+    lag_tensor = lag_channels
+    if not torch.is_tensor(lag_tensor):
+        lag_tensor = torch.as_tensor(lag_tensor, device=cube.device)
+    lag_tensor = lag_tensor.to(device=cube.device)
+    if lag_tensor.ndim == 0:
+        lag_tensor = lag_tensor.view(1)
+    lag_tensor = lag_tensor.to(dtype=torch.int64).reshape(-1)
+
+    if max_pairs is not None:
+        if not isinstance(max_pairs, int):
+            raise TypeError("max_pairs must be an int or None.")
+        if max_pairs <= 0:
+            max_pairs = None
+    pair_sampling_norm = str(pair_sampling).strip().lower()
+    if pair_sampling_norm not in {"head", "random"}:
+        raise ValueError("pair_sampling must be 'head' or 'random'.")
+
+    mean_tensor = prior_mean if torch.is_tensor(prior_mean) else torch.as_tensor(prior_mean, device=cube.device)
+    sigma_tensor = prior_sigma if torch.is_tensor(prior_sigma) else torch.as_tensor(prior_sigma, device=cube.device)
+    mean_tensor = mean_tensor.to(device=cube.device, dtype=cube.dtype)
+    sigma_tensor = sigma_tensor.to(device=cube.device, dtype=cube.dtype)
+    if mean_tensor.ndim == 0:
+        mean_tensor = mean_tensor.view(1)
+    if sigma_tensor.ndim == 0:
+        sigma_tensor = sigma_tensor.view(1)
+    mean_tensor = mean_tensor.reshape(-1)
+    sigma_tensor = sigma_tensor.reshape(-1)
+    if mean_tensor.numel() not in (1, lag_tensor.numel()):
+        raise ValueError("lagcorr prior_mean must be a scalar or match lag_channels length.")
+    if sigma_tensor.numel() not in (1, lag_tensor.numel()):
+        raise ValueError("lagcorr prior_sigma must be a scalar or match lag_channels length.")
+
+    moved = cube.movedim(freq_axis, 0)
+    num_freqs = moved.shape[0]
+    flat = moved.reshape(num_freqs, -1)
+    centered = flat - flat.mean(dim=1, keepdim=True)
+    norms = torch.norm(centered, dim=1)
+    norms = torch.clamp(norms, min=eps)
+
+    losses = []
+    lag_means = []
+    lag_vars = []
+    for idx, lag in enumerate(lag_tensor.tolist()):
+        if lag < 1:
+            raise ValueError(f"lag_channels entries must be >= 1, got {lag}.")
+        if lag >= num_freqs:
+            raise ValueError(f"lag_channels entry {lag} exceeds num_freqs={num_freqs}.")
+
+        num_total = num_freqs - lag
+        num_pairs = min(num_total, max_pairs) if max_pairs is not None else num_total
+        if num_pairs <= 0:
+            continue
+
+        if max_pairs is None or num_pairs == num_total or pair_sampling_norm == "head":
+            pair_idx = torch.arange(num_pairs, device=cube.device)
+        else:
+            pair_idx = torch.randperm(num_total, device="cpu", generator=rng)[:num_pairs]
+            pair_idx = pair_idx.to(device=cube.device, dtype=torch.int64)
+        pair_j = pair_idx + lag
+
+        a = centered.index_select(0, pair_idx)
+        b = centered.index_select(0, pair_j)
+        dot = torch.sum(a * b, dim=1)
+        denom = norms.index_select(0, pair_idx) * norms.index_select(0, pair_j)
+        denom = torch.clamp(denom, min=eps)
+        corr = dot / denom
+
+        mean_k = mean_tensor[idx] if mean_tensor.numel() > 1 else mean_tensor[0]
+        sigma_k = sigma_tensor[idx] if sigma_tensor.numel() > 1 else sigma_tensor[0]
+        sigma_k = clamp_eps(sigma_k, eps=EPS_LOSS)
+        losses.append(torch.mean(((corr - mean_k) / sigma_k) ** 2))
+        lag_means.append(torch.mean(corr))
+        lag_vars.append(torch.var(corr, unbiased=False))
+
+    if not losses:
+        zero = torch.zeros((), device=cube.device, dtype=cube.dtype)
+        empty = torch.empty((0,), device=cube.device, dtype=cube.dtype)
+        return zero, empty, empty
+    return torch.mean(torch.stack(losses)), torch.stack(lag_means), torch.stack(lag_vars)
+
+
+def _resolve_lag_vector_prior(
+    value: Optional[Union[Tensor, Sequence[float], float]],
+    *,
+    lag_count: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    name: str,
+    default: Optional[float] = None,
+) -> Optional[Tensor]:
+    if value is None:
+        if default is None:
+            return None
+        return torch.full((lag_count,), float(default), device=device, dtype=dtype)
+    tensor = value if torch.is_tensor(value) else torch.as_tensor(value, device=device, dtype=dtype)
+    tensor = tensor.to(device=device, dtype=dtype).reshape(-1)
+    if tensor.numel() == 1:
+        return tensor.repeat(lag_count)
+    if tensor.numel() != lag_count:
+        raise ValueError(
+            f"{name} must be a scalar or match lagcorr_lags length ({tensor.numel()} vs {lag_count})."
+        )
+    return tensor
+
+
 def _apply_lagcorr_feature(cube: Tensor, *, freq_axis: int, feature: str) -> Tensor:
     feature_norm = str(feature).strip().lower()
     if feature_norm == "raw":
@@ -404,6 +530,10 @@ def loss_function(
     poly_residual: Optional[Tensor] = None,
     lagcorr_pair_sampling: str = "head",
     lagcorr_rng: Optional[torch.Generator] = None,
+    lagcorr_gap_weight: float = 0.0,
+    lagcorr_gap_margin: Optional[Union[Tensor, Sequence[float], float]] = 0.0,
+    lagcorr_gap_sigma: Optional[Union[Tensor, Sequence[float], float]] = 1.0,
+    lagcorr_gap_mode: str = "hinge",
 ) -> Tuple[Tensor, Dict[str, Tensor]]:
     """
     Combined loss used for optimizing foreground and EoR components.
@@ -441,6 +571,7 @@ def loss_function(
     extra_scale = max(0.0, min(1.0, extra_scale))
 
     lagcorr_loss = torch.zeros_like(data_loss)
+    lagcorr_gap_loss = torch.zeros_like(data_loss)
     if "lagcorr" in active_term_set and extra_scale > 0.0:
         unit_norm = lagcorr_unit.strip().lower()
         if unit_norm not in {"mhz", "chan"}:
@@ -464,13 +595,14 @@ def loss_function(
         eor_for_lag = _apply_lagcorr_feature(eor, freq_axis=freq_axis, feature=lagcorr_feature)
 
         fg_loss = torch.zeros_like(data_loss)
+        fg_corr_lag_mean: Optional[Tensor] = None
         if fg_component > 0.0:
             if fg_lagcorr_mean is None or fg_lagcorr_sigma is None:
                 raise ValueError(
                     "fg_lagcorr_mean/fg_lagcorr_sigma must be provided when "
                     "lagcorr_fg_component_weight > 0."
                 )
-            fg_loss = _frequency_lag_correlation_loss(
+            fg_loss, fg_corr_lag_mean, _ = _frequency_lag_correlation_stats(
                 fg_for_lag,
                 freq_axis=freq_axis,
                 lag_channels=lagcorr_lags,
@@ -482,13 +614,14 @@ def loss_function(
             )
 
         eor_loss = torch.zeros_like(data_loss)
+        eor_corr_lag_mean: Optional[Tensor] = None
         if eor_component > 0.0:
             if eor_lagcorr_mean is None or eor_lagcorr_sigma is None:
                 raise ValueError(
                     "eor_lagcorr_mean/eor_lagcorr_sigma must be provided when "
                     "lagcorr_eor_component_weight > 0."
                 )
-            eor_loss = _frequency_lag_correlation_loss(
+            eor_loss, eor_corr_lag_mean, _ = _frequency_lag_correlation_stats(
                 eor_for_lag,
                 freq_axis=freq_axis,
                 lag_channels=lagcorr_lags,
@@ -500,6 +633,44 @@ def loss_function(
             )
 
         lagcorr_loss = (fg_component * fg_loss + eor_component * eor_loss) / total_component
+
+        gap_weight = float(lagcorr_gap_weight)
+        if not math.isfinite(gap_weight) or gap_weight < 0.0:
+            raise ValueError("lagcorr_gap_weight must be a finite non-negative value.")
+        gap_mode = str(lagcorr_gap_mode).strip().lower()
+        if gap_mode not in {"hinge", "squared"}:
+            raise ValueError("lagcorr_gap_mode must be 'hinge' or 'squared'.")
+        if gap_weight > 0.0:
+            if fg_corr_lag_mean is None or eor_corr_lag_mean is None:
+                raise ValueError(
+                    "lagcorr_gap_weight > 0 requires both FG and EoR lagcorr components enabled."
+                )
+            lag_count = int(fg_corr_lag_mean.numel())
+            margin_vec = _resolve_lag_vector_prior(
+                lagcorr_gap_margin,
+                lag_count=lag_count,
+                device=fg_corr_lag_mean.device,
+                dtype=fg_corr_lag_mean.dtype,
+                name="lagcorr_gap_margin",
+                default=0.0,
+            )
+            sigma_vec = _resolve_lag_vector_prior(
+                lagcorr_gap_sigma,
+                lag_count=lag_count,
+                device=fg_corr_lag_mean.device,
+                dtype=fg_corr_lag_mean.dtype,
+                name="lagcorr_gap_sigma",
+                default=1.0,
+            )
+            assert margin_vec is not None and sigma_vec is not None
+            sigma_vec = clamp_eps(sigma_vec, eps=EPS_LOSS)
+            lag_gap = fg_corr_lag_mean - eor_corr_lag_mean
+            if gap_mode == "hinge":
+                residual = torch.clamp(margin_vec - lag_gap, min=0.0)
+            else:
+                residual = lag_gap - margin_vec
+            lagcorr_gap_loss = torch.mean((residual / sigma_vec) ** 2)
+            lagcorr_loss = lagcorr_loss + gap_weight * lagcorr_gap_loss
 
     fft_loss = torch.zeros_like(data_loss)
     if "rfft" in active_term_set and extra_scale > 0.0:
@@ -546,6 +717,7 @@ def loss_function(
         "corr": corr_loss,
         "corr_coeff": corr_coeff,
         "lagcorr": lagcorr_loss,
+        "lagcorr_gap": lagcorr_gap_loss,
         "fft_highfreq": fft_loss,
         "poly": poly_loss,
     }
