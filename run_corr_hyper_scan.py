@@ -175,20 +175,25 @@ def parse_gpu_map(text: str) -> Dict[str, int]:
 
 
 def build_datasets(data_dir: Path) -> List[DatasetSpec]:
-    return [
+    datasets = [
         DatasetSpec(
             name="cube1",
+            input_cube=data_dir / "back" / "all_cube1.fits",
+            fg_true_cube=data_dir / "fg_cube1.fits",
+            eor_true_cube=data_dir / "eor_cube1.fits",
+        ),
+        DatasetSpec(
+            name="cube2",
             input_cube=data_dir / "all_cube2.fits",
             fg_true_cube=data_dir / "fg_cube2.fits",
             eor_true_cube=data_dir / "eor_cube2.fits",
         ),
-        DatasetSpec(
-            name="cube2",
-            input_cube=data_dir / "all_cube1.fits",
-            fg_true_cube=data_dir / "fg_cube1.fits",
-            eor_true_cube=data_dir / "eor_cube1.fits",
-        ),
     ]
+    for ds in datasets:
+        for p in (ds.input_cube, ds.fg_true_cube, ds.eor_true_cube):
+            if not p.exists():
+                raise FileNotFoundError(f"Missing required file: {p}")
+    return datasets
 
 
 def _fmt_float_token(value: float) -> str:
@@ -749,4 +754,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
