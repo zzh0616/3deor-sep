@@ -1,5 +1,6 @@
 back/
 __pycache__/
+outputs/
 tmp_powerspec/
 tmp_ps/
 tmp_*
