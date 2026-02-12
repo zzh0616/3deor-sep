@@ -54,6 +54,7 @@ class CandidateSpec:
     fg_lagcorr_sigma_scale: float
     gamma: float
     eor_prior_sigma: float
+    eor_prior_amp_threshold: float
     eor_lagcorr_mean: List[float]
     eor_lagcorr_sigma: List[float]
     note: str
@@ -72,6 +73,7 @@ class JobSpec:
 
 
 LAG_INTERVALS_MHZ: List[float] = [0.1, 0.2, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 7.5]
+FIXED_EOR_AMP_THRESHOLD: float = 0.1
 
 
 def _short_lag_weights(
@@ -119,6 +121,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-iters", type=int, default=500, help="Iterations per run.")
     parser.add_argument("--print-every", type=int, default=50, help="Logging interval.")
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate.")
+    parser.add_argument(
+        "--eor-amp-threshold",
+        type=float,
+        default=FIXED_EOR_AMP_THRESHOLD,
+        help=(
+            "EoR amplitude prior dead-zone threshold. "
+            f"For this project workflow it is fixed to {FIXED_EOR_AMP_THRESHOLD:.3f}."
+        ),
+    )
     parser.add_argument("--cut-size-frac", type=float, default=0.30, help="Spatial center cut fraction.")
     parser.add_argument("--extra-loss-start-iter", type=int, default=80, help="Extra-loss start iter.")
     parser.add_argument("--extra-loss-ramp-iters", type=int, default=120, help="Extra-loss ramp iters.")
@@ -139,6 +150,13 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="",
         help="Comma-separated candidate names to run. Empty runs all.",
+    )
+    parser.add_argument(
+        "--candidate-bank",
+        type=str,
+        default="default",
+        choices=["default", "scan_a"],
+        help="Candidate set to use. 'scan_a' builds a 30-config Stage-A hyperparameter scan.",
     )
     parser.add_argument(
         "--max-concurrent-jobs",
@@ -184,7 +202,7 @@ def build_datasets(data_dir: Path) -> List[DatasetSpec]:
     return datasets
 
 
-def build_candidates() -> List[CandidateSpec]:
+def _build_default_candidates(*, default_eor_amp_threshold: float) -> List[CandidateSpec]:
     zeros = [0.0] * len(LAG_INTERVALS_MHZ)
 
     # Physically stable EoR-lag priors in diff1 domain:
@@ -212,6 +230,7 @@ def build_candidates() -> List[CandidateSpec]:
             fg_lagcorr_sigma_scale=2.0,
             gamma=0.0,
             eor_prior_sigma=0.02,
+            eor_prior_amp_threshold=float(default_eor_amp_threshold),
             eor_lagcorr_mean=zeros,
             eor_lagcorr_sigma=loose_sigma,
             note="reference base mode",
@@ -232,6 +251,7 @@ def build_candidates() -> List[CandidateSpec]:
             fg_lagcorr_sigma_scale=2.0,
             gamma=0.0,
             eor_prior_sigma=0.02,
+            eor_prior_amp_threshold=float(default_eor_amp_threshold),
             eor_lagcorr_mean=zeros,
             eor_lagcorr_sigma=loose_sigma,
             note="best previous fg-only lagcorr baseline",
@@ -252,6 +272,7 @@ def build_candidates() -> List[CandidateSpec]:
             fg_lagcorr_sigma_scale=2.0,
             gamma=0.2,
             eor_prior_sigma=0.02,
+            eor_prior_amp_threshold=float(default_eor_amp_threshold),
             eor_lagcorr_mean=zeros,
             eor_lagcorr_sigma=loose_sigma,
             note="EoR lag term delayed and ramped (uniform lag weights)",
@@ -272,6 +293,7 @@ def build_candidates() -> List[CandidateSpec]:
             fg_lagcorr_sigma_scale=2.0,
             gamma=0.2,
             eor_prior_sigma=0.02,
+            eor_prior_amp_threshold=float(default_eor_amp_threshold),
             eor_lagcorr_mean=zeros,
             eor_lagcorr_sigma=loose_sigma,
             note="EoR lag term delayed+ramped with short-lag emphasis (p=1.0)",
@@ -292,6 +314,7 @@ def build_candidates() -> List[CandidateSpec]:
             fg_lagcorr_sigma_scale=2.0,
             gamma=0.2,
             eor_prior_sigma=0.02,
+            eor_prior_amp_threshold=float(default_eor_amp_threshold),
             eor_lagcorr_mean=zeros,
             eor_lagcorr_sigma=loose_sigma,
             note="Short-lag weighting + delayed mild lag-gap constraint",
@@ -312,11 +335,101 @@ def build_candidates() -> List[CandidateSpec]:
             fg_lagcorr_sigma_scale=2.0,
             gamma=0.2,
             eor_prior_sigma=0.02,
+            eor_prior_amp_threshold=float(default_eor_amp_threshold),
             eor_lagcorr_mean=zeros,
             eor_lagcorr_sigma=loose_sigma,
             note="Stronger short-lag emphasis (p=1.5), reduced EoR weight",
         ),
     ]
+
+
+def _build_scan_a_candidates() -> List[CandidateSpec]:
+    """
+    Stage-A coarse hyperparameter scan with fixed EoR amplitude threshold.
+    Current size: 6 configs (1 FG-only baseline + 5 EoR-lag variants).
+    """
+    zeros = [0.0] * len(LAG_INTERVALS_MHZ)
+    loose_sigma = [0.35, 0.30, 0.25, 0.20, 0.18, 0.15, 0.12, 0.12, 0.12]
+    uniform_w = [1.0] * len(LAG_INTERVALS_MHZ)
+    short_w_p10 = _short_lag_weights(LAG_INTERVALS_MHZ, power=1.0, pivot_mhz=0.5, min_weight=0.30)
+    short_w_p15 = _short_lag_weights(LAG_INTERVALS_MHZ, power=1.5, pivot_mhz=0.5, min_weight=0.25)
+    short_w_p20 = _short_lag_weights(LAG_INTERVALS_MHZ, power=2.0, pivot_mhz=0.5, min_weight=0.20)
+
+    thresholds = [FIXED_EOR_AMP_THRESHOLD]
+    out: List[CandidateSpec] = []
+
+    def _thr_tag(value: float) -> str:
+        milli = int(round(float(value) * 1000.0))
+        return f"{milli:03d}mK"
+
+    for thr in thresholds:
+        tag = _thr_tag(thr)
+        out.append(
+            CandidateSpec(
+                name=f"sa_fgonly_thr{tag}",
+                loss_mode="lagcorr",
+                lagcorr_feature="diff1",
+                lagcorr_fg_component_weight=1.0,
+                lagcorr_eor_component_weight=0.0,
+                lagcorr_gap_weight=0.0,
+                lagcorr_gap_margin_scale=0.0,
+                lagcorr_gap_sigma=1.0,
+                lagcorr_gap_mode="hinge",
+                lagcorr_lag_weights=uniform_w,
+                lagcorr_eor_start_iter=0,
+                lagcorr_eor_ramp_iters=0,
+                fg_lagcorr_sigma_scale=2.0,
+                gamma=0.0,
+                eor_prior_sigma=0.02,
+                eor_prior_amp_threshold=float(thr),
+                eor_lagcorr_mean=zeros,
+                eor_lagcorr_sigma=loose_sigma,
+                note=f"StageA baseline FG-only, thr={thr:.3f}",
+            )
+        )
+
+        variants = [
+            ("uniform_w20_g005_s050_st900_r1200", uniform_w, 0.20, 0.05, 0.05, 900, 1200),
+            ("p10_w30_g010_s030_st600_r0800", short_w_p10, 0.30, 0.10, 0.03, 600, 800),
+            ("p15_w30_g020_s020_st300_r0400", short_w_p15, 0.30, 0.20, 0.02, 300, 400),
+            ("p20_w40_g030_s020_st300_r0400", short_w_p20, 0.40, 0.30, 0.02, 300, 400),
+            ("p10_w40_g010_s050_st900_r1200", short_w_p10, 0.40, 0.10, 0.05, 900, 1200),
+        ]
+        for suffix, weights, eor_w, gamma, eor_sigma, start, ramp in variants:
+            out.append(
+                CandidateSpec(
+                    name=f"sa_eor_thr{tag}_{suffix}",
+                    loss_mode="lagcorr",
+                    lagcorr_feature="diff1",
+                    lagcorr_fg_component_weight=1.0,
+                    lagcorr_eor_component_weight=float(eor_w),
+                    lagcorr_gap_weight=0.0,
+                    lagcorr_gap_margin_scale=0.0,
+                    lagcorr_gap_sigma=1.0,
+                    lagcorr_gap_mode="hinge",
+                    lagcorr_lag_weights=weights,
+                    lagcorr_eor_start_iter=int(start),
+                    lagcorr_eor_ramp_iters=int(ramp),
+                    fg_lagcorr_sigma_scale=2.0,
+                    gamma=float(gamma),
+                    eor_prior_sigma=float(eor_sigma),
+                    eor_prior_amp_threshold=float(thr),
+                    eor_lagcorr_mean=zeros,
+                    eor_lagcorr_sigma=loose_sigma,
+                    note=f"StageA EoR-lag variant, thr={thr:.3f}, {suffix}",
+                )
+            )
+    return out
+
+
+def build_candidates(*, candidate_bank: str, default_eor_amp_threshold: float) -> List[CandidateSpec]:
+    bank = str(candidate_bank).strip().lower()
+    default_eor_amp_threshold = float(FIXED_EOR_AMP_THRESHOLD)
+    if bank == "default":
+        return _build_default_candidates(default_eor_amp_threshold=default_eor_amp_threshold)
+    if bank == "scan_a":
+        return _build_scan_a_candidates()
+    raise ValueError(f"Unsupported candidate_bank: {candidate_bank}")
 
 
 def _center_cut(arr: np.ndarray, frac: float) -> np.ndarray:
@@ -455,6 +568,7 @@ def build_config(
             "data_error": 0.005,
             "eor_prior_mean": 0.0,
             "eor_prior_sigma": float(cand.eor_prior_sigma),
+            "eor_prior_amp_threshold": float(cand.eor_prior_amp_threshold),
             "fg_smooth_mean": 0.0,
             "fg_smooth_sigma": 0.0005,
             "fg_reference_cube": str(ds.fg_true_cube),
@@ -832,6 +946,7 @@ def write_summary(output_dir: Path, rows: Sequence[Dict[str, object]]) -> Tuple[
         "lagcorr_feature",
         "gamma",
         "eor_prior_sigma",
+        "eor_prior_amp_threshold",
         "lagcorr_fg_component_weight",
         "lagcorr_eor_component_weight",
         "lagcorr_eor_start_iter",
@@ -897,13 +1012,14 @@ def write_summary(output_dir: Path, rows: Sequence[Dict[str, object]]) -> Tuple[
     with md_path.open("w", encoding="utf-8") as handle:
         handle.write("# lagcorr EoR prior design experiment\n\n")
         handle.write(
-            "| candidate | dataset | feature | gamma | eor_sigma | w_fg | w_eor | eor_start | eor_ramp | w_gap | status | runtime_sec | eor_mse | eor_corr_mean | std_ratio | gap_hit | gap_shortfall | lag_diff1_rmse | lag_diff1_corr |\n"
+            "| candidate | dataset | feature | gamma | eor_sigma | eor_thr | w_fg | w_eor | eor_start | eor_ramp | w_gap | status | runtime_sec | eor_mse | eor_corr_mean | std_ratio | gap_hit | gap_shortfall | lag_diff1_rmse | lag_diff1_corr |\n"
         )
-        handle.write("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+        handle.write("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|\n")
         for row in rows:
             handle.write(
                 f"| {row.get('candidate')} | {row.get('dataset')} | {row.get('lagcorr_feature')} | "
                 f"{_fmt(row.get('gamma'))} | {_fmt(row.get('eor_prior_sigma'))} | "
+                f"{_fmt(row.get('eor_prior_amp_threshold'))} | "
                 f"{_fmt(row.get('lagcorr_fg_component_weight'))} | {_fmt(row.get('lagcorr_eor_component_weight'))} | "
                 f"{_fmt(row.get('lagcorr_eor_start_iter'))} | {_fmt(row.get('lagcorr_eor_ramp_iters'))} | "
                 f"{_fmt(row.get('lagcorr_gap_weight'))} | "
@@ -927,6 +1043,11 @@ def _json_safe(value: object) -> object:
 
 def main() -> int:
     args = parse_args()
+    if not math.isclose(float(args.eor_amp_threshold), float(FIXED_EOR_AMP_THRESHOLD), rel_tol=0.0, abs_tol=1e-12):
+        print(
+            f"Warning: --eor-amp-threshold={float(args.eor_amp_threshold):.6g} is ignored; "
+            f"using fixed value {FIXED_EOR_AMP_THRESHOLD:.6g}."
+        )
     work_root = args.work_root.resolve()
     code_dir = args.code_dir.resolve() if args.code_dir else (work_root / "3dnet")
     data_dir = args.data_dir.resolve() if args.data_dir else (work_root / "data")
@@ -936,7 +1057,10 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     datasets = build_datasets(data_dir)
-    candidates = build_candidates()
+    candidates = build_candidates(
+        candidate_bank=args.candidate_bank,
+        default_eor_amp_threshold=float(FIXED_EOR_AMP_THRESHOLD),
+    )
     if args.candidate_names.strip():
         allow = {x.strip() for x in args.candidate_names.split(",") if x.strip()}
         known = {c.name for c in candidates}
@@ -1029,6 +1153,7 @@ def main() -> int:
                     "lagcorr_feature": job.candidate.lagcorr_feature,
                     "gamma": job.candidate.gamma,
                     "eor_prior_sigma": job.candidate.eor_prior_sigma,
+                    "eor_prior_amp_threshold": float(job.candidate.eor_prior_amp_threshold),
                     "lagcorr_fg_component_weight": job.candidate.lagcorr_fg_component_weight,
                     "lagcorr_eor_component_weight": job.candidate.lagcorr_eor_component_weight,
                     "lagcorr_eor_start_iter": job.candidate.lagcorr_eor_start_iter,

@@ -26,6 +26,7 @@ from constants import (
     DEFAULT_POLY_SIGMA,
 )
 from losses import (
+    VALID_FG_SMOOTH_MODES,
     compute_highfreq_energy,
     derive_fft_prior_from_cube,
     frequency_slice_correlation_penalty,
@@ -47,18 +48,44 @@ ForwardOperator = Callable[[Tensor], Tensor]
 Device = Union[torch.device, str]
 
 
+def _resolve_fg_smooth_mode(mode: str) -> str:
+    mode_norm = str(mode).strip().lower()
+    if mode_norm not in VALID_FG_SMOOTH_MODES:
+        valid = ", ".join(VALID_FG_SMOOTH_MODES)
+        raise ValueError(f"Unsupported fg_smooth_mode '{mode}'. Valid values: {valid}.")
+    return mode_norm
+
+
+def _fg_smooth_diff_order(mode: str) -> int:
+    mode_norm = _resolve_fg_smooth_mode(mode)
+    if mode_norm.startswith("diff1_"):
+        return 1
+    if mode_norm.startswith("diff2_"):
+        return 2
+    if mode_norm.startswith("diff3_"):
+        return 3
+    raise ValueError(f"Unable to infer derivative order from fg_smooth_mode '{mode}'.")
+
+
 def derive_smoothness_stats_from_cube(
     fg_cube: Tensor,
     freq_axis: int,
+    diff_order: int = 3,
     use_robust: bool = False,
     mae_to_sigma_factor: float = 1.4826,
 ) -> Tuple[Tensor, Tensor]:
     """
-    Compute mean/std of third-order finite differences from a reference foreground cube.
+    Compute mean/std of finite differences from a reference foreground cube.
     """
-    if fg_cube.shape[freq_axis] < 4:
-        raise ValueError("Foreground reference cube must have at least 4 frequency channels.")
-    ref_diff = torch.diff(fg_cube, n=3, dim=freq_axis)
+    if diff_order < 1:
+        raise ValueError("diff_order must be >= 1.")
+    min_channels = diff_order + 1
+    if fg_cube.shape[freq_axis] < min_channels:
+        raise ValueError(
+            f"Foreground reference cube must have at least {min_channels} frequency channels "
+            f"for diff_order={diff_order}."
+        )
+    ref_diff = torch.diff(fg_cube, n=diff_order, dim=freq_axis)
     if use_robust:
         median = ref_diff.median(dim=freq_axis, keepdim=True).values
         mae = (ref_diff - median).abs().mean(dim=freq_axis, keepdim=True)
@@ -135,6 +162,12 @@ class OptimizationConfig:
     extra_loss_terms: List[str] = field(default_factory=list)  # e.g. ["corr", "rfft"]
     optimizer_name: str = "adam"
     momentum: float = 0.9
+    lr_scheduler: str = "none"  # "none" or "plateau"
+    lr_plateau_patience: int = 240
+    lr_plateau_factor: float = 0.5
+    lr_plateau_min_delta: float = 1e-4
+    lr_plateau_cooldown: int = 80
+    lr_min: float = 1e-6
     power_config: Optional[str] = None
     power_output_dir: Optional[str] = None
     freq_axis: int = 0
@@ -156,8 +189,11 @@ class OptimizationConfig:
     data_error: float = DEFAULT_DATA_ERROR
     eor_prior_mean: float = 0.0
     eor_prior_sigma: float = DEFAULT_EOR_SIGMA
+    eor_prior_amp_threshold: float = 0.0
     fg_smooth_mean: float = 0.0
     fg_smooth_sigma: float = 0.05
+    fg_smooth_mode: str = "diff3_l2"
+    fg_smooth_huber_delta: float = 1.0
     fg_reference_cube: Optional[str] = None
     use_robust_fg_stats: bool = False
     mae_to_sigma_factor: float = 1.4826
@@ -376,8 +412,11 @@ def optimize_components(
     data_error: Union[Tensor, float] = DEFAULT_DATA_ERROR,
     eor_prior_mean: Union[Tensor, float] = 0.0,
     eor_prior_sigma: Union[Tensor, float] = DEFAULT_EOR_SIGMA,
+    eor_prior_amp_threshold: Union[Tensor, float] = 0.0,
     fg_smooth_mean: Optional[Union[Tensor, float]] = 0.0,
     fg_smooth_sigma: Optional[Union[Tensor, float]] = 0.05,
+    fg_smooth_mode: str = "diff3_l2",
+    fg_smooth_huber_delta: float = 1.0,
     corr_prior_mean: Union[Tensor, float] = 0.0,
     corr_prior_sigma: Union[Tensor, float] = DEFAULT_CORR_SIGMA,
     corr_weight: float = 1.0,
@@ -418,6 +457,12 @@ def optimize_components(
     freq_delta_mhz: Optional[float] = None,
     optimizer_name: str = "adam",
     momentum: float = 0.9,
+    lr_scheduler: str = "none",
+    lr_plateau_patience: int = 240,
+    lr_plateau_factor: float = 0.5,
+    lr_plateau_min_delta: float = 1e-4,
+    lr_plateau_cooldown: int = 80,
+    lr_min: float = 1e-6,
     eor_true_tensor: Optional[Tensor] = None,
     corr_check_every: int = 0,
 ) -> Tuple[Tensor, Tensor, List[LossComponents]]:
@@ -433,8 +478,12 @@ def optimize_components(
         data_error: Measurement error (scalar or tensor broadcastable to y).
         eor_prior_mean: Prior mean for the EoR cube.
         eor_prior_sigma: Prior standard deviation for the EoR cube.
-        fg_smooth_mean: Prior mean for the third-order FG differences.
-        fg_smooth_sigma: Prior std for the third-order FG differences.
+        eor_prior_amp_threshold: Dead-zone threshold for EoR amplitude prior.
+            Values with |eor-mean| below this threshold are not penalized.
+        fg_smooth_mean: Prior mean for FG finite differences used by fg_smooth_mode.
+        fg_smooth_sigma: Prior std/scale for FG finite differences used by fg_smooth_mode.
+        fg_smooth_mode: Foreground smoothness mode ("diff3_l2", "diff2_l2", "diff2_huber", "diff1_l1").
+        fg_smooth_huber_delta: Delta for Huber smoothness mode (diff2_huber).
         corr_prior_mean: Prior mean for FG/EoR correlation coefficient.
         corr_prior_sigma: Prior std for FG/EoR correlation coefficient.
         corr_weight: Weight for the per-frequency FG/EoR correlation consistency loss.
@@ -464,11 +513,21 @@ def optimize_components(
         fft_highfreq_percent: Fraction (0-1) of the highest frequency bins to penalize.
         freq_start_mhz: Starting frequency of the cube (MHz) for poly_reparam mode.
         freq_delta_mhz: Frequency spacing of the cube (MHz) for poly_reparam mode.
+        lr_scheduler: Learning-rate scheduler ("none" or "plateau").
+        lr_plateau_patience: Plateau scheduler patience in iterations.
+        lr_plateau_factor: Multiplicative LR drop factor on plateau (0, 1).
+        lr_plateau_min_delta: Minimum absolute loss improvement to reset plateau patience.
+        lr_plateau_cooldown: Cooldown iterations after each LR drop.
+        lr_min: Minimum learning rate allowed by the scheduler.
     """
     active_extra_terms = resolve_active_extra_terms(
         loss_mode=loss_mode, extra_loss_terms=extra_loss_terms
     )
     active_term_set = set(active_extra_terms)
+    fg_smooth_mode_norm = _resolve_fg_smooth_mode(fg_smooth_mode)
+    fg_smooth_huber_delta_val = float(fg_smooth_huber_delta)
+    if not math.isfinite(fg_smooth_huber_delta_val) or fg_smooth_huber_delta_val <= 0.0:
+        raise ValueError("fg_smooth_huber_delta must be a finite positive value.")
     lagcorr_feature_norm = str(lagcorr_feature).strip().lower()
     if lagcorr_feature_norm not in {"raw", "diff1"}:
         raise ValueError("lagcorr_feature must be 'raw' or 'diff1'.")
@@ -498,6 +557,11 @@ def optimize_components(
         eor_sigma_tensor = torch.full(
             (1,), DEFAULT_EOR_SIGMA, device=y_tensor.device, dtype=y_tensor.dtype
         )
+    eor_amp_threshold_tensor = prepare_broadcastable_prior(
+        eor_prior_amp_threshold, y_tensor, "eor_prior_amp_threshold"
+    )
+    if eor_amp_threshold_tensor is None:
+        eor_amp_threshold_tensor = torch.zeros(1, device=y_tensor.device, dtype=y_tensor.dtype)
 
     fg_mean_tensor = ensure_tensor_on(fg_smooth_mean, y_tensor.device, y_tensor.dtype)
     if fg_mean_tensor is None:
@@ -702,9 +766,39 @@ def optimize_components(
         raise ValueError(
             f"Unsupported optimizer_name '{optimizer_name}'. Supported values are 'adam' and 'sgd'."
         )
+    scheduler_name_norm = str(lr_scheduler).strip().lower()
+    if scheduler_name_norm not in {"none", "plateau"}:
+        raise ValueError(
+            f"Unsupported lr_scheduler '{lr_scheduler}'. Supported values are 'none' and 'plateau'."
+        )
+    plateau_scheduler: Optional[torch.optim.lr_scheduler.ReduceLROnPlateau] = None
+    if scheduler_name_norm == "plateau":
+        plateau_patience = max(0, int(lr_plateau_patience))
+        plateau_cooldown = max(0, int(lr_plateau_cooldown))
+        plateau_factor = float(lr_plateau_factor)
+        plateau_min_delta = float(lr_plateau_min_delta)
+        plateau_min_lr = float(lr_min)
+        if not math.isfinite(plateau_factor) or not (0.0 < plateau_factor < 1.0):
+            raise ValueError("lr_plateau_factor must be a finite value in (0, 1).")
+        if not math.isfinite(plateau_min_delta) or plateau_min_delta < 0.0:
+            raise ValueError("lr_plateau_min_delta must be a finite non-negative value.")
+        if not math.isfinite(plateau_min_lr) or plateau_min_lr < 0.0:
+            raise ValueError("lr_min must be a finite non-negative value.")
+        plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=plateau_factor,
+            patience=plateau_patience,
+            threshold=plateau_min_delta,
+            threshold_mode="abs",
+            cooldown=plateau_cooldown,
+            min_lr=plateau_min_lr,
+            eps=1e-12,
+        )
     history: List[LossComponents] = []
 
     for it in range(1, num_iters + 1):
+        prev_lr = float(optimizer.param_groups[0]["lr"])
         optimizer.zero_grad()
         extra_scale = 0.0
         if active_term_set:
@@ -762,8 +856,11 @@ def optimize_components(
             data_error=data_error_tensor,
             eor_mean=eor_mean_tensor,
             eor_sigma=eor_sigma_tensor,
+            eor_amp_threshold=eor_amp_threshold_tensor,
             fg_smooth_mean=fg_mean_tensor,
             fg_smooth_sigma=fg_sigma_tensor,
+            fg_smooth_mode=fg_smooth_mode_norm,
+            fg_smooth_huber_delta=fg_smooth_huber_delta_val,
             corr_prior_mean=corr_mean_tensor,
             corr_prior_sigma=corr_sigma_tensor,
             loss_mode=loss_mode,
@@ -791,6 +888,14 @@ def optimize_components(
         )
         total_loss.backward()
         optimizer.step()
+        if plateau_scheduler is not None:
+            plateau_scheduler.step(float(total_loss.item()))
+        current_lr = float(optimizer.param_groups[0]["lr"])
+        if plateau_scheduler is not None and current_lr + max(1e-14, prev_lr * 1e-12) < prev_lr:
+            print(
+                f"[lr-scheduler] iter {it:04d}: lr reduced {prev_lr:.6g} -> {current_lr:.6g} "
+                f"(total={float(total_loss.item()):.4e})"
+            )
 
         if (
             aligned_eor_true is not None
@@ -825,7 +930,7 @@ def optimize_components(
                 f"eor={entry.eor_reg:.4e} corr={entry.corr:.4e} "
                 f"lagcorr={entry.lagcorr:.4e} laggap={entry.lagcorr_gap:.4e} "
                 f"corr_coeff={entry.corr_coeff:.3f} fft={entry.fft_highfreq:.4e} "
-                f"poly={entry.poly:.4e}"
+                f"poly={entry.poly:.4e} lr={current_lr:.6g}"
             )
 
     if "poly_reparam" in active_term_set:
@@ -1550,10 +1655,12 @@ def write_input_diagnostics_report(
         if hasattr(config, "provided_fields"):
             provided = getattr(config, "provided_fields")
             explicit = ("fg_smooth_mean" in provided) or ("fg_smooth_sigma" in provided)
+        smooth_order = _fg_smooth_diff_order(config.fg_smooth_mode)
         if config.fg_reference_cube and not explicit:
             mean_t, sigma_t = derive_smoothness_stats_from_cube(
                 fg_true.detach(),
                 freq_axis=config.freq_axis,
+                diff_order=smooth_order,
                 use_robust=config.use_robust_fg_stats,
                 mae_to_sigma_factor=config.mae_to_sigma_factor,
             )
@@ -1577,13 +1684,23 @@ def write_input_diagnostics_report(
                 freq_axis=config.freq_axis,
                 prior_mean=fg_prior_mean,
                 prior_sigma=fg_prior_sigma,
+                mode=config.fg_smooth_mode,
+                huber_delta=config.fg_smooth_huber_delta,
             ).item()
         )
 
         eor_mean = torch.as_tensor(float(config.eor_prior_mean), device=device, dtype=diag_dtype)
         eor_sigma = torch.as_tensor(float(config.eor_prior_sigma), device=device, dtype=diag_dtype)
         eor_sigma = torch.clamp(eor_sigma, min=1e-8)
-        eor_reg = float(torch.mean(((eor_true - eor_mean) / eor_sigma) ** 2).item())
+        eor_amp_threshold = torch.as_tensor(
+            float(config.eor_prior_amp_threshold), device=device, dtype=diag_dtype
+        )
+        if not torch.isfinite(eor_amp_threshold):
+            raise ValueError("eor_prior_amp_threshold must be finite.")
+        if float(eor_amp_threshold.item()) < 0.0:
+            raise ValueError("eor_prior_amp_threshold must be non-negative.")
+        eor_residual = torch.clamp(torch.abs(eor_true - eor_mean) - eor_amp_threshold, min=0.0)
+        eor_reg = float(torch.mean((eor_residual / eor_sigma) ** 2).item())
 
         corr_prior_mean = torch.as_tensor(float(config.corr_prior_mean), device=device, dtype=diag_dtype)
         corr_prior_sigma = torch.as_tensor(float(config.corr_prior_sigma), device=device, dtype=diag_dtype)
@@ -2096,6 +2213,9 @@ def write_input_diagnostics_report(
         else:
             handle.write("  data: n/a (no input_cube provided or not found)\n")
         handle.write(f"  smooth:     {_format_float(losses['smooth'])}\n")
+        handle.write(f"  fg_smooth_mode: {config.fg_smooth_mode}\n")
+        handle.write(f"  fg_smooth_huber_delta: {float(config.fg_smooth_huber_delta):.6g}\n")
+        handle.write(f"  eor_amp_threshold: {float(config.eor_prior_amp_threshold):.6g}\n")
         handle.write(f"  eor_reg:    {_format_float(losses['eor_reg'])}\n")
         handle.write(f"  corr:       {_format_float(losses['corr'])}\n")
         handle.write(f"  corr_coeff: {_format_float(losses['corr_coeff'])}\n")
@@ -2126,6 +2246,15 @@ def write_input_diagnostics_report(
         handle.write(
             "extra loss schedule (during optimization): "
             f"start_iter={config.extra_loss_start_iter}, ramp_iters={config.extra_loss_ramp_iters}\n\n"
+        )
+        handle.write(
+            "lr schedule (during optimization): "
+            f"mode={config.lr_scheduler}, "
+            f"plateau_patience={config.lr_plateau_patience}, "
+            f"plateau_factor={config.lr_plateau_factor}, "
+            f"plateau_min_delta={config.lr_plateau_min_delta}, "
+            f"plateau_cooldown={config.lr_plateau_cooldown}, "
+            f"lr_min={config.lr_min}\n\n"
         )
         handle.write(
             "lagcorr sampling: "
@@ -2321,6 +2450,7 @@ def _optimize_from_fits(
     explicit_smooth_prior = (
         "fg_smooth_mean" in config.provided_fields or "fg_smooth_sigma" in config.provided_fields
     )
+    smooth_order = _fg_smooth_diff_order(config.fg_smooth_mode)
 
     if config.fg_reference_cube:
         ref_path = Path(config.fg_reference_cube)
@@ -2340,11 +2470,13 @@ def _optimize_from_fits(
         else:
             print(
                 f"Deriving FG smoothness stats from reference cube {ref_path} "
-                f"(robust={config.use_robust_fg_stats}, mae_to_sigma_factor={config.mae_to_sigma_factor}) ..."
+                f"(mode={config.fg_smooth_mode}, order={smooth_order}, robust={config.use_robust_fg_stats}, "
+                f"mae_to_sigma_factor={config.mae_to_sigma_factor}) ..."
             )
             fg_mean_value, fg_sigma_value = derive_smoothness_stats_from_cube(
                 fg_ref_cube,
                 freq_axis=config.freq_axis,
+                diff_order=smooth_order,
                 use_robust=config.use_robust_fg_stats,
                 mae_to_sigma_factor=config.mae_to_sigma_factor,
             )
@@ -2420,8 +2552,11 @@ def _optimize_from_fits(
         data_error=data_error_value,
         eor_prior_mean=eor_mean_value,
         eor_prior_sigma=eor_sigma_value,
+        eor_prior_amp_threshold=config.eor_prior_amp_threshold,
         fg_smooth_mean=fg_mean_value,
         fg_smooth_sigma=fg_sigma_value,
+        fg_smooth_mode=config.fg_smooth_mode,
+        fg_smooth_huber_delta=config.fg_smooth_huber_delta,
         corr_prior_mean=config.corr_prior_mean,
         corr_prior_sigma=config.corr_prior_sigma,
         corr_weight=config.corr_weight,
@@ -2460,6 +2595,12 @@ def _optimize_from_fits(
         fft_z_clip=config.fft_z_clip,
         optimizer_name=config.optimizer_name,
         momentum=config.momentum,
+        lr_scheduler=config.lr_scheduler,
+        lr_plateau_patience=config.lr_plateau_patience,
+        lr_plateau_factor=config.lr_plateau_factor,
+        lr_plateau_min_delta=config.lr_plateau_min_delta,
+        lr_plateau_cooldown=config.lr_plateau_cooldown,
+        lr_min=config.lr_min,
         freq_start_mhz=config.freq_start_mhz,
         freq_delta_mhz=config.freq_delta_mhz,
         eor_true_tensor=eor_true if config.enable_corr_check else None,
@@ -2589,8 +2730,11 @@ def run_synthetic_demo(config: OptimizationConfig) -> None:
         data_error=config.data_error,
         eor_prior_mean=config.eor_prior_mean,
         eor_prior_sigma=config.eor_prior_sigma,
+        eor_prior_amp_threshold=config.eor_prior_amp_threshold,
         fg_smooth_mean=config.fg_smooth_mean,
         fg_smooth_sigma=config.fg_smooth_sigma,
+        fg_smooth_mode=config.fg_smooth_mode,
+        fg_smooth_huber_delta=config.fg_smooth_huber_delta,
         corr_prior_mean=config.corr_prior_mean,
         corr_prior_sigma=config.corr_prior_sigma,
         corr_weight=config.corr_weight,
@@ -2629,6 +2773,12 @@ def run_synthetic_demo(config: OptimizationConfig) -> None:
         fft_z_clip=config.fft_z_clip,
         optimizer_name=config.optimizer_name,
         momentum=config.momentum,
+        lr_scheduler=config.lr_scheduler,
+        lr_plateau_patience=config.lr_plateau_patience,
+        lr_plateau_factor=config.lr_plateau_factor,
+        lr_plateau_min_delta=config.lr_plateau_min_delta,
+        lr_plateau_cooldown=config.lr_plateau_cooldown,
+        lr_min=config.lr_min,
         freq_start_mhz=config.freq_start_mhz,
         freq_delta_mhz=config.freq_delta_mhz,
         eor_true_tensor=eor_true if config.enable_corr_check else None,

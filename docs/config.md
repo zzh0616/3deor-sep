@@ -58,6 +58,7 @@ All weights default to `1.0`. The code prints a warning if you deviate from 1.0.
 - `data_error` (`float`): Scalar data-error sigma.
 - `eor_prior_mean` (`float`): EoR prior mean.
 - `eor_prior_sigma` (`float`): EoR prior sigma.
+- `eor_prior_amp_threshold` (`float`): Dead-zone threshold for EoR amplitude prior. The EoR amplitude term penalizes only the excess above this threshold, i.e. `max(|eor - eor_prior_mean| - threshold, 0)`.
 - `fg_smooth_mean` (`float`): Foreground third-difference prior mean.
 - `fg_smooth_sigma` (`float`): Foreground third-difference prior sigma.
 - `fg_reference_cube` (`str`): FITS cube used to derive foreground smoothness stats (mean/std of third differences). If `fg_smooth_mean` or `fg_smooth_sigma` are explicitly set, those values take precedence and the derivation is skipped.

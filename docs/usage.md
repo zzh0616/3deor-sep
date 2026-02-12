@@ -25,6 +25,7 @@ Key CLI arguments:
 - `--cut-xy-enabled` / `--cut-xy-unit` / `--cut-xy-center-x` / `--cut-xy-center-y` / `--cut-xy-size`: Spatial XY cropping controls (see `docs/config.md`).
 - `--optimizer`: `adam` (default) or `sgd`.
 - `--momentum`: Momentum for SGD (default 0.9).
+- `--eor-amp-threshold`: Dead-zone threshold for EoR amplitude prior (`|eor-eor_mean|` below this value is not penalized).
 - `--freq-start-mhz` / `--freq-delta-mhz`: Starting frequency and spacing (MHz) for `poly_reparam`.
 - `--lagcorr-weight`: Weight for the frequency-lag autocorrelation prior (lagcorr mode).
 - `--lagcorr-fg-component-weight`: Relative weight of FG lagcorr component (lagcorr mode).

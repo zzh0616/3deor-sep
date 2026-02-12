@@ -10,11 +10,18 @@ import re
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
+import torch.nn.functional as F
 from constants import EPS_LOSS, DEFAULT_FFT_SIGMA
 from utils import clamp_eps, ensure_tensor_on, prepare_broadcastable_prior
 
 Tensor = torch.Tensor
 VALID_EXTRA_LOSS_TERMS: Tuple[str, ...] = ("corr", "rfft", "poly_reparam", "lagcorr")
+VALID_FG_SMOOTH_MODES: Tuple[str, ...] = (
+    "diff3_l2",
+    "diff2_l2",
+    "diff2_huber",
+    "diff1_l1",
+)
 
 
 def normalize_extra_loss_terms(
@@ -71,22 +78,50 @@ def foreground_smoothness_loss(
     freq_axis: int = 0,
     prior_mean: Optional[Tensor] = None,
     prior_sigma: Optional[Tensor] = None,
+    mode: str = "diff3_l2",
+    huber_delta: float = 1.0,
 ) -> Tensor:
     """
-    Normalized mean squared third-order finite differences along the frequency axis.
+    Frequency-domain smoothness priors for the foreground component.
+
+    Supported modes:
+      - diff3_l2: L2 on normalized 3rd-order differences (legacy behavior)
+      - diff2_l2: L2 on normalized 2nd-order differences
+      - diff2_huber: Huber on normalized 2nd-order differences
+      - diff1_l1: L1 on normalized 1st-order differences
     """
-    if fg.shape[freq_axis] < 4:
+    mode_norm = str(mode).strip().lower()
+    if mode_norm == "diff3_l2":
+        diff_order, penalty = 3, "l2"
+    elif mode_norm == "diff2_l2":
+        diff_order, penalty = 2, "l2"
+    elif mode_norm == "diff2_huber":
+        diff_order, penalty = 2, "huber"
+    elif mode_norm == "diff1_l1":
+        diff_order, penalty = 1, "l1"
+    else:
+        valid = ", ".join(VALID_FG_SMOOTH_MODES)
+        raise ValueError(f"Unsupported fg_smooth_mode '{mode}'. Valid values: {valid}.")
+
+    if fg.shape[freq_axis] < (diff_order + 1):
         return torch.zeros((), dtype=fg.dtype, device=fg.device)
-    third_diff = torch.diff(fg, n=3, dim=freq_axis)
-    mean_tensor = prepare_broadcastable_prior(prior_mean, third_diff, "fg_smooth_mean")
-    sigma_tensor = prepare_broadcastable_prior(prior_sigma, third_diff, "fg_smooth_sigma")
+    diff_tensor = torch.diff(fg, n=diff_order, dim=freq_axis)
+    mean_tensor = prepare_broadcastable_prior(prior_mean, diff_tensor, "fg_smooth_mean")
+    sigma_tensor = prepare_broadcastable_prior(prior_sigma, diff_tensor, "fg_smooth_sigma")
     if mean_tensor is None:
-        mean_tensor = torch.zeros(1, device=third_diff.device, dtype=third_diff.dtype)
+        mean_tensor = torch.zeros(1, device=diff_tensor.device, dtype=diff_tensor.dtype)
     if sigma_tensor is None:
-        sigma_tensor = torch.ones(1, device=third_diff.device, dtype=third_diff.dtype)
+        sigma_tensor = torch.ones(1, device=diff_tensor.device, dtype=diff_tensor.dtype)
     sigma_tensor = clamp_eps(sigma_tensor, eps=EPS_LOSS)
-    normalized = (third_diff - mean_tensor) / sigma_tensor
-    return torch.mean(normalized**2)
+    normalized = (diff_tensor - mean_tensor) / sigma_tensor
+    if penalty == "l2":
+        return torch.mean(normalized**2)
+    if penalty == "l1":
+        return torch.mean(torch.abs(normalized))
+    delta = float(huber_delta)
+    if not math.isfinite(delta) or delta <= 0.0:
+        raise ValueError("fg_smooth_huber_delta must be a finite positive value.")
+    return F.huber_loss(normalized, torch.zeros_like(normalized), reduction="mean", delta=delta)
 
 
 def correlation_penalty(
@@ -548,10 +583,13 @@ def loss_function(
     data_error: Tensor,
     eor_mean: Tensor,
     eor_sigma: Tensor,
+    eor_amp_threshold: Tensor,
     fg_smooth_mean: Optional[Tensor],
     fg_smooth_sigma: Optional[Tensor],
     corr_prior_mean: Tensor,
     corr_prior_sigma: Tensor,
+    fg_smooth_mode: str = "diff3_l2",
+    fg_smooth_huber_delta: float = 1.0,
     loss_mode: str = "base",
     active_extra_terms: Optional[Union[str, Sequence[str]]] = None,
     lagcorr_unit: str = "mhz",
@@ -587,12 +625,29 @@ def loss_function(
     data_loss = torch.mean(((y_pred - y) / sigma_data) ** 2)
 
     smooth_loss = foreground_smoothness_loss(
-        fg, freq_axis=freq_axis, prior_mean=fg_smooth_mean, prior_sigma=fg_smooth_sigma
+        fg,
+        freq_axis=freq_axis,
+        prior_mean=fg_smooth_mean,
+        prior_sigma=fg_smooth_sigma,
+        mode=fg_smooth_mode,
+        huber_delta=fg_smooth_huber_delta,
     )
 
     eor_mean_tensor = eor_mean
     eor_sigma_tensor = clamp_eps(eor_sigma, eps=EPS_LOSS)
-    eor_reg = torch.mean(((eor - eor_mean_tensor) / eor_sigma_tensor) ** 2)
+    eor_amp_threshold_tensor = prepare_broadcastable_prior(
+        eor_amp_threshold, eor, "eor_prior_amp_threshold"
+    )
+    if eor_amp_threshold_tensor is None:
+        eor_amp_threshold_tensor = torch.zeros(1, device=eor.device, dtype=eor.dtype)
+    if torch.any(~torch.isfinite(eor_amp_threshold_tensor)):
+        raise ValueError("eor_prior_amp_threshold must be finite.")
+    if torch.any(eor_amp_threshold_tensor < 0.0):
+        raise ValueError("eor_prior_amp_threshold must be non-negative.")
+    # Dead-zone EoR amplitude prior:
+    #   residual = max(|eor - mean| - threshold, 0), then normalized squared penalty.
+    eor_residual = torch.clamp(torch.abs(eor - eor_mean_tensor) - eor_amp_threshold_tensor, min=0.0)
+    eor_reg = torch.mean((eor_residual / eor_sigma_tensor) ** 2)
 
     if delta is not None:
         corr_weight = float(delta)

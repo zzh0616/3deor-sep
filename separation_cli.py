@@ -96,6 +96,15 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         help="Scalar EoR prior std (default 0.1).",
     )
     parser.add_argument(
+        "--eor-amp-threshold",
+        dest="eor_prior_amp_threshold",
+        type=float,
+        help=(
+            "Dead-zone threshold for EoR amplitude prior: "
+            "no penalty when |eor-eor_mean| is below this value."
+        ),
+    )
+    parser.add_argument(
         "--fg-smooth-mean",
         type=float,
         help="Scalar prior mean for FG third differences (default 0.0).",
@@ -103,7 +112,18 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
     parser.add_argument(
         "--fg-smooth-sigma",
         type=float,
-        help="Scalar prior std for FG third differences (default 0.05).",
+        help="Scalar prior std/scale for FG smoothness finite differences (default 0.05).",
+    )
+    parser.add_argument(
+        "--fg-smooth-mode",
+        type=str,
+        choices=["diff3_l2", "diff2_l2", "diff2_huber", "diff1_l1"],
+        help="Foreground smoothness mode (default diff3_l2).",
+    )
+    parser.add_argument(
+        "--fg-smooth-huber-delta",
+        type=float,
+        help="Huber delta used when fg_smooth_mode=diff2_huber (default 1.0).",
     )
     parser.add_argument(
         "--fg-reference-cube",
@@ -300,6 +320,37 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         help="Momentum for SGD optimizer (default 0.9).",
     )
     parser.add_argument(
+        "--lr-scheduler",
+        choices=["none", "plateau"],
+        type=str,
+        help="Learning-rate scheduler (default none).",
+    )
+    parser.add_argument(
+        "--lr-plateau-patience",
+        type=int,
+        help="Plateau scheduler patience in iterations (default 240).",
+    )
+    parser.add_argument(
+        "--lr-plateau-factor",
+        type=float,
+        help="Plateau scheduler LR decay factor in (0,1), e.g. 0.5.",
+    )
+    parser.add_argument(
+        "--lr-plateau-min-delta",
+        type=float,
+        help="Minimum absolute loss improvement to reset plateau patience.",
+    )
+    parser.add_argument(
+        "--lr-plateau-cooldown",
+        type=int,
+        help="Plateau scheduler cooldown in iterations after each LR drop.",
+    )
+    parser.add_argument(
+        "--lr-min",
+        type=float,
+        help="Minimum LR allowed when scheduler is enabled.",
+    )
+    parser.add_argument(
         "--poly-weight",
         dest="poly_weight",
         type=float,
@@ -413,8 +464,11 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "data_error",
         "eor_prior_mean",
         "eor_prior_sigma",
+        "eor_prior_amp_threshold",
         "fg_smooth_mean",
         "fg_smooth_sigma",
+        "fg_smooth_mode",
+        "fg_smooth_huber_delta",
         "fg_reference_cube",
         "use_robust_fg_stats",
         "mae_to_sigma_factor",
@@ -456,6 +510,14 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "mask_cube",
         "enable_corr_check",
         "corr_check_every",
+        "optimizer_name",
+        "momentum",
+        "lr_scheduler",
+        "lr_plateau_patience",
+        "lr_plateau_factor",
+        "lr_plateau_min_delta",
+        "lr_plateau_cooldown",
+        "lr_min",
     ]
     overrides = {key: getattr(args, key) for key in keys if getattr(args, key, None) is not None}
     if getattr(args, "fft_percent", None) is not None:
