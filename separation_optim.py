@@ -153,6 +153,9 @@ class LossComponents:
 class OptimizationConfig:
     num_iters: int = 400
     lr: float = 5e-2
+    # Optional LR split between FG and EoR (implemented via optimizer param groups).
+    # lr_fg = lr * lr_fg_factor, lr_eor = lr.
+    lr_fg_factor: float = 1.0
     alpha: float = 1.0
     beta: float = 1.0
     gamma: float = 1.0
@@ -169,11 +172,20 @@ class OptimizationConfig:
     optimizer_name: str = "adam"
     momentum: float = 0.9
     lr_scheduler: str = "none"  # "none" or "plateau"
+    # If enabled, reset ReduceLROnPlateau internal state (best/counters) at phase boundaries
+    # when extra-loss terms or lagcorr ramps start.
+    lr_plateau_reset_on_phase_start: bool = False
     lr_plateau_patience: int = 240
     lr_plateau_factor: float = 0.5
     lr_plateau_min_delta: float = 1e-4
     lr_plateau_cooldown: int = 80
     lr_min: float = 1e-6
+    # Optional alternating/block updates between FG and EoR.
+    # When enabled, we compute gradients for the full loss, but only update one block per step
+    # by clearing gradients on the other block before optimizer.step().
+    alt_update_mode: str = "none"  # "none" or "fg_then_eor"
+    alt_fg_steps: int = 5
+    alt_eor_steps: int = 1
     power_config: Optional[str] = None
     power_output_dir: Optional[str] = None
     freq_axis: int = 0
@@ -542,11 +554,16 @@ def optimize_components(
     optimizer_name: str = "adam",
     momentum: float = 0.9,
     lr_scheduler: str = "none",
+    lr_plateau_reset_on_phase_start: bool = False,
     lr_plateau_patience: int = 240,
     lr_plateau_factor: float = 0.5,
     lr_plateau_min_delta: float = 1e-4,
     lr_plateau_cooldown: int = 80,
     lr_min: float = 1e-6,
+    lr_fg_factor: float = 1.0,
+    alt_update_mode: str = "none",
+    alt_fg_steps: int = 5,
+    alt_eor_steps: int = 1,
     eor_true_tensor: Optional[Tensor] = None,
     corr_check_every: int = 0,
 ) -> Tuple[Tensor, Tensor, List[LossComponents]]:
@@ -636,6 +653,16 @@ def optimize_components(
     if lagcorr_feature_norm not in {"raw", "diff1"}:
         raise ValueError("lagcorr_feature must be 'raw' or 'diff1'.")
     y_tensor, _, _ = _prepare_observation(y, device=device, dtype=dtype)
+
+    lr_fg_factor_val = float(lr_fg_factor)
+    if not math.isfinite(lr_fg_factor_val) or lr_fg_factor_val <= 0.0:
+        raise ValueError("lr_fg_factor must be a finite positive value.")
+
+    alt_update_mode_norm = str(alt_update_mode).strip().lower()
+    if alt_update_mode_norm not in {"none", "fg_then_eor"}:
+        raise ValueError("alt_update_mode must be one of: none, fg_then_eor.")
+    alt_fg_steps_val = max(1, int(alt_fg_steps))
+    alt_eor_steps_val = max(1, int(alt_eor_steps))
 
     aligned_eor_true: Optional[Tensor] = None
     if eor_true_tensor is not None:
@@ -997,16 +1024,22 @@ def optimize_components(
 
     eor = torch.nn.Parameter(eor_init.clone())
 
-    params = [eor]
+    # Build param groups so FG/EoR can use different learning rates and (optionally)
+    # support alternating block updates.
+    fg_params: List[torch.nn.Parameter] = []
     if poly_coeffs_param is not None and fg_resid_param is not None:
-        params.extend([fg_resid_param, poly_coeffs_param])
+        fg_params.extend([fg_resid_param, poly_coeffs_param])
     else:
-        params.append(fg_param)
+        fg_params.append(fg_param)
+    param_groups: List[Dict[str, object]] = [
+        {"params": [eor], "lr": float(lr)},
+        {"params": fg_params, "lr": float(lr) * lr_fg_factor_val},
+    ]
     optimizer_name_norm = str(optimizer_name).strip().lower()
     if optimizer_name_norm == "sgd":
-        optimizer = torch.optim.SGD(params, lr=lr, momentum=momentum)
+        optimizer = torch.optim.SGD(param_groups, lr=lr, momentum=momentum)
     elif optimizer_name_norm == "adam":
-        optimizer = torch.optim.Adam(params, lr=lr)
+        optimizer = torch.optim.Adam(param_groups, lr=lr)
     else:
         raise ValueError(
             f"Unsupported optimizer_name '{optimizer_name}'. Supported values are 'adam' and 'sgd'."
@@ -1017,6 +1050,7 @@ def optimize_components(
             f"Unsupported lr_scheduler '{lr_scheduler}'. Supported values are 'none' and 'plateau'."
         )
     plateau_scheduler: Optional[torch.optim.lr_scheduler.ReduceLROnPlateau] = None
+    reset_iters: Set[int] = set()
     if scheduler_name_norm == "plateau":
         plateau_patience = max(0, int(lr_plateau_patience))
         plateau_cooldown = max(0, int(lr_plateau_cooldown))
@@ -1040,10 +1074,35 @@ def optimize_components(
             min_lr=plateau_min_lr,
             eps=1e-12,
         )
+        if bool(lr_plateau_reset_on_phase_start):
+            start_iter = max(0, int(extra_loss_start_iter))
+            if start_iter > 1 and active_term_set:
+                reset_iters.add(start_iter)
+            if "lagcorr" in active_term_set and lagcorr_eor_component_weight_val > 0.0:
+                if lagcorr_eor_start_iter_val > 1:
+                    reset_iters.add(int(lagcorr_eor_start_iter_val))
+                if lagcorr_eor_subterm_schedule_norm == "staged_v1":
+                    if lagcorr_eor_floor_start_iter_val > 1:
+                        reset_iters.add(int(lagcorr_eor_floor_start_iter_val))
+                    if lagcorr_eor_rebound_start_iter_val > 1:
+                        reset_iters.add(int(lagcorr_eor_rebound_start_iter_val))
     history: List[LossComponents] = []
 
     for it in range(1, num_iters + 1):
         prev_lr = float(optimizer.param_groups[0]["lr"])
+        if plateau_scheduler is not None and reset_iters and it in reset_iters:
+            plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode="min",
+                factor=plateau_factor,
+                patience=plateau_patience,
+                threshold=plateau_min_delta,
+                threshold_mode="abs",
+                cooldown=plateau_cooldown,
+                min_lr=plateau_min_lr,
+                eps=1e-12,
+            )
+            print(f"[lr-scheduler] iter {it:04d}: reset plateau scheduler (phase boundary)")
         optimizer.zero_grad()
         extra_scale = 0.0
         if active_term_set:
@@ -1184,6 +1243,18 @@ def optimize_components(
             poly_residual=poly_residual,
         )
         total_loss.backward()
+
+        if alt_update_mode_norm != "none":
+            cycle = alt_fg_steps_val + alt_eor_steps_val
+            phase = (it - 1) % cycle
+            update_fg = phase < alt_fg_steps_val
+            if update_fg:
+                # Freeze EoR update.
+                eor.grad = None
+            else:
+                # Freeze FG (and poly coeffs when used) update.
+                for p in fg_params:
+                    p.grad = None
         optimizer.step()
         if plateau_scheduler is not None:
             plateau_scheduler.step(float(total_loss.item()))
@@ -1223,6 +1294,7 @@ def optimize_components(
         history.append(entry)
 
         if print_every and (it == 1 or it % print_every == 0 or it == num_iters):
+            lr_fg = float(optimizer.param_groups[1]["lr"]) if len(optimizer.param_groups) > 1 else current_lr
             print(
                 f"[iter {it:04d}] total={entry.total:.4e} "
                 f"data={entry.data:.4e} smooth={entry.smooth:.4e} "
@@ -1230,7 +1302,7 @@ def optimize_components(
                 f"lagcorr={entry.lagcorr:.4e} laggap={entry.lagcorr_gap:.4e} "
                 f"corr_coeff={entry.corr_coeff:.3f} fft={entry.fft_highfreq:.4e} "
                 f"eor_mean={entry.eor_mean:.4e} eor_hf={entry.eor_hf:.4e} "
-                f"poly={entry.poly:.4e} lr={current_lr:.6g}"
+                f"poly={entry.poly:.4e} lr={current_lr:.6g} lr_fg={lr_fg:.6g}"
             )
 
     if "poly_reparam" in active_term_set:
@@ -2936,11 +3008,16 @@ def _optimize_from_fits(
         optimizer_name=config.optimizer_name,
         momentum=config.momentum,
         lr_scheduler=config.lr_scheduler,
+        lr_plateau_reset_on_phase_start=config.lr_plateau_reset_on_phase_start,
         lr_plateau_patience=config.lr_plateau_patience,
         lr_plateau_factor=config.lr_plateau_factor,
         lr_plateau_min_delta=config.lr_plateau_min_delta,
         lr_plateau_cooldown=config.lr_plateau_cooldown,
         lr_min=config.lr_min,
+        lr_fg_factor=config.lr_fg_factor,
+        alt_update_mode=config.alt_update_mode,
+        alt_fg_steps=config.alt_fg_steps,
+        alt_eor_steps=config.alt_eor_steps,
         freq_start_mhz=config.freq_start_mhz,
         freq_delta_mhz=config.freq_delta_mhz,
         eor_true_tensor=eor_true if config.enable_corr_check else None,
@@ -3155,11 +3232,16 @@ def run_synthetic_demo(config: OptimizationConfig) -> None:
         optimizer_name=config.optimizer_name,
         momentum=config.momentum,
         lr_scheduler=config.lr_scheduler,
+        lr_plateau_reset_on_phase_start=config.lr_plateau_reset_on_phase_start,
         lr_plateau_patience=config.lr_plateau_patience,
         lr_plateau_factor=config.lr_plateau_factor,
         lr_plateau_min_delta=config.lr_plateau_min_delta,
         lr_plateau_cooldown=config.lr_plateau_cooldown,
         lr_min=config.lr_min,
+        lr_fg_factor=config.lr_fg_factor,
+        alt_update_mode=config.alt_update_mode,
+        alt_fg_steps=config.alt_fg_steps,
+        alt_eor_steps=config.alt_eor_steps,
         freq_start_mhz=config.freq_start_mhz,
         freq_delta_mhz=config.freq_delta_mhz,
         eor_true_tensor=eor_true if config.enable_corr_check else None,
