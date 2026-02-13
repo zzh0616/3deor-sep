@@ -120,6 +120,8 @@ def _warn_weight_defaults(config: OptimizationConfig) -> None:
     _warn_if_weight_not_one("corr_weight", config.corr_weight)
     _warn_if_weight_not_one("lagcorr_weight", config.lagcorr_weight)
     _warn_if_weight_not_one("fft_weight", config.fft_weight)
+    _warn_if_weight_not_one("eor_mean_weight", config.eor_mean_weight)
+    _warn_if_weight_not_one("eor_hf_weight", config.eor_hf_weight)
     _warn_if_weight_not_one("poly_weight", config.poly_weight)
 
 
@@ -142,6 +144,8 @@ class LossComponents:
     lagcorr: float
     lagcorr_gap: float
     fft_highfreq: float
+    eor_mean: float
+    eor_hf: float
     poly: float
 
 
@@ -153,6 +157,8 @@ class OptimizationConfig:
     beta: float = 1.0
     gamma: float = 1.0
     fft_weight: float = 1.0
+    eor_mean_weight: float = 1.0
+    eor_hf_weight: float = 1.0
     extra_loss_start_iter: int = 500
     extra_loss_ramp_iters: int = 0
     poly_weight: float = 1.0
@@ -190,6 +196,9 @@ class OptimizationConfig:
     eor_prior_mean: float = 0.0
     eor_prior_sigma: float = DEFAULT_EOR_SIGMA
     eor_prior_amp_threshold: float = 0.0
+    eor_amp_prior_mode: str = "voxel_deadzone"
+    eor_hybrid_voxel_factor: float = 5.0
+    eor_hybrid_voxel_weight: float = 0.1
     fg_smooth_mean: float = 0.0
     fg_smooth_sigma: float = 0.05
     fg_smooth_mode: str = "diff3_l2"
@@ -204,6 +213,8 @@ class OptimizationConfig:
     corr_topk: Optional[int] = None
     corr_lse_alpha: float = 10.0
     corr_weight: float = 1.0
+    corr_feature: str = "raw"
+    corr_spatial_pool: int = 1
     lagcorr_weight: float = 1.0
     lagcorr_fg_component_weight: float = 0.5
     lagcorr_eor_component_weight: float = 0.5
@@ -224,13 +235,21 @@ class OptimizationConfig:
     eor_lagcorr_sigma: List[float] = field(default_factory=lambda: [1.0] * 9)
     lagcorr_max_pairs: Optional[int] = None
     lagcorr_spatial_pool: int = 1
+    lagcorr_rms_min: float = 0.0
     lagcorr_eor_mode: str = "gaussian"
     lagcorr_eor_near_max_lag: Optional[int] = None
     lagcorr_eor_mid_max_lag: Optional[int] = None
     lagcorr_eor_far_min_lag: Optional[int] = None
+    lagcorr_eor_tail_weight_mode: str = "hard"
+    lagcorr_eor_tail_sigmoid_center_lag: Optional[int] = None
+    lagcorr_eor_tail_sigmoid_width_lag: float = 5.0
+    lagcorr_eor_tail_sigmoid_center_mpc: float = 150.0
+    lagcorr_eor_tail_sigmoid_width_mpc: float = 20.0
     lagcorr_eor_tail_eps: float = 0.05
     lagcorr_eor_neg_delta: float = 0.0
     lagcorr_eor_near_rho_min: float = 0.0
+    lagcorr_eor_near_floor_mode: str = "absolute_mean"
+    lagcorr_eor_near_rho1_coeffs: Union[float, List[float]] = 0.0
     lagcorr_eor_rebound_eps_act: float = 0.05
     lagcorr_eor_rebound_delta_up: float = 0.02
     lagcorr_eor_w_tail: float = 1.0
@@ -240,11 +259,18 @@ class OptimizationConfig:
     lagcorr_lag_weights: Union[float, List[float]] = 1.0
     lagcorr_eor_start_iter: Optional[int] = None
     lagcorr_eor_ramp_iters: int = 0
+    lagcorr_eor_subterm_schedule: str = "static"
+    lagcorr_eor_floor_start_iter: Optional[int] = None
+    lagcorr_eor_floor_ramp_iters: int = 0
+    lagcorr_eor_rebound_start_iter: Optional[int] = None
+    lagcorr_eor_rebound_ramp_iters: int = 0
     fft_highfreq_percent: float = 0.7
     fft_use_log_energy: bool = False
     fft_z_clip: Optional[float] = None
     fft_prior_mean: float = 0.0
     fft_prior_sigma: float = DEFAULT_FFT_SIGMA
+    eor_hf_percent: float = 0.7
+    eor_hf_r_max: float = 0.85
     enable_corr_check: bool = False
     corr_check_every: int = 500
     freq_start_mhz: Optional[float] = None
@@ -431,6 +457,9 @@ def optimize_components(
     eor_prior_mean: Union[Tensor, float] = 0.0,
     eor_prior_sigma: Union[Tensor, float] = DEFAULT_EOR_SIGMA,
     eor_prior_amp_threshold: Union[Tensor, float] = 0.0,
+    eor_amp_prior_mode: str = "voxel_deadzone",
+    eor_hybrid_voxel_factor: float = 5.0,
+    eor_hybrid_voxel_weight: float = 0.1,
     fg_smooth_mean: Optional[Union[Tensor, float]] = 0.0,
     fg_smooth_sigma: Optional[Union[Tensor, float]] = 0.05,
     fg_smooth_mode: str = "diff3_l2",
@@ -442,6 +471,8 @@ def optimize_components(
     corr_topk: Optional[int] = None,
     corr_lse_alpha: float = 10.0,
     corr_weight: float = 1.0,
+    corr_feature: str = "raw",
+    corr_spatial_pool: int = 1,
     lagcorr_weight: float = 1.0,
     lagcorr_fg_component_weight: float = 0.5,
     lagcorr_eor_component_weight: float = 0.5,
@@ -460,13 +491,21 @@ def optimize_components(
     eor_lagcorr_sigma: Optional[Sequence[float]] = None,
     lagcorr_max_pairs: Optional[int] = None,
     lagcorr_spatial_pool: int = 1,
+    lagcorr_rms_min: float = 0.0,
     lagcorr_eor_mode: str = "gaussian",
     lagcorr_eor_near_max_lag: Optional[int] = None,
     lagcorr_eor_mid_max_lag: Optional[int] = None,
     lagcorr_eor_far_min_lag: Optional[int] = None,
+    lagcorr_eor_tail_weight_mode: str = "hard",
+    lagcorr_eor_tail_sigmoid_center_lag: Optional[int] = None,
+    lagcorr_eor_tail_sigmoid_width_lag: float = 5.0,
+    lagcorr_eor_tail_sigmoid_center_mpc: float = 150.0,
+    lagcorr_eor_tail_sigmoid_width_mpc: float = 20.0,
     lagcorr_eor_tail_eps: float = 0.05,
     lagcorr_eor_neg_delta: float = 0.0,
     lagcorr_eor_near_rho_min: float = 0.0,
+    lagcorr_eor_near_floor_mode: str = "absolute_mean",
+    lagcorr_eor_near_rho1_coeffs: Union[Tensor, Sequence[float], float] = 0.0,
     lagcorr_eor_rebound_eps_act: float = 0.05,
     lagcorr_eor_rebound_delta_up: float = 0.02,
     lagcorr_eor_w_tail: float = 1.0,
@@ -476,9 +515,16 @@ def optimize_components(
     lagcorr_lag_weights: Union[Tensor, Sequence[float], float] = 1.0,
     lagcorr_eor_start_iter: Optional[int] = None,
     lagcorr_eor_ramp_iters: int = 0,
+    lagcorr_eor_subterm_schedule: str = "static",
+    lagcorr_eor_floor_start_iter: Optional[int] = None,
+    lagcorr_eor_floor_ramp_iters: int = 0,
+    lagcorr_eor_rebound_start_iter: Optional[int] = None,
+    lagcorr_eor_rebound_ramp_iters: int = 0,
     extra_loss_start_iter: int = 500,
     extra_loss_ramp_iters: int = 0,
     fft_weight: float = 1.0,
+    eor_mean_weight: float = 1.0,
+    eor_hf_weight: float = 1.0,
     poly_weight: float = 1.0,
     poly_degree: int = 3,
     poly_sigma: Optional[Union[Tensor, float]] = DEFAULT_POLY_SIGMA,
@@ -489,6 +535,8 @@ def optimize_components(
     fft_highfreq_percent: float = 0.7,
     fft_use_log_energy: bool = False,
     fft_z_clip: Optional[float] = None,
+    eor_hf_percent: float = 0.7,
+    eor_hf_r_max: float = 0.85,
     freq_start_mhz: Optional[float] = None,
     freq_delta_mhz: Optional[float] = None,
     optimizer_name: str = "adam",
@@ -514,8 +562,13 @@ def optimize_components(
         data_error: Measurement error (scalar or tensor broadcastable to y).
         eor_prior_mean: Prior mean for the EoR cube.
         eor_prior_sigma: Prior standard deviation for the EoR cube.
-        eor_prior_amp_threshold: Dead-zone threshold for EoR amplitude prior.
-            Values with |eor-mean| below this threshold are not penalized.
+        eor_prior_amp_threshold: Threshold parameter used by the EoR amplitude prior (meaning depends on mode).
+        eor_amp_prior_mode: EoR amplitude prior mode:
+            - voxel_deadzone: penalize voxels exceeding a dead-zone threshold
+            - slice_rms_hinge: penalize per-slice spatial std exceeding a threshold
+            - hybrid: slice_rms_hinge plus a loose voxel outlier guard
+        eor_hybrid_voxel_factor: For hybrid mode, voxel guard threshold = factor * threshold.
+        eor_hybrid_voxel_weight: For hybrid mode, relative weight of the voxel outlier guard term.
         fg_smooth_mean: Prior mean for FG finite differences used by fg_smooth_mode.
         fg_smooth_sigma: Prior std/scale for FG finite differences used by fg_smooth_mode.
         fg_smooth_mode: Foreground smoothness mode ("diff3_l2", "diff2_l2", "diff2_huber", "diff1_l1").
@@ -528,6 +581,8 @@ def optimize_components(
         corr_topk: Top-k used when corr_reduce="topk".
         corr_lse_alpha: Temperature used when corr_reduce="logsumexp" (log-mean-exp).
         corr_weight: Weight for the per-frequency FG/EoR correlation consistency loss.
+        corr_feature: Feature used for corr prior ("raw", "diff1", "diff2").
+        corr_spatial_pool: Spatial avg-pooling factor (>=1) applied before corr statistics.
         lagcorr_weight: Weight for the frequency-lag autocorrelation loss (lagcorr mode).
         lagcorr_fg_component_weight: Relative weight of the FG lagcorr component.
         lagcorr_eor_component_weight: Relative weight of the EoR lagcorr component.
@@ -571,6 +626,12 @@ def optimize_components(
     fg_smooth_huber_delta_val = float(fg_smooth_huber_delta)
     if not math.isfinite(fg_smooth_huber_delta_val) or fg_smooth_huber_delta_val <= 0.0:
         raise ValueError("fg_smooth_huber_delta must be a finite positive value.")
+    corr_feature_norm = str(corr_feature).strip().lower()
+    if corr_feature_norm not in {"raw", "diff1", "diff2"}:
+        raise ValueError("corr_feature must be one of: raw, diff1, diff2.")
+    corr_spatial_pool_int = int(corr_spatial_pool)
+    if corr_spatial_pool_int < 1:
+        raise ValueError("corr_spatial_pool must be >= 1.")
     lagcorr_feature_norm = str(lagcorr_feature).strip().lower()
     if lagcorr_feature_norm not in {"raw", "diff1"}:
         raise ValueError("lagcorr_feature must be 'raw' or 'diff1'.")
@@ -605,6 +666,26 @@ def optimize_components(
     )
     if eor_amp_threshold_tensor is None:
         eor_amp_threshold_tensor = torch.zeros(1, device=y_tensor.device, dtype=y_tensor.dtype)
+
+    eor_amp_prior_mode_norm = str(eor_amp_prior_mode).strip().lower()
+    if eor_amp_prior_mode_norm not in {
+        "voxel_deadzone",
+        "voxel",
+        "deadzone",
+        "slice_rms_hinge",
+        "slice_rms",
+        "rms",
+        "hybrid",
+    }:
+        raise ValueError(
+            "eor_amp_prior_mode must be one of: voxel_deadzone, slice_rms_hinge, hybrid."
+        )
+    eor_hybrid_voxel_factor_val = float(eor_hybrid_voxel_factor)
+    eor_hybrid_voxel_weight_val = float(eor_hybrid_voxel_weight)
+    if not math.isfinite(eor_hybrid_voxel_factor_val) or eor_hybrid_voxel_factor_val <= 0.0:
+        raise ValueError("eor_hybrid_voxel_factor must be a finite positive value.")
+    if not math.isfinite(eor_hybrid_voxel_weight_val) or eor_hybrid_voxel_weight_val < 0.0:
+        raise ValueError("eor_hybrid_voxel_weight must be a finite non-negative value.")
 
     fg_mean_tensor = ensure_tensor_on(fg_smooth_mean, y_tensor.device, y_tensor.dtype)
     if fg_mean_tensor is None:
@@ -751,6 +832,114 @@ def optimize_components(
         raise ValueError("lagcorr_eor_start_iter must be >= 0 when provided.")
     lagcorr_eor_ramp_iters_val = max(0, int(lagcorr_eor_ramp_iters))
 
+    lagcorr_rms_min_val = float(lagcorr_rms_min)
+    if not math.isfinite(lagcorr_rms_min_val) or lagcorr_rms_min_val < 0.0:
+        raise ValueError("lagcorr_rms_min must be a finite non-negative value.")
+
+    lagcorr_eor_near_floor_mode_norm = str(lagcorr_eor_near_floor_mode).strip().lower()
+    if lagcorr_eor_near_floor_mode_norm not in {"absolute_mean", "relative_rho1"}:
+        raise ValueError("lagcorr_eor_near_floor_mode must be 'absolute_mean' or 'relative_rho1'.")
+
+    lagcorr_eor_near_rho1_coeffs_tensor: Optional[Tensor] = None
+    if "lagcorr" in active_term_set:
+        coeffs = ensure_tensor_on(lagcorr_eor_near_rho1_coeffs, y_tensor.device, y_tensor.dtype)
+        if coeffs is not None:
+            coeffs = coeffs.reshape(-1)
+            if coeffs.numel() == 1:
+                if lagcorr_lags_tensor is None:
+                    raise ValueError("Internal error: lagcorr_lags_tensor missing while lagcorr active.")
+                coeffs = coeffs.repeat(int(lagcorr_lags_tensor.numel()))
+            if lagcorr_lags_tensor is not None and int(coeffs.numel()) != int(lagcorr_lags_tensor.numel()):
+                raise ValueError(
+                    "lagcorr_eor_near_rho1_coeffs must be scalar or match lagcorr_intervals length "
+                    f"({int(coeffs.numel())} vs {int(lagcorr_lags_tensor.numel())})."
+                )
+            lagcorr_eor_near_rho1_coeffs_tensor = coeffs
+
+    lagcorr_eor_tail_weight_mode_norm = str(lagcorr_eor_tail_weight_mode).strip().lower()
+    if lagcorr_eor_tail_weight_mode_norm not in {"hard", "sigmoid_chan", "sigmoid_chi_planck18"}:
+        raise ValueError(
+            "lagcorr_eor_tail_weight_mode must be one of: hard, sigmoid_chan, sigmoid_chi_planck18."
+        )
+    lagcorr_eor_tail_weights_tensor: Optional[Tensor] = None
+    if "lagcorr" in active_term_set and lagcorr_lags_tensor is not None:
+        if lagcorr_eor_tail_weight_mode_norm == "sigmoid_chan":
+            center = (
+                int(lagcorr_eor_tail_sigmoid_center_lag)
+                if lagcorr_eor_tail_sigmoid_center_lag is not None
+                else (
+                    int(lagcorr_eor_far_min_lag)
+                    if lagcorr_eor_far_min_lag is not None
+                    else int(torch.max(lagcorr_lags_tensor).item())
+                )
+            )
+            width = float(lagcorr_eor_tail_sigmoid_width_lag)
+            if not math.isfinite(width) or width <= 0.0:
+                raise ValueError("lagcorr_eor_tail_sigmoid_width_lag must be a finite positive value.")
+            lag_f = lagcorr_lags_tensor.to(device=y_tensor.device, dtype=y_tensor.dtype)
+            lagcorr_eor_tail_weights_tensor = torch.sigmoid((lag_f - float(center)) / width)
+        elif lagcorr_eor_tail_weight_mode_norm == "sigmoid_chi_planck18":
+            if freq_start_mhz is None or freq_delta_mhz is None:
+                raise ValueError(
+                    "lagcorr_eor_tail_weight_mode='sigmoid_chi_planck18' requires freq_start_mhz and freq_delta_mhz."
+                )
+            center_mpc = float(lagcorr_eor_tail_sigmoid_center_mpc)
+            width_mpc = float(lagcorr_eor_tail_sigmoid_width_mpc)
+            if not math.isfinite(center_mpc) or center_mpc <= 0.0:
+                raise ValueError("lagcorr_eor_tail_sigmoid_center_mpc must be a finite positive value.")
+            if not math.isfinite(width_mpc) or width_mpc <= 0.0:
+                raise ValueError("lagcorr_eor_tail_sigmoid_width_mpc must be a finite positive value.")
+            try:
+                from astropy.cosmology import Planck18
+            except ImportError as exc:  # pragma: no cover - dependency check
+                raise ImportError("sigmoid_chi_planck18 requires astropy.") from exc
+
+            nu21 = 1420.40575177  # MHz
+            nfreq = int(y_tensor.shape[freq_axis])
+            freqs = float(freq_start_mhz) + float(freq_delta_mhz) * np.arange(nfreq, dtype=np.float64)
+            z = nu21 / freqs - 1.0
+            chi = Planck18.comoving_distance(z).value.astype(np.float64)  # (F,)
+            dchi_median: List[float] = []
+            for lag in lagcorr_lags_tensor.detach().cpu().to(dtype=torch.int64).tolist():
+                if lag < 1 or lag >= nfreq:
+                    dchi_median.append(0.0)
+                    continue
+                dchi = chi[lag:] - chi[:-lag]
+                dchi_median.append(float(np.median(np.abs(dchi))))
+            dchi_t = torch.as_tensor(dchi_median, device=y_tensor.device, dtype=y_tensor.dtype)
+            lagcorr_eor_tail_weights_tensor = torch.sigmoid((dchi_t - center_mpc) / width_mpc)
+
+    lagcorr_eor_subterm_schedule_norm = str(lagcorr_eor_subterm_schedule).strip().lower()
+    if lagcorr_eor_subterm_schedule_norm not in {"static", "staged_v1"}:
+        raise ValueError("lagcorr_eor_subterm_schedule must be 'static' or 'staged_v1'.")
+    if lagcorr_eor_subterm_schedule_norm == "staged_v1":
+        default_offset = max(0, int(lagcorr_eor_ramp_iters_val // 2))
+        lagcorr_eor_floor_start_iter_val = (
+            int(lagcorr_eor_floor_start_iter)
+            if lagcorr_eor_floor_start_iter is not None
+            else int(lagcorr_eor_start_iter_val + default_offset)
+        )
+        lagcorr_eor_floor_ramp_iters_val = (
+            max(0, int(lagcorr_eor_floor_ramp_iters))
+            if int(lagcorr_eor_floor_ramp_iters) > 0
+            else int(lagcorr_eor_ramp_iters_val)
+        )
+        lagcorr_eor_rebound_start_iter_val = (
+            int(lagcorr_eor_rebound_start_iter)
+            if lagcorr_eor_rebound_start_iter is not None
+            else int(lagcorr_eor_start_iter_val + default_offset)
+        )
+        lagcorr_eor_rebound_ramp_iters_val = (
+            max(0, int(lagcorr_eor_rebound_ramp_iters))
+            if int(lagcorr_eor_rebound_ramp_iters) > 0
+            else int(lagcorr_eor_ramp_iters_val)
+        )
+    else:
+        lagcorr_eor_floor_start_iter_val = lagcorr_eor_start_iter_val
+        lagcorr_eor_floor_ramp_iters_val = 0
+        lagcorr_eor_rebound_start_iter_val = lagcorr_eor_start_iter_val
+        lagcorr_eor_rebound_ramp_iters_val = 0
+
     fft_mean_tensor = ensure_tensor_on(fft_prior_mean, y_tensor.device, y_tensor.dtype)
     fft_sigma_tensor = ensure_tensor_on(fft_prior_sigma, y_tensor.device, y_tensor.dtype)
     if fft_z_clip is not None:
@@ -878,6 +1067,27 @@ def optimize_components(
                 )
             else:
                 lagcorr_eor_scale_val = 1.0
+        lagcorr_floor_scale = 1.0
+        lagcorr_rebound_scale = 1.0
+        if "lagcorr" in active_term_set and lagcorr_eor_subterm_schedule_norm == "staged_v1":
+            if it < lagcorr_eor_floor_start_iter_val:
+                lagcorr_floor_scale = 0.0
+            elif lagcorr_eor_floor_ramp_iters_val > 0:
+                lagcorr_floor_scale = min(
+                    1.0,
+                    float(it - lagcorr_eor_floor_start_iter_val) / float(lagcorr_eor_floor_ramp_iters_val),
+                )
+            else:
+                lagcorr_floor_scale = 1.0
+            if it < lagcorr_eor_rebound_start_iter_val:
+                lagcorr_rebound_scale = 0.0
+            elif lagcorr_eor_rebound_ramp_iters_val > 0:
+                lagcorr_rebound_scale = min(
+                    1.0,
+                    float(it - lagcorr_eor_rebound_start_iter_val) / float(lagcorr_eor_rebound_ramp_iters_val),
+                )
+            else:
+                lagcorr_rebound_scale = 1.0
         if "poly_reparam" in active_term_set:
             assert poly_coeffs_param is not None and fg_resid_param is not None
             poly_component = _eval_polynomial_from_coeffs(
@@ -899,6 +1109,8 @@ def optimize_components(
             gamma=gamma,
             corr_weight=corr_weight,
             fft_weight=fft_weight,
+            eor_mean_weight=eor_mean_weight,
+            eor_hf_weight=eor_hf_weight,
             poly_weight=poly_weight,
             lagcorr_weight=lagcorr_weight,
             lagcorr_fg_component_weight=lagcorr_fg_component_weight_val,
@@ -913,6 +1125,9 @@ def optimize_components(
             eor_mean=eor_mean_tensor,
             eor_sigma=eor_sigma_tensor,
             eor_amp_threshold=eor_amp_threshold_tensor,
+            eor_amp_prior_mode=eor_amp_prior_mode_norm,
+            eor_hybrid_voxel_factor=eor_hybrid_voxel_factor_val,
+            eor_hybrid_voxel_weight=eor_hybrid_voxel_weight_val,
             fg_smooth_mean=fg_mean_tensor,
             fg_smooth_sigma=fg_sigma_tensor,
             fg_smooth_mode=fg_smooth_mode_norm,
@@ -923,6 +1138,8 @@ def optimize_components(
             corr_reduce=corr_reduce,
             corr_topk=corr_topk,
             corr_lse_alpha=corr_lse_alpha,
+            corr_feature=corr_feature_norm,
+            corr_spatial_pool=corr_spatial_pool_int,
             loss_mode=loss_mode,
             active_extra_terms=active_extra_terms,
             lagcorr_unit=lagcorr_unit,
@@ -934,19 +1151,23 @@ def optimize_components(
             eor_lagcorr_sigma=eor_lagcorr_sigma_tensor,
             lagcorr_max_pairs=lagcorr_max_pairs,
             lagcorr_spatial_pool=lagcorr_spatial_pool,
+            lagcorr_rms_min=lagcorr_rms_min_val,
             lagcorr_eor_mode=lagcorr_eor_mode_norm,
             lagcorr_eor_near_max_lag=lagcorr_eor_near_max_lag,
             lagcorr_eor_mid_max_lag=lagcorr_eor_mid_max_lag,
             lagcorr_eor_far_min_lag=lagcorr_eor_far_min_lag,
+            lagcorr_eor_tail_weights=lagcorr_eor_tail_weights_tensor,
             lagcorr_eor_tail_eps=lagcorr_eor_tail_eps,
             lagcorr_eor_neg_delta=lagcorr_eor_neg_delta,
             lagcorr_eor_near_rho_min=lagcorr_eor_near_rho_min,
+            lagcorr_eor_near_floor_mode=lagcorr_eor_near_floor_mode_norm,
+            lagcorr_eor_near_rho1_coeffs=lagcorr_eor_near_rho1_coeffs_tensor,
             lagcorr_eor_rebound_eps_act=lagcorr_eor_rebound_eps_act,
             lagcorr_eor_rebound_delta_up=lagcorr_eor_rebound_delta_up,
             lagcorr_eor_w_tail=lagcorr_eor_w_tail,
             lagcorr_eor_w_neg=lagcorr_eor_w_neg,
-            lagcorr_eor_w_near=lagcorr_eor_w_near,
-            lagcorr_eor_w_rebound=lagcorr_eor_w_rebound,
+            lagcorr_eor_w_near=float(lagcorr_eor_w_near) * float(lagcorr_floor_scale),
+            lagcorr_eor_w_rebound=float(lagcorr_eor_w_rebound) * float(lagcorr_rebound_scale),
             lagcorr_pair_sampling=lagcorr_pair_sampling_norm,
             lagcorr_rng=lagcorr_rng,
             lagcorr_prior_weights=lagcorr_weight_tensor,
@@ -956,6 +1177,8 @@ def optimize_components(
             fft_percent=fft_highfreq_percent,
             fft_use_log_energy=fft_use_log_energy,
             fft_z_clip=fft_z_clip,
+            eor_hf_percent=eor_hf_percent,
+            eor_hf_r_max=eor_hf_r_max,
             poly_degree=poly_degree,
             poly_sigma=poly_sigma_tensor,
             poly_residual=poly_residual,
@@ -993,6 +1216,8 @@ def optimize_components(
             lagcorr=float(components["lagcorr"].item()),
             lagcorr_gap=float(components["lagcorr_gap"].item()),
             fft_highfreq=float(components["fft_highfreq"].item()),
+            eor_mean=float(components["eor_mean"].item()),
+            eor_hf=float(components["eor_hf"].item()),
             poly=float(components["poly"].item()),
         )
         history.append(entry)
@@ -1004,6 +1229,7 @@ def optimize_components(
                 f"eor={entry.eor_reg:.4e} corr={entry.corr:.4e} "
                 f"lagcorr={entry.lagcorr:.4e} laggap={entry.lagcorr_gap:.4e} "
                 f"corr_coeff={entry.corr_coeff:.3f} fft={entry.fft_highfreq:.4e} "
+                f"eor_mean={entry.eor_mean:.4e} eor_hf={entry.eor_hf:.4e} "
                 f"poly={entry.poly:.4e} lr={current_lr:.6g}"
             )
 
@@ -2627,6 +2853,9 @@ def _optimize_from_fits(
         eor_prior_mean=eor_mean_value,
         eor_prior_sigma=eor_sigma_value,
         eor_prior_amp_threshold=config.eor_prior_amp_threshold,
+        eor_amp_prior_mode=config.eor_amp_prior_mode,
+        eor_hybrid_voxel_factor=config.eor_hybrid_voxel_factor,
+        eor_hybrid_voxel_weight=config.eor_hybrid_voxel_weight,
         fg_smooth_mean=fg_mean_value,
         fg_smooth_sigma=fg_sigma_value,
         fg_smooth_mode=config.fg_smooth_mode,
@@ -2638,6 +2867,8 @@ def _optimize_from_fits(
         corr_topk=config.corr_topk,
         corr_lse_alpha=config.corr_lse_alpha,
         corr_weight=config.corr_weight,
+        corr_feature=config.corr_feature,
+        corr_spatial_pool=config.corr_spatial_pool,
         lagcorr_weight=config.lagcorr_weight,
         lagcorr_fg_component_weight=config.lagcorr_fg_component_weight,
         lagcorr_eor_component_weight=config.lagcorr_eor_component_weight,
@@ -2656,13 +2887,21 @@ def _optimize_from_fits(
         eor_lagcorr_sigma=config.eor_lagcorr_sigma,
         lagcorr_max_pairs=config.lagcorr_max_pairs,
         lagcorr_spatial_pool=config.lagcorr_spatial_pool,
+        lagcorr_rms_min=config.lagcorr_rms_min,
         lagcorr_eor_mode=config.lagcorr_eor_mode,
         lagcorr_eor_near_max_lag=config.lagcorr_eor_near_max_lag,
         lagcorr_eor_mid_max_lag=config.lagcorr_eor_mid_max_lag,
         lagcorr_eor_far_min_lag=config.lagcorr_eor_far_min_lag,
+        lagcorr_eor_tail_weight_mode=config.lagcorr_eor_tail_weight_mode,
+        lagcorr_eor_tail_sigmoid_center_lag=config.lagcorr_eor_tail_sigmoid_center_lag,
+        lagcorr_eor_tail_sigmoid_width_lag=config.lagcorr_eor_tail_sigmoid_width_lag,
+        lagcorr_eor_tail_sigmoid_center_mpc=config.lagcorr_eor_tail_sigmoid_center_mpc,
+        lagcorr_eor_tail_sigmoid_width_mpc=config.lagcorr_eor_tail_sigmoid_width_mpc,
         lagcorr_eor_tail_eps=config.lagcorr_eor_tail_eps,
         lagcorr_eor_neg_delta=config.lagcorr_eor_neg_delta,
         lagcorr_eor_near_rho_min=config.lagcorr_eor_near_rho_min,
+        lagcorr_eor_near_floor_mode=config.lagcorr_eor_near_floor_mode,
+        lagcorr_eor_near_rho1_coeffs=config.lagcorr_eor_near_rho1_coeffs,
         lagcorr_eor_rebound_eps_act=config.lagcorr_eor_rebound_eps_act,
         lagcorr_eor_rebound_delta_up=config.lagcorr_eor_rebound_delta_up,
         lagcorr_eor_w_tail=config.lagcorr_eor_w_tail,
@@ -2672,9 +2911,16 @@ def _optimize_from_fits(
         lagcorr_lag_weights=config.lagcorr_lag_weights,
         lagcorr_eor_start_iter=config.lagcorr_eor_start_iter,
         lagcorr_eor_ramp_iters=config.lagcorr_eor_ramp_iters,
+        lagcorr_eor_subterm_schedule=config.lagcorr_eor_subterm_schedule,
+        lagcorr_eor_floor_start_iter=config.lagcorr_eor_floor_start_iter,
+        lagcorr_eor_floor_ramp_iters=config.lagcorr_eor_floor_ramp_iters,
+        lagcorr_eor_rebound_start_iter=config.lagcorr_eor_rebound_start_iter,
+        lagcorr_eor_rebound_ramp_iters=config.lagcorr_eor_rebound_ramp_iters,
         extra_loss_start_iter=config.extra_loss_start_iter,
         extra_loss_ramp_iters=config.extra_loss_ramp_iters,
         fft_weight=config.fft_weight,
+        eor_mean_weight=config.eor_mean_weight,
+        eor_hf_weight=config.eor_hf_weight,
         poly_weight=config.poly_weight,
         poly_degree=config.poly_degree,
         poly_sigma=config.poly_sigma,
@@ -2685,6 +2931,8 @@ def _optimize_from_fits(
         fft_highfreq_percent=config.fft_highfreq_percent,
         fft_use_log_energy=config.fft_use_log_energy,
         fft_z_clip=config.fft_z_clip,
+        eor_hf_percent=config.eor_hf_percent,
+        eor_hf_r_max=config.eor_hf_r_max,
         optimizer_name=config.optimizer_name,
         momentum=config.momentum,
         lr_scheduler=config.lr_scheduler,
@@ -2711,7 +2959,8 @@ def _optimize_from_fits(
             f"eor={final.eor_reg:.4e}, corr={final.corr:.4e}, "
             f"lagcorr={final.lagcorr:.4e}, laggap={final.lagcorr_gap:.4e}, "
             f"corr_coeff={final.corr_coeff:.3f}, "
-            f"fft={final.fft_highfreq:.4e}, poly={final.poly:.4e}"
+            f"fft={final.fft_highfreq:.4e}, eor_mean={final.eor_mean:.4e}, "
+            f"eor_hf={final.eor_hf:.4e}, poly={final.poly:.4e}"
         )
     print(f"Saved foreground estimate to {fg_output}")
     print(f"Saved EoR estimate to {eor_output}")
@@ -2823,6 +3072,9 @@ def run_synthetic_demo(config: OptimizationConfig) -> None:
         eor_prior_mean=config.eor_prior_mean,
         eor_prior_sigma=config.eor_prior_sigma,
         eor_prior_amp_threshold=config.eor_prior_amp_threshold,
+        eor_amp_prior_mode=config.eor_amp_prior_mode,
+        eor_hybrid_voxel_factor=config.eor_hybrid_voxel_factor,
+        eor_hybrid_voxel_weight=config.eor_hybrid_voxel_weight,
         fg_smooth_mean=config.fg_smooth_mean,
         fg_smooth_sigma=config.fg_smooth_sigma,
         fg_smooth_mode=config.fg_smooth_mode,
@@ -2834,6 +3086,8 @@ def run_synthetic_demo(config: OptimizationConfig) -> None:
         corr_topk=config.corr_topk,
         corr_lse_alpha=config.corr_lse_alpha,
         corr_weight=config.corr_weight,
+        corr_feature=config.corr_feature,
+        corr_spatial_pool=config.corr_spatial_pool,
         lagcorr_weight=config.lagcorr_weight,
         lagcorr_fg_component_weight=config.lagcorr_fg_component_weight,
         lagcorr_eor_component_weight=config.lagcorr_eor_component_weight,
@@ -2852,13 +3106,21 @@ def run_synthetic_demo(config: OptimizationConfig) -> None:
         eor_lagcorr_sigma=config.eor_lagcorr_sigma,
         lagcorr_max_pairs=config.lagcorr_max_pairs,
         lagcorr_spatial_pool=config.lagcorr_spatial_pool,
+        lagcorr_rms_min=config.lagcorr_rms_min,
         lagcorr_eor_mode=config.lagcorr_eor_mode,
         lagcorr_eor_near_max_lag=config.lagcorr_eor_near_max_lag,
         lagcorr_eor_mid_max_lag=config.lagcorr_eor_mid_max_lag,
         lagcorr_eor_far_min_lag=config.lagcorr_eor_far_min_lag,
+        lagcorr_eor_tail_weight_mode=config.lagcorr_eor_tail_weight_mode,
+        lagcorr_eor_tail_sigmoid_center_lag=config.lagcorr_eor_tail_sigmoid_center_lag,
+        lagcorr_eor_tail_sigmoid_width_lag=config.lagcorr_eor_tail_sigmoid_width_lag,
+        lagcorr_eor_tail_sigmoid_center_mpc=config.lagcorr_eor_tail_sigmoid_center_mpc,
+        lagcorr_eor_tail_sigmoid_width_mpc=config.lagcorr_eor_tail_sigmoid_width_mpc,
         lagcorr_eor_tail_eps=config.lagcorr_eor_tail_eps,
         lagcorr_eor_neg_delta=config.lagcorr_eor_neg_delta,
         lagcorr_eor_near_rho_min=config.lagcorr_eor_near_rho_min,
+        lagcorr_eor_near_floor_mode=config.lagcorr_eor_near_floor_mode,
+        lagcorr_eor_near_rho1_coeffs=config.lagcorr_eor_near_rho1_coeffs,
         lagcorr_eor_rebound_eps_act=config.lagcorr_eor_rebound_eps_act,
         lagcorr_eor_rebound_delta_up=config.lagcorr_eor_rebound_delta_up,
         lagcorr_eor_w_tail=config.lagcorr_eor_w_tail,
@@ -2868,9 +3130,16 @@ def run_synthetic_demo(config: OptimizationConfig) -> None:
         lagcorr_lag_weights=config.lagcorr_lag_weights,
         lagcorr_eor_start_iter=config.lagcorr_eor_start_iter,
         lagcorr_eor_ramp_iters=config.lagcorr_eor_ramp_iters,
+        lagcorr_eor_subterm_schedule=config.lagcorr_eor_subterm_schedule,
+        lagcorr_eor_floor_start_iter=config.lagcorr_eor_floor_start_iter,
+        lagcorr_eor_floor_ramp_iters=config.lagcorr_eor_floor_ramp_iters,
+        lagcorr_eor_rebound_start_iter=config.lagcorr_eor_rebound_start_iter,
+        lagcorr_eor_rebound_ramp_iters=config.lagcorr_eor_rebound_ramp_iters,
         extra_loss_start_iter=config.extra_loss_start_iter,
         extra_loss_ramp_iters=config.extra_loss_ramp_iters,
         fft_weight=config.fft_weight,
+        eor_mean_weight=config.eor_mean_weight,
+        eor_hf_weight=config.eor_hf_weight,
         poly_weight=config.poly_weight,
         poly_degree=config.poly_degree,
         poly_sigma=config.poly_sigma,
@@ -2881,6 +3150,8 @@ def run_synthetic_demo(config: OptimizationConfig) -> None:
         fft_highfreq_percent=config.fft_highfreq_percent,
         fft_use_log_energy=config.fft_use_log_energy,
         fft_z_clip=config.fft_z_clip,
+        eor_hf_percent=config.eor_hf_percent,
+        eor_hf_r_max=config.eor_hf_r_max,
         optimizer_name=config.optimizer_name,
         momentum=config.momentum,
         lr_scheduler=config.lr_scheduler,

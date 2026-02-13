@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Dispatch corr-term scans to remote machines.
+Dispatch EoR amplitude-prior mode scans to remote machines.
 
 Remote layout expectation:
   <remote_root>/code/3dnet/  (synced code)
@@ -17,9 +17,9 @@ import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Sequence
 
-from run_corr_hyper_scan import generate_candidates
+from run_eor_amp_prior_scan import generate_candidates
 
 
 @dataclass(frozen=True)
@@ -43,27 +43,12 @@ class WorkerSlot:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Dispatch corr scan workers to remote hosts.")
-    parser.add_argument("--work-root", type=Path, default=Path.cwd(), help="Local project root.")
+    parser = argparse.ArgumentParser(description="Dispatch EoR amp prior mode scan workers to remote hosts.")
+    parser.add_argument("--work-root", type=Path, default=Path.cwd())
     parser.add_argument("--code-dir", type=Path, default=None, help="Local 3dnet dir (default <work-root>/3dnet).")
-    parser.add_argument(
-        "--remote-root",
-        type=str,
-        default="/data/zhenghao/fg_rmw",
-        help="Remote project root that contains code/ and data/.",
-    )
-    parser.add_argument(
-        "--hosts",
-        type=str,
-        default="zhenghao@119.78.226.31,zhenghao@202.127.24.58",
-        help="Comma-separated remote SSH hosts.",
-    )
-    parser.add_argument(
-        "--python-bin",
-        type=str,
-        default="/home/zhenghao/miniconda3/envs/torch/bin/python",
-        help="Default remote python executable used to run scan workers.",
-    )
+    parser.add_argument("--remote-root", type=str, default="/data/zhenghao/fg_rmw")
+    parser.add_argument("--hosts", type=str, default="zhenghao@119.78.226.31,zhenghao@202.127.24.58")
+    parser.add_argument("--python-bin", type=str, default="/home/zhenghao/miniconda3/envs/torch/bin/python")
     parser.add_argument(
         "--python-bin-map",
         type=str,
@@ -71,10 +56,9 @@ def parse_args() -> argparse.Namespace:
             "zhenghao@119.78.226.31:/home/zhenghao/miniconda3/envs/torch/bin/python,"
             "zhenghao@202.127.24.58:/home/zhenghao/miniconda3/envs/pytorch/bin/python"
         ),
-        help="Optional host-specific python map: host:path,host:path.",
     )
 
-    # Scan knobs (mirrors run_corr_hyper_scan.py).
+    # Scan knobs (mirrors run_eor_amp_prior_scan.py).
     parser.add_argument("--datasets", type=str, default="cube1,cube2")
     parser.add_argument("--exclude-from-ranking", type=str, default="cube1")
     parser.add_argument("--num-iters", type=int, default=2500)
@@ -84,25 +68,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--freq-delta-mhz", type=float, default=0.1)
     parser.add_argument("--data-error", type=float, default=0.005)
 
-    # Fixed base baseline.
     parser.add_argument("--base-beta", type=float, default=0.5)
     parser.add_argument("--base-gamma", type=float, default=0.6)
     parser.add_argument("--base-eor-prior-sigma", type=float, default=0.02)
     parser.add_argument("--base-eor-amp-threshold", type=float, default=0.1)
-    parser.add_argument(
-        "--base-eor-amp-prior-mode",
-        type=str,
-        default="voxel_deadzone",
-        choices=["voxel_deadzone", "slice_rms_hinge", "hybrid"],
-    )
-    parser.add_argument("--base-eor-hybrid-voxel-factor", type=float, default=5.0)
-    parser.add_argument("--base-eor-hybrid-voxel-weight", type=float, default=0.1)
     parser.add_argument("--base-fg-smooth-mode", type=str, default="diff2_l2")
     parser.add_argument("--base-fg-smooth-mean", type=float, default=0.002)
     parser.add_argument("--base-fg-smooth-sigma", type=float, default=0.004)
     parser.add_argument("--base-fg-smooth-huber-delta", type=float, default=1.0)
 
-    # Optimizer knobs.
     parser.add_argument("--optimizer-name", type=str, default="adam")
     parser.add_argument("--lr", type=float, default=4e-4)
     parser.add_argument("--momentum", type=float, default=0.9)
@@ -113,30 +87,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr-plateau-cooldown", type=int, default=80)
     parser.add_argument("--lr-min", type=float, default=1e-6)
 
-    # Corr grid.
-    parser.add_argument("--corr-weight-list", type=str, default="0.05,0.1,0.2,0.5,1.0,2.0")
-    parser.add_argument("--corr-sigma-list", type=str, default="0.05,0.1,0.2")
-    parser.add_argument("--corr-abs-threshold-list", type=str, default="0.0")
-    parser.add_argument("--corr-prior-mean", type=float, default=0.0)
-    parser.add_argument(
-        "--corr-reduce",
-        type=str,
-        default="mean",
-        choices=["mean", "topk", "logsumexp"],
-        help="Reduction over per-frequency corr penalties (default mean).",
-    )
-    parser.add_argument("--corr-topk", type=int, default=8, help="Top-k used when corr_reduce=topk.")
-    parser.add_argument(
-        "--corr-lse-alpha",
-        type=float,
-        default=10.0,
-        help="Temperature used when corr_reduce=logsumexp (log-mean-exp).",
-    )
-    parser.add_argument("--extra-loss-start-iter", type=int, default=500)
-    parser.add_argument("--extra-loss-ramp-iters", type=int, default=0)
-    parser.add_argument("--corr-feature-list", type=str, default="raw")
-    parser.add_argument("--corr-spatial-pool-list", type=str, default="1")
-    parser.add_argument("--include-control", action="store_true")
+    parser.add_argument("--eor-amp-prior-modes", type=str, default="voxel_deadzone,slice_rms_hinge,hybrid")
+    parser.add_argument("--hybrid-voxel-factor", type=float, default=5.0)
+    parser.add_argument("--hybrid-voxel-weight", type=float, default=0.1)
     parser.add_argument("--candidate-names", type=str, default="")
 
     # GPU availability policy (util low + enough free memory).
@@ -144,33 +97,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpu-used-max-mb", type=int, default=0)
     parser.add_argument("--gpu-free-min-mb", type=int, default=20000)
 
-    parser.add_argument("--sync-code", action="store_true", help="Rsync local 3dnet code to remote hosts before launch.")
-    parser.add_argument("--dry-run", action="store_true", help="Print planned launch commands only.")
-    parser.add_argument(
-        "--launch-manifest",
-        type=Path,
-        default=None,
-        help="Local manifest path (default: <work-root>/runs/remote/<date>/corr_dispatch_<timestamp>.json).",
-    )
+    parser.add_argument("--sync-code", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--launch-manifest", type=Path, default=None)
     return parser.parse_args()
 
 
 def _parse_csv_tokens(text: str) -> List[str]:
     return [t.strip() for t in str(text).split(",") if t.strip()]
-
-
-def _parse_float_list(text: str) -> List[float]:
-    out: List[float] = []
-    for token in _parse_csv_tokens(text):
-        out.append(float(token))
-    return out
-
-
-def _parse_int_list(text: str) -> List[int]:
-    out: List[int] = []
-    for token in _parse_csv_tokens(text):
-        out.append(int(float(token)))
-    return out
 
 
 def _run_capture(cmd: Sequence[str]) -> str:
@@ -238,11 +172,6 @@ def split_round_robin(items: Sequence[str], n_bins: int) -> List[List[str]]:
 
 
 def make_gpu_map_for_slot(datasets: Sequence[str], *, gpu0: int, gpu1: int) -> str:
-    """
-    Map an ordered dataset list onto a 2-GPU slot (alternating g0/g1).
-
-    This keeps per-candidate concurrency at 2 while allowing many datasets.
-    """
     names = [str(x).strip() for x in datasets if str(x).strip()]
     if not names:
         raise ValueError("No datasets provided for gpu_map.")
@@ -285,11 +214,7 @@ def parse_host_path_map(text: str) -> Dict[str, str]:
         if ":" not in token:
             raise ValueError(f"Invalid host:path token: {token}")
         host, path = token.split(":", 1)
-        host = host.strip()
-        path = path.strip()
-        if not host or not path:
-            raise ValueError(f"Invalid host:path token: {token}")
-        out[host] = path
+        out[host.strip()] = path.strip()
     return out
 
 
@@ -302,24 +227,11 @@ def main() -> int:
         raise ValueError("No remote hosts provided.")
     python_map = parse_host_path_map(args.python_bin_map)
 
-    candidates = generate_candidates(
-        corr_weight_list=_parse_float_list(args.corr_weight_list),
-        corr_sigma_list=_parse_float_list(args.corr_sigma_list),
-        corr_abs_threshold_list=_parse_float_list(args.corr_abs_threshold_list),
-        corr_reduce=str(args.corr_reduce),
-        corr_topk=int(args.corr_topk) if args.corr_topk is not None else None,
-        corr_lse_alpha=float(args.corr_lse_alpha),
-        extra_loss_start_iter=int(args.extra_loss_start_iter),
-        extra_loss_ramp_iters=int(args.extra_loss_ramp_iters),
-        corr_feature_list=_parse_csv_tokens(args.corr_feature_list),
-        corr_spatial_pool_list=_parse_int_list(args.corr_spatial_pool_list),
-        include_control=bool(args.include_control),
-    )
+    candidates = generate_candidates(args)
     names = [c.name for c in candidates]
-    if args.candidate_names.strip():
-        allow = {x.strip() for x in args.candidate_names.split(",") if x.strip()}
-        known = set(names)
-        unknown = sorted(allow - known)
+    if str(args.candidate_names).strip():
+        allow = {x.strip() for x in str(args.candidate_names).split(",") if x.strip()}
+        unknown = sorted(allow - set(names))
         if unknown:
             raise ValueError(f"Unknown candidate names: {unknown}")
         names = [n for n in names if n in allow]
@@ -353,7 +265,7 @@ def main() -> int:
 
     chunks = split_round_robin(names, len(slots))
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    remote_run_root = f"{args.remote_root.rstrip('/')}/runs/corr_scan_{stamp}_remote"
+    remote_run_root = f"{args.remote_root.rstrip('/')}/runs/eor_amp_scan_{stamp}_remote"
 
     launches: List[Dict[str, object]] = []
     for slot, cand_chunk in zip(slots, chunks):
@@ -364,11 +276,11 @@ def main() -> int:
         worker_log = f"{worker_out}/worker.log"
         gpu_map = make_gpu_map_for_slot(dataset_names, gpu0=slot.gpu0, gpu1=slot.gpu1)
         cand_text = ",".join(cand_chunk)
-        worker_python_bin = python_map.get(slot.host, args.python_bin)
+        worker_python = python_map.get(slot.host, str(args.python_bin))
 
         cmd_parts = [
-            _shq(worker_python_bin),
-            _shq(f"{args.remote_root.rstrip('/')}/code/3dnet/run_corr_hyper_scan.py"),
+            _shq(worker_python),
+            _shq(f"{args.remote_root.rstrip('/')}/code/3dnet/run_eor_amp_prior_scan.py"),
             "--work-root",
             _shq(args.remote_root),
             "--code-dir",
@@ -378,7 +290,7 @@ def main() -> int:
             "--output-dir",
             _shq(worker_out),
             "--datasets",
-            _shq(args.datasets),
+            _shq(str(args.datasets)),
             "--exclude-from-ranking",
             _shq(str(args.exclude_from_ranking)),
             "--gpu-map",
@@ -405,12 +317,6 @@ def main() -> int:
             _shq(str(args.base_eor_prior_sigma)),
             "--base-eor-amp-threshold",
             _shq(str(args.base_eor_amp_threshold)),
-            "--base-eor-amp-prior-mode",
-            _shq(str(args.base_eor_amp_prior_mode)),
-            "--base-eor-hybrid-voxel-factor",
-            _shq(str(args.base_eor_hybrid_voxel_factor)),
-            "--base-eor-hybrid-voxel-weight",
-            _shq(str(args.base_eor_hybrid_voxel_weight)),
             "--base-fg-smooth-mode",
             _shq(str(args.base_fg_smooth_mode)),
             "--base-fg-smooth-mean",
@@ -437,35 +343,17 @@ def main() -> int:
             _shq(str(args.lr_plateau_cooldown)),
             "--lr-min",
             _shq(str(args.lr_min)),
-            "--corr-weight-list",
-            _shq(str(args.corr_weight_list)),
-            "--corr-sigma-list",
-            _shq(str(args.corr_sigma_list)),
-            "--corr-abs-threshold-list",
-            _shq(str(args.corr_abs_threshold_list)),
-            "--corr-prior-mean",
-            _shq(str(args.corr_prior_mean)),
-            "--corr-reduce",
-            _shq(str(args.corr_reduce)),
-            "--corr-topk",
-            _shq(str(args.corr_topk)),
-            "--corr-lse-alpha",
-            _shq(str(args.corr_lse_alpha)),
-            "--extra-loss-start-iter",
-            _shq(str(args.extra_loss_start_iter)),
-            "--extra-loss-ramp-iters",
-            _shq(str(args.extra_loss_ramp_iters)),
-            "--corr-feature-list",
-            _shq(str(args.corr_feature_list)),
-            "--corr-spatial-pool-list",
-            _shq(str(args.corr_spatial_pool_list)),
+            "--eor-amp-prior-modes",
+            _shq(str(args.eor_amp_prior_modes)),
+            "--hybrid-voxel-factor",
+            _shq(str(args.hybrid_voxel_factor)),
+            "--hybrid-voxel-weight",
+            _shq(str(args.hybrid_voxel_weight)),
             "--candidate-names",
             _shq(cand_text),
             "--python-bin",
-            _shq(worker_python_bin),
+            _shq(worker_python),
         ]
-        if args.include_control:
-            cmd_parts.append("--include-control")
         worker_cmd = " ".join(cmd_parts)
         remote_cmd = f"mkdir -p {_shq(worker_out)} && nohup {worker_cmd} > {_shq(worker_log)} 2>&1 & echo $!"
 
@@ -475,7 +363,7 @@ def main() -> int:
             "gpu_map": gpu_map,
             "candidate_count": len(cand_chunk),
             "candidates": cand_chunk,
-            "python_bin": worker_python_bin,
+            "python_bin": worker_python,
             "output_dir": worker_out,
             "log_path": worker_log,
             "remote_cmd": remote_cmd,
@@ -488,7 +376,7 @@ def main() -> int:
         launches.append(rec)
 
     date_tag = datetime.now().strftime("%Y%m%d")
-    default_manifest = work_root / "runs" / "remote" / date_tag / f"corr_dispatch_{stamp}.json"
+    default_manifest = work_root / "runs" / "remote" / date_tag / f"eor_amp_dispatch_{stamp}.json"
     manifest_path = args.launch_manifest.resolve() if args.launch_manifest else default_manifest
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -508,12 +396,10 @@ def main() -> int:
     print(f"[dispatch] candidates={len(names)} slots={len(slots)} launches={len(launches)}")
     print(f"[dispatch] manifest={manifest_path}")
     for rec in launches:
-        print(
-            f"[worker] host={rec['host']} worker={rec['worker']} "
-            f"gpu_map={rec['gpu_map']} n={rec['candidate_count']} pid={rec.get('pid')}"
-        )
+        print(f"[worker] host={rec['host']} worker={rec['worker']} gpu_map={rec['gpu_map']} n={rec['candidate_count']} pid={rec.get('pid')}")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

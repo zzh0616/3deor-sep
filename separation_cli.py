@@ -105,6 +105,30 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         ),
     )
     parser.add_argument(
+        "--eor-amp-prior-mode",
+        dest="eor_amp_prior_mode",
+        choices=["voxel_deadzone", "slice_rms_hinge", "hybrid"],
+        type=str,
+        help=(
+            "EoR amplitude prior mode. "
+            "voxel_deadzone: dead-zone on |eor| per voxel; "
+            "slice_rms_hinge: hinge on per-slice std_xy(eor); "
+            "hybrid: slice_rms_hinge plus loose voxel outlier guard."
+        ),
+    )
+    parser.add_argument(
+        "--eor-hybrid-voxel-factor",
+        dest="eor_hybrid_voxel_factor",
+        type=float,
+        help="Hybrid amp prior: voxel outlier threshold factor (guard_thr = factor * threshold).",
+    )
+    parser.add_argument(
+        "--eor-hybrid-voxel-weight",
+        dest="eor_hybrid_voxel_weight",
+        type=float,
+        help="Hybrid amp prior: relative weight of the voxel outlier guard term.",
+    )
+    parser.add_argument(
         "--fg-smooth-mean",
         type=float,
         help="Scalar prior mean for FG third differences (default 0.0).",
@@ -183,6 +207,19 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         dest="corr_weight",
         type=float,
         help="Weight applied to the correlation prior term (default 1.0).",
+    )
+    parser.add_argument(
+        "--corr-feature",
+        dest="corr_feature",
+        choices=["raw", "diff1", "diff2"],
+        type=str,
+        help="Feature used for corr prior: raw, diff1, or diff2 along frequency.",
+    )
+    parser.add_argument(
+        "--corr-spatial-pool",
+        dest="corr_spatial_pool",
+        type=int,
+        help="Spatial avg-pooling factor (>=1) applied before corr statistics.",
     )
     parser.add_argument(
         "--lagcorr-weight",
@@ -349,6 +386,18 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         help="Weight applied to the high-frequency rFFT prior term (default 1.0).",
     )
     parser.add_argument(
+        "--eor-mean-weight",
+        dest="eor_mean_weight",
+        type=float,
+        help="Weight applied to the EoR slice-mean prior term (eor_mean extra term).",
+    )
+    parser.add_argument(
+        "--eor-hf-weight",
+        dest="eor_hf_weight",
+        type=float,
+        help="Weight applied to the EoR high-frequency ratio prior term (eor_hf extra term).",
+    )
+    parser.add_argument(
         "--loss-mode",
         type=str,
         help=(
@@ -368,6 +417,18 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         "--fft-percent",
         type=float,
         help="Fraction of highest frequency bins penalized in rFFT mode (default 0.7).",
+    )
+    parser.add_argument(
+        "--eor-hf-percent",
+        dest="eor_hf_percent",
+        type=float,
+        help="Fraction of highest rFFT bins used to compute EoR high-frequency energy ratio.",
+    )
+    parser.add_argument(
+        "--eor-hf-r-max",
+        dest="eor_hf_r_max",
+        type=float,
+        help="Allowed maximum high-frequency energy ratio before EoR hf penalty activates.",
     )
     parser.add_argument(
         "--fft-mean",
@@ -534,6 +595,8 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "beta",
         "gamma",
         "fft_weight",
+        "eor_mean_weight",
+        "eor_hf_weight",
         "loss_mode",
         "extra_loss_terms",
         "freq_axis",
@@ -551,6 +614,9 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "eor_prior_mean",
         "eor_prior_sigma",
         "eor_prior_amp_threshold",
+        "eor_amp_prior_mode",
+        "eor_hybrid_voxel_factor",
+        "eor_hybrid_voxel_weight",
         "fg_smooth_mean",
         "fg_smooth_sigma",
         "fg_smooth_mode",
@@ -565,6 +631,8 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "corr_topk",
         "corr_lse_alpha",
         "corr_weight",
+        "corr_feature",
+        "corr_spatial_pool",
         "lagcorr_weight",
         "lagcorr_fg_component_weight",
         "lagcorr_eor_component_weight",
@@ -593,6 +661,8 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "fft_highfreq_percent",
         "fft_use_log_energy",
         "fft_z_clip",
+        "eor_hf_percent",
+        "eor_hf_r_max",
         "fft_prior_mean",
         "fft_prior_sigma",
         "poly_weight",

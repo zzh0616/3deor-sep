@@ -15,7 +15,14 @@ from constants import EPS_LOSS, DEFAULT_FFT_SIGMA
 from utils import clamp_eps, ensure_tensor_on, prepare_broadcastable_prior
 
 Tensor = torch.Tensor
-VALID_EXTRA_LOSS_TERMS: Tuple[str, ...] = ("corr", "rfft", "poly_reparam", "lagcorr")
+VALID_EXTRA_LOSS_TERMS: Tuple[str, ...] = (
+    "corr",
+    "rfft",
+    "poly_reparam",
+    "lagcorr",
+    "eor_mean",
+    "eor_hf",
+)
 VALID_FG_SMOOTH_MODES: Tuple[str, ...] = (
     "diff3_l2",
     "diff2_l2",
@@ -364,6 +371,7 @@ def _frequency_lag_correlation_stats(
     max_pairs: Optional[int] = None,
     pair_sampling: str = "head",
     rng: Optional[torch.Generator] = None,
+    rms_min: float = 0.0,
     eps: float = 1e-8,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     """
@@ -421,6 +429,18 @@ def _frequency_lag_correlation_stats(
     centered = flat - flat.mean(dim=1, keepdim=True)
     norms = torch.norm(centered, dim=1)
     norms = torch.clamp(norms, min=eps)
+    # Optional variance guard: ignore slice-pairs where either slice has too-small RMS,
+    # which can make corr statistics extremely noisy/unstable.
+    rms_min_val = float(rms_min)
+    if not math.isfinite(rms_min_val) or rms_min_val < 0.0:
+        raise ValueError("rms_min must be a finite non-negative value.")
+    if rms_min_val > 0.0:
+        pix = float(centered.shape[1])
+        scale = math.sqrt(max(1.0, pix))
+        slice_rms = norms / torch.as_tensor(scale, device=norms.device, dtype=norms.dtype)
+        valid_slice = slice_rms >= rms_min_val
+    else:
+        valid_slice = torch.ones_like(norms, dtype=torch.bool)
 
     losses = []
     lag_means = []
@@ -450,6 +470,18 @@ def _frequency_lag_correlation_stats(
         denom = norms.index_select(0, pair_idx) * norms.index_select(0, pair_j)
         denom = torch.clamp(denom, min=eps)
         corr = dot / denom
+        pair_valid = valid_slice.index_select(0, pair_idx) & valid_slice.index_select(0, pair_j)
+        if bool(torch.sum(pair_valid.to(dtype=torch.int64)).item()) == 0:
+            # No stable pairs: do not apply a penalty for this lag.
+            zero = torch.zeros((), device=cube.device, dtype=cube.dtype)
+            losses.append(zero)
+            lag_means.append(zero)
+            lag_vars.append(zero)
+            if lag_weight_tensor is not None:
+                w_k = lag_weight_tensor[idx] if lag_weight_tensor.numel() > 1 else lag_weight_tensor[0]
+                lag_w.append(torch.clamp(w_k, min=0.0))
+            continue
+        corr = corr[pair_valid]
 
         mean_k = mean_tensor[idx] if mean_tensor.numel() > 1 else mean_tensor[0]
         sigma_k = sigma_tensor[idx] if sigma_tensor.numel() > 1 else sigma_tensor[0]
@@ -510,6 +542,7 @@ def _frequency_lag_correlation_profile(
     max_pairs: Optional[int] = None,
     pair_sampling: str = "head",
     rng: Optional[torch.Generator] = None,
+    rms_min: float = 0.0,
     eps: float = 1e-8,
 ) -> Tuple[Tensor, Tensor]:
     """
@@ -548,6 +581,16 @@ def _frequency_lag_correlation_profile(
     centered = flat - flat.mean(dim=1, keepdim=True)
     norms = torch.norm(centered, dim=1)
     norms = torch.clamp(norms, min=eps)
+    rms_min_val = float(rms_min)
+    if not math.isfinite(rms_min_val) or rms_min_val < 0.0:
+        raise ValueError("rms_min must be a finite non-negative value.")
+    if rms_min_val > 0.0:
+        pix = float(centered.shape[1])
+        scale = math.sqrt(max(1.0, pix))
+        slice_rms = norms / torch.as_tensor(scale, device=norms.device, dtype=norms.dtype)
+        valid_slice = slice_rms >= rms_min_val
+    else:
+        valid_slice = torch.ones_like(norms, dtype=torch.bool)
 
     lag_means: List[Tensor] = []
     lag_vars: List[Tensor] = []
@@ -575,6 +618,12 @@ def _frequency_lag_correlation_profile(
         denom = norms.index_select(0, pair_idx) * norms.index_select(0, pair_j)
         denom = torch.clamp(denom, min=eps)
         corr = dot / denom
+        pair_valid = valid_slice.index_select(0, pair_idx) & valid_slice.index_select(0, pair_j)
+        if bool(torch.sum(pair_valid.to(dtype=torch.int64)).item()) == 0:
+            lag_means.append(torch.zeros((), device=cube.device, dtype=cube.dtype))
+            lag_vars.append(torch.zeros((), device=cube.device, dtype=cube.dtype))
+            continue
+        corr = corr[pair_valid]
 
         lag_means.append(torch.mean(corr))
         lag_vars.append(torch.var(corr, unbiased=False))
@@ -606,12 +655,15 @@ def eor_lagcorr_envelope_loss(
     lag_channels: Tensor,
     lag_means: Tensor,
     lag_weights: Optional[Tensor] = None,
+    tail_weights: Optional[Tensor] = None,
     near_max_lag: Optional[int] = None,
     mid_max_lag: Optional[int] = None,
     far_min_lag: Optional[int] = None,
     tail_eps: float = 0.05,
     neg_delta: float = 0.0,
     near_rho_min: float = 0.0,
+    near_floor_mode: str = "absolute_mean",
+    near_rho1_coeffs: Optional[Tensor] = None,
     rebound_eps_act: float = 0.05,
     rebound_delta_up: float = 0.02,
     w_tail: float = 1.0,
@@ -627,7 +679,7 @@ def eor_lagcorr_envelope_loss(
     Terms (all hinge-style):
       - tail:     penalize large-|rho| at far lags (decorrelation at large separation)
       - neg:      penalize clearly negative rho at near lags
-      - near:     enforce a weak positive floor on mean near-lag correlation
+      - near:     enforce a weak positive floor on near-lag correlation
       - rebound:  discourage large increases in |rho(l)| with increasing lag (ringing)
     """
     if lag_channels.ndim != 1 or lag_means.ndim != 1:
@@ -669,6 +721,18 @@ def eor_lagcorr_envelope_loss(
     lags = lags.index_select(0, order)
     rho = lag_means.reshape(-1).index_select(0, order)
     w_sorted = weights.index_select(0, order) if weights is not None else None
+    tail_w_sorted: Optional[Tensor] = None
+    if tail_weights is not None:
+        tail_w = tail_weights.to(device=rho.device, dtype=rho.dtype).reshape(-1)
+        if int(tail_w.numel()) == 1:
+            tail_w = tail_w.repeat(int(lag_channels.numel()))
+        if int(tail_w.numel()) != int(lag_channels.numel()):
+            raise ValueError("tail_weights must be scalar or match lag_channels length.")
+        if torch.any(~torch.isfinite(tail_w)):
+            raise ValueError("tail_weights must be finite.")
+        if torch.any(tail_w < 0.0):
+            raise ValueError("tail_weights must be non-negative.")
+        tail_w_sorted = tail_w.index_select(0, order)
 
     max_lag = int(torch.max(lags).item()) if lags.numel() > 0 else 1
     near_max = int(near_max_lag) if near_max_lag is not None else min(10, max_lag)
@@ -681,9 +745,14 @@ def eor_lagcorr_envelope_loss(
     abs_rho = torch.abs(rho)
 
     # (1) Far-lag envelope towards 0: allow small sign-changing fluctuations around 0.
-    far_mask = lags >= far_min
     far_resid = torch.clamp(abs_rho - tail_eps_val, min=0.0) ** 2
-    loss_tail = _masked_weighted_mean(far_resid, w_sorted, far_mask)
+    if tail_w_sorted is None:
+        far_mask = lags >= far_min
+        loss_tail = _masked_weighted_mean(far_resid, w_sorted, far_mask)
+    else:
+        far_mask = tail_w_sorted > 0.0
+        eff_w = tail_w_sorted if w_sorted is None else (w_sorted * tail_w_sorted)
+        loss_tail = _masked_weighted_mean(far_resid, eff_w, far_mask)
 
     # (2) Near-lag negative suppression (weak): don't force strict non-negativity everywhere.
     near_mask = lags <= near_max
@@ -692,9 +761,39 @@ def eor_lagcorr_envelope_loss(
 
     # (3) Near-lag floor: prevent "instant decorrelation" at small separation.
     loss_near = torch.zeros_like(loss_tail)
-    if near_rho_min_val > 0.0:
-        rho_near = _masked_weighted_mean(rho, w_sorted, near_mask)
-        loss_near = torch.clamp(torch.as_tensor(near_rho_min_val, device=rho.device, dtype=rho.dtype) - rho_near, min=0.0) ** 2
+    floor_mode = str(near_floor_mode).strip().lower()
+    if floor_mode in {"absolute_mean", "absolute", "mean"}:
+        if near_rho_min_val > 0.0:
+            rho_near = _masked_weighted_mean(rho, w_sorted, near_mask)
+            loss_near = (
+                torch.clamp(
+                    torch.as_tensor(near_rho_min_val, device=rho.device, dtype=rho.dtype) - rho_near,
+                    min=0.0,
+                )
+                ** 2
+            )
+    elif floor_mode in {"relative_rho1", "rho1"}:
+        if near_rho1_coeffs is None:
+            raise ValueError("near_rho1_coeffs must be provided when near_floor_mode='relative_rho1'.")
+        coeffs = near_rho1_coeffs.to(device=rho.device, dtype=rho.dtype).reshape(-1)
+        if int(coeffs.numel()) == 1:
+            coeffs = coeffs.repeat(int(lag_channels.numel()))
+        if int(coeffs.numel()) != int(lag_channels.numel()):
+            raise ValueError("near_rho1_coeffs must be scalar or match lag_channels length.")
+        coeffs = coeffs.index_select(0, order)
+        if torch.any(~torch.isfinite(coeffs)):
+            raise ValueError("near_rho1_coeffs must be finite.")
+        if torch.any(coeffs < 0.0):
+            raise ValueError("near_rho1_coeffs must be non-negative.")
+        rho1_mask = lags == 1
+        if bool(torch.sum(rho1_mask.to(dtype=torch.int64)).item()) == 0:
+            raise ValueError("near_floor_mode='relative_rho1' requires lag_channels to include lag=1.")
+        rho1 = rho[rho1_mask][0]
+        use_mask = near_mask & (lags != 1) & (coeffs > 0.0)
+        resid = torch.clamp(coeffs * rho1 - rho, min=0.0) ** 2
+        loss_near = _masked_weighted_mean(resid, w_sorted, use_mask)
+    else:
+        raise ValueError("near_floor_mode must be one of: absolute_mean, relative_rho1.")
 
     # (4) Rebound suppression on |rho| up to mid_max: penalize large increases with lag.
     loss_rebound = torch.zeros_like(loss_tail)
@@ -776,6 +875,35 @@ def compute_highfreq_energy(
     return energy
 
 
+def compute_highfreq_energy_ratio(
+    tensor: Tensor,
+    *,
+    freq_axis: int,
+    percent: float,
+    eps: float = 1e-12,
+) -> Tensor:
+    """
+    Compute per-pixel ratio: high-frequency energy / total energy along the frequency axis.
+    """
+    if not (0.0 <= percent <= 1.0):
+        raise ValueError("percent must be in [0, 1].")
+    rfft = torch.fft.rfft(tensor, dim=freq_axis)
+    num_bins = rfft.shape[freq_axis]
+    power = rfft.real**2 + rfft.imag**2
+    total = power.mean(dim=freq_axis)
+    if num_bins == 0 or percent == 0.0:
+        return torch.zeros_like(total)
+    num_high = int(math.ceil(percent * num_bins))
+    if num_high <= 0:
+        return torch.zeros_like(total)
+    start_idx = max(num_bins - num_high, 0)
+    freq_slice = [slice(None)] * power.ndim
+    freq_slice[freq_axis] = slice(start_idx, None)
+    high = power[tuple(freq_slice)].mean(dim=freq_axis)
+    denom = torch.clamp(total, min=float(eps))
+    return high / denom
+
+
 def derive_fft_prior_from_cube(
     fg_cube: Tensor,
     freq_axis: int,
@@ -851,6 +979,8 @@ def loss_function(
     delta: Optional[float] = None,
     fft_weight: float = 1.0,
     poly_weight: float = 1.0,
+    eor_mean_weight: float = 1.0,
+    eor_hf_weight: float = 1.0,
     lagcorr_weight: float = 1.0,
     lagcorr_fg_component_weight: float = 0.5,
     lagcorr_eor_component_weight: float = 0.5,
@@ -860,6 +990,9 @@ def loss_function(
     eor_mean: Tensor,
     eor_sigma: Tensor,
     eor_amp_threshold: Tensor,
+    eor_amp_prior_mode: str = "voxel_deadzone",
+    eor_hybrid_voxel_factor: float = 5.0,
+    eor_hybrid_voxel_weight: float = 0.1,
     fg_smooth_mean: Optional[Tensor],
     fg_smooth_sigma: Optional[Tensor],
     corr_prior_mean: Tensor,
@@ -868,6 +1001,8 @@ def loss_function(
     corr_reduce: str = "mean",
     corr_topk: Optional[int] = None,
     corr_lse_alpha: float = 10.0,
+    corr_feature: str = "raw",
+    corr_spatial_pool: int = 1,
     fg_smooth_mode: str = "diff3_l2",
     fg_smooth_huber_delta: float = 1.0,
     loss_mode: str = "base",
@@ -881,13 +1016,17 @@ def loss_function(
     eor_lagcorr_sigma: Optional[Tensor] = None,
     lagcorr_max_pairs: Optional[int] = None,
     lagcorr_spatial_pool: int = 1,
+    lagcorr_rms_min: float = 0.0,
     lagcorr_eor_mode: str = "gaussian",
     lagcorr_eor_near_max_lag: Optional[int] = None,
     lagcorr_eor_mid_max_lag: Optional[int] = None,
     lagcorr_eor_far_min_lag: Optional[int] = None,
+    lagcorr_eor_tail_weights: Optional[Tensor] = None,
     lagcorr_eor_tail_eps: float = 0.05,
     lagcorr_eor_neg_delta: float = 0.0,
     lagcorr_eor_near_rho_min: float = 0.0,
+    lagcorr_eor_near_floor_mode: str = "absolute_mean",
+    lagcorr_eor_near_rho1_coeffs: Optional[Tensor] = None,
     lagcorr_eor_rebound_eps_act: float = 0.05,
     lagcorr_eor_rebound_delta_up: float = 0.02,
     lagcorr_eor_w_tail: float = 1.0,
@@ -899,6 +1038,8 @@ def loss_function(
     fft_percent: float = 0.7,
     fft_use_log_energy: bool = False,
     fft_z_clip: Optional[float] = None,
+    eor_hf_percent: float = 0.7,
+    eor_hf_r_max: float = 0.85,
     poly_degree: int = 3,
     poly_sigma: Optional[Union[Tensor, float]] = None,
     poly_residual: Optional[Tensor] = None,
@@ -929,19 +1070,79 @@ def loss_function(
 
     eor_mean_tensor = eor_mean
     eor_sigma_tensor = clamp_eps(eor_sigma, eps=EPS_LOSS)
-    eor_amp_threshold_tensor = prepare_broadcastable_prior(
-        eor_amp_threshold, eor, "eor_prior_amp_threshold"
-    )
-    if eor_amp_threshold_tensor is None:
-        eor_amp_threshold_tensor = torch.zeros(1, device=eor.device, dtype=eor.dtype)
-    if torch.any(~torch.isfinite(eor_amp_threshold_tensor)):
-        raise ValueError("eor_prior_amp_threshold must be finite.")
-    if torch.any(eor_amp_threshold_tensor < 0.0):
-        raise ValueError("eor_prior_amp_threshold must be non-negative.")
-    # Dead-zone EoR amplitude prior:
-    #   residual = max(|eor - mean| - threshold, 0), then normalized squared penalty.
-    eor_residual = torch.clamp(torch.abs(eor - eor_mean_tensor) - eor_amp_threshold_tensor, min=0.0)
-    eor_reg = torch.mean((eor_residual / eor_sigma_tensor) ** 2)
+
+    eor_amp_mode = str(eor_amp_prior_mode).strip().lower()
+    if eor_amp_mode in {"voxel_deadzone", "voxel", "deadzone"}:
+        eor_amp_threshold_tensor = prepare_broadcastable_prior(
+            eor_amp_threshold, eor, "eor_prior_amp_threshold"
+        )
+        if eor_amp_threshold_tensor is None:
+            eor_amp_threshold_tensor = torch.zeros(1, device=eor.device, dtype=eor.dtype)
+        if torch.any(~torch.isfinite(eor_amp_threshold_tensor)):
+            raise ValueError("eor_prior_amp_threshold must be finite.")
+        if torch.any(eor_amp_threshold_tensor < 0.0):
+            raise ValueError("eor_prior_amp_threshold must be non-negative.")
+        # Dead-zone EoR amplitude prior:
+        #   residual = max(|eor - mean| - threshold, 0), then normalized squared penalty.
+        eor_residual = torch.clamp(
+            torch.abs(eor - eor_mean_tensor) - eor_amp_threshold_tensor, min=0.0
+        )
+        eor_reg = torch.mean((eor_residual / eor_sigma_tensor) ** 2)
+    elif eor_amp_mode in {"slice_rms_hinge", "slice_rms", "rms"}:
+        # Slice RMS upper bound (weak, physical): for each frequency slice, penalize when
+        # std_xy(eor[f]) exceeds a threshold.
+        eor_moved = eor.movedim(freq_axis, 0)
+        eor_flat = eor_moved.reshape(eor_moved.shape[0], -1)
+        slice_std = eor_flat.std(dim=1, unbiased=False)
+        thr = prepare_broadcastable_prior(eor_amp_threshold, slice_std, "eor_prior_amp_threshold")
+        if thr is None:
+            thr = torch.zeros(1, device=slice_std.device, dtype=slice_std.dtype)
+        if torch.any(~torch.isfinite(thr)):
+            raise ValueError("eor_prior_amp_threshold must be finite.")
+        if torch.any(thr < 0.0):
+            raise ValueError("eor_prior_amp_threshold must be non-negative.")
+        resid = torch.clamp(slice_std - thr, min=0.0)
+        sigma_scale = prepare_broadcastable_prior(eor_sigma_tensor, resid, "eor_prior_sigma")
+        if sigma_scale is None:
+            sigma_scale = torch.ones(1, device=resid.device, dtype=resid.dtype)
+        sigma_scale = clamp_eps(sigma_scale, eps=EPS_LOSS)
+        eor_reg = torch.mean((resid / sigma_scale) ** 2)
+    elif eor_amp_mode in {"hybrid"}:
+        # Hybrid: slice RMS as primary constraint, plus a very loose voxel-wise guard
+        # against extreme outliers (useful when RMS is small but rare pixels explode).
+        eor_moved = eor.movedim(freq_axis, 0)
+        eor_flat = eor_moved.reshape(eor_moved.shape[0], -1)
+        slice_std = eor_flat.std(dim=1, unbiased=False)
+        thr = prepare_broadcastable_prior(eor_amp_threshold, slice_std, "eor_prior_amp_threshold")
+        if thr is None:
+            thr = torch.zeros(1, device=slice_std.device, dtype=slice_std.dtype)
+        if torch.any(~torch.isfinite(thr)):
+            raise ValueError("eor_prior_amp_threshold must be finite.")
+        if torch.any(thr < 0.0):
+            raise ValueError("eor_prior_amp_threshold must be non-negative.")
+        resid_rms = torch.clamp(slice_std - thr, min=0.0)
+        sigma_scale = prepare_broadcastable_prior(eor_sigma_tensor, resid_rms, "eor_prior_sigma")
+        if sigma_scale is None:
+            sigma_scale = torch.ones(1, device=resid_rms.device, dtype=resid_rms.dtype)
+        sigma_scale = clamp_eps(sigma_scale, eps=EPS_LOSS)
+        rms_term = torch.mean((resid_rms / sigma_scale) ** 2)
+
+        voxel_factor = float(eor_hybrid_voxel_factor)
+        voxel_weight = float(eor_hybrid_voxel_weight)
+        if not math.isfinite(voxel_factor) or voxel_factor <= 0.0:
+            raise ValueError("eor_hybrid_voxel_factor must be a finite positive value.")
+        if not math.isfinite(voxel_weight) or voxel_weight < 0.0:
+            raise ValueError("eor_hybrid_voxel_weight must be a finite non-negative value.")
+        guard_thr = voxel_factor * prepare_broadcastable_prior(thr, eor, "eor_prior_amp_threshold_guard")
+        if guard_thr is None:
+            guard_thr = voxel_factor * torch.zeros(1, device=eor.device, dtype=eor.dtype)
+        guard_resid = torch.clamp(torch.abs(eor - eor_mean_tensor) - guard_thr, min=0.0)
+        guard_term = torch.mean((guard_resid / eor_sigma_tensor) ** 2)
+        eor_reg = rms_term + voxel_weight * guard_term
+    else:
+        raise ValueError(
+            "eor_amp_prior_mode must be one of: voxel_deadzone, slice_rms_hinge, hybrid."
+        )
 
     if delta is not None:
         corr_weight = float(delta)
@@ -950,9 +1151,32 @@ def loss_function(
     )
     active_term_set = set(active_terms)
 
+    corr_feature_norm = str(corr_feature).strip().lower()
+    if corr_feature_norm not in {"raw", "diff1", "diff2"}:
+        raise ValueError("corr_feature must be one of: raw, diff1, diff2.")
+    fg_corr = fg
+    eor_corr = eor
+    if corr_feature_norm == "diff1":
+        if fg.shape[freq_axis] < 2:
+            raise ValueError("corr_feature='diff1' requires at least 2 frequency channels.")
+        fg_corr = torch.diff(fg_corr, n=1, dim=freq_axis)
+        eor_corr = torch.diff(eor_corr, n=1, dim=freq_axis)
+    elif corr_feature_norm == "diff2":
+        if fg.shape[freq_axis] < 3:
+            raise ValueError("corr_feature='diff2' requires at least 3 frequency channels.")
+        fg_corr = torch.diff(fg_corr, n=2, dim=freq_axis)
+        eor_corr = torch.diff(eor_corr, n=2, dim=freq_axis)
+
+    pool_int = int(corr_spatial_pool)
+    if pool_int < 1:
+        raise ValueError("corr_spatial_pool must be >= 1.")
+    if pool_int > 1:
+        fg_corr = _maybe_avg_pool_spatial(fg_corr, freq_axis=freq_axis, pool=pool_int)
+        eor_corr = _maybe_avg_pool_spatial(eor_corr, freq_axis=freq_axis, pool=pool_int)
+
     corr_loss, corr_coeff = frequency_slice_correlation_penalty(
-        fg,
-        eor,
+        fg_corr,
+        eor_corr,
         freq_axis=freq_axis,
         prior_mean=corr_prior_mean,
         prior_sigma=corr_prior_sigma,
@@ -1049,6 +1273,7 @@ def loss_function(
                     max_pairs=lagcorr_max_pairs,
                     pair_sampling=lagcorr_pair_sampling,
                     rng=lagcorr_rng,
+                    rms_min=float(lagcorr_rms_min),
                 )
 
             eor_loss = torch.zeros_like(data_loss)
@@ -1071,6 +1296,7 @@ def loss_function(
                         max_pairs=lagcorr_max_pairs,
                         pair_sampling=lagcorr_pair_sampling,
                         rng=lagcorr_rng,
+                        rms_min=float(lagcorr_rms_min),
                     )
                 elif mode_norm in {"envelope", "envelope_v2"}:
                     lag_means, _ = _frequency_lag_correlation_profile(
@@ -1080,18 +1306,22 @@ def loss_function(
                         max_pairs=lagcorr_max_pairs,
                         pair_sampling=lagcorr_pair_sampling,
                         rng=lagcorr_rng,
+                        rms_min=float(lagcorr_rms_min),
                     )
                     eor_corr_lag_mean = lag_means
                     eor_loss = eor_lagcorr_envelope_loss(
                         lag_channels=lagcorr_lags,
                         lag_means=lag_means,
                         lag_weights=lag_weight_vec,
+                        tail_weights=lagcorr_eor_tail_weights,
                         near_max_lag=lagcorr_eor_near_max_lag,
                         mid_max_lag=lagcorr_eor_mid_max_lag,
                         far_min_lag=lagcorr_eor_far_min_lag,
                         tail_eps=lagcorr_eor_tail_eps,
                         neg_delta=lagcorr_eor_neg_delta,
                         near_rho_min=lagcorr_eor_near_rho_min,
+                        near_floor_mode=lagcorr_eor_near_floor_mode,
+                        near_rho1_coeffs=lagcorr_eor_near_rho1_coeffs,
                         rebound_eps_act=lagcorr_eor_rebound_eps_act,
                         rebound_delta_up=lagcorr_eor_rebound_delta_up,
                         w_tail=lagcorr_eor_w_tail,
@@ -1166,6 +1396,21 @@ def loss_function(
                 raise ValueError("fft_z_clip must be a finite positive value when provided.")
             z = torch.clamp(z, min=-clip, max=clip)
         fft_loss = torch.mean(z**2)
+    eor_mean_loss = torch.zeros_like(data_loss)
+    if "eor_mean" in active_term_set and extra_scale > 0.0:
+        eor_moved = eor.movedim(freq_axis, 0)
+        slice_mean = eor_moved.mean(dim=(1, 2))
+        eor_mean_loss = torch.mean(slice_mean**2)
+    eor_hf_loss = torch.zeros_like(data_loss)
+    if "eor_hf" in active_term_set and extra_scale > 0.0:
+        r_max = float(eor_hf_r_max)
+        if not math.isfinite(r_max) or r_max < 0.0:
+            raise ValueError("eor_hf_r_max must be a finite non-negative value.")
+        ratio = compute_highfreq_energy_ratio(
+            eor, freq_axis=freq_axis, percent=float(eor_hf_percent), eps=1e-12
+        )
+        resid = torch.clamp(ratio - r_max, min=0.0) ** 2
+        eor_hf_loss = torch.mean(resid)
     poly_loss = torch.zeros_like(data_loss)
     if "poly_reparam" in active_term_set and extra_scale > 0.0:
         if poly_residual is None:
@@ -1177,7 +1422,14 @@ def loss_function(
         poly_loss = torch.mean((poly_residual / sigma_tensor) ** 2)
 
     corr_term = corr_weight * corr_loss if "corr" in active_term_set else torch.zeros_like(data_loss)
-    extra_terms = corr_term + lagcorr_weight * lagcorr_loss + fft_weight * fft_loss + poly_weight * poly_loss
+    extra_terms = (
+        corr_term
+        + lagcorr_weight * lagcorr_loss
+        + fft_weight * fft_loss
+        + poly_weight * poly_loss
+        + float(eor_mean_weight) * eor_mean_loss
+        + float(eor_hf_weight) * eor_hf_loss
+    )
     total_loss = alpha * data_loss + beta * smooth_loss + gamma * eor_reg + extra_scale * extra_terms
     return total_loss, {
         "data": data_loss,
@@ -1188,5 +1440,7 @@ def loss_function(
         "lagcorr": lagcorr_loss,
         "lagcorr_gap": lagcorr_gap_loss,
         "fft_highfreq": fft_loss,
+        "eor_mean": eor_mean_loss,
+        "eor_hf": eor_hf_loss,
         "poly": poly_loss,
     }

@@ -27,13 +27,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from astropy.io import fits
 
-
-@dataclass(frozen=True)
-class DatasetSpec:
-    name: str
-    input_cube: Path
-    fg_true_cube: Path
-    eor_true_cube: Path
+from dataset_registry import DatasetSpec, build_datasets, default_dataset_name_hint
 
 
 @dataclass(frozen=True)
@@ -47,6 +41,8 @@ class CandidateSpec:
     corr_lse_alpha: float
     extra_loss_start_iter: int
     extra_loss_ramp_iters: int
+    corr_feature: str
+    corr_spatial_pool: int
 
     def key(self) -> Tuple[object, ...]:
         return (
@@ -58,6 +54,8 @@ class CandidateSpec:
             round(float(self.corr_lse_alpha), 12),
             int(self.extra_loss_start_iter),
             int(self.extra_loss_ramp_iters),
+            str(self.corr_feature),
+            int(self.corr_spatial_pool),
         )
 
 
@@ -88,7 +86,13 @@ def parse_args() -> argparse.Namespace:
         "--datasets",
         type=str,
         default="cube1,cube2",
-        help="Comma-separated datasets. Available: cube1,cube2.",
+        help=f"Comma-separated datasets. Common: {default_dataset_name_hint()}",
+    )
+    parser.add_argument(
+        "--exclude-from-ranking",
+        type=str,
+        default="cube1",
+        help="Comma-separated dataset names excluded from corr_scan_rank.csv aggregation (still evaluated in results).",
     )
     parser.add_argument(
         "--gpu-map",
@@ -109,6 +113,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-gamma", type=float, default=0.6, help="EoR amplitude prior weight gamma.")
     parser.add_argument("--base-eor-prior-sigma", type=float, default=0.02, help="EoR amplitude sigma (dead-zone outside threshold).")
     parser.add_argument("--base-eor-amp-threshold", type=float, default=0.1, help="EoR dead-zone threshold.")
+    parser.add_argument(
+        "--base-eor-amp-prior-mode",
+        type=str,
+        default="voxel_deadzone",
+        choices=["voxel_deadzone", "slice_rms_hinge", "hybrid"],
+        help="EoR amplitude prior mode used in base term.",
+    )
+    parser.add_argument("--base-eor-hybrid-voxel-factor", type=float, default=5.0)
+    parser.add_argument("--base-eor-hybrid-voxel-weight", type=float, default=0.1)
     parser.add_argument("--base-fg-smooth-mode", type=str, default="diff2_l2", choices=["diff3_l2", "diff2_l2", "diff2_huber", "diff1_l1"])
     parser.add_argument("--base-fg-smooth-mean", type=float, default=0.002, help="Scalar FG smooth prior mean (applied to finite differences).")
     parser.add_argument("--base-fg-smooth-sigma", type=float, default=0.004, help="Scalar FG smooth prior sigma (applied to finite differences).")
@@ -166,6 +179,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--extra-loss-start-iter", type=int, default=500, help="Iteration where corr term activates.")
     parser.add_argument("--extra-loss-ramp-iters", type=int, default=0, help="Ramp iterations for corr term.")
+    parser.add_argument(
+        "--corr-feature-list",
+        type=str,
+        default="raw",
+        help="Comma-separated corr feature modes: raw,diff1,diff2 (applied before corr).",
+    )
+    parser.add_argument(
+        "--corr-spatial-pool-list",
+        type=str,
+        default="1",
+        help="Comma-separated ints >=1: spatial avg-pool factor applied before corr.",
+    )
     parser.add_argument("--include-control", action="store_true", help="Include a base-only control run (corr disabled).")
     parser.add_argument(
         "--candidate-names",
@@ -194,6 +219,13 @@ def _parse_float_list(text: str) -> List[float]:
     return out
 
 
+def _parse_int_list(text: str) -> List[int]:
+    out: List[int] = []
+    for token in _parse_csv_tokens(text):
+        out.append(int(float(token)))
+    return out
+
+
 def parse_gpu_map(text: str) -> Dict[str, int]:
     out: Dict[str, int] = {}
     for token in text.split(","):
@@ -205,28 +237,6 @@ def parse_gpu_map(text: str) -> Dict[str, int]:
         key, value = token.split(":", 1)
         out[key.strip()] = int(value.strip())
     return out
-
-
-def build_datasets(data_dir: Path) -> List[DatasetSpec]:
-    datasets = [
-        DatasetSpec(
-            name="cube1",
-            input_cube=data_dir / "back" / "all_cube1.fits",
-            fg_true_cube=data_dir / "fg_cube1.fits",
-            eor_true_cube=data_dir / "eor_cube1.fits",
-        ),
-        DatasetSpec(
-            name="cube2",
-            input_cube=data_dir / "all_cube2.fits",
-            fg_true_cube=data_dir / "fg_cube2.fits",
-            eor_true_cube=data_dir / "eor_cube2.fits",
-        ),
-    ]
-    for ds in datasets:
-        for p in (ds.input_cube, ds.fg_true_cube, ds.eor_true_cube):
-            if not p.exists():
-                raise FileNotFoundError(f"Missing required file: {p}")
-    return datasets
 
 
 def _fmt_float_token(value: float) -> str:
@@ -249,8 +259,23 @@ def generate_candidates(
     corr_lse_alpha: float,
     extra_loss_start_iter: int,
     extra_loss_ramp_iters: int,
+    corr_feature_list: Sequence[str],
+    corr_spatial_pool_list: Sequence[int],
     include_control: bool,
 ) -> List[CandidateSpec]:
+    features = [str(x).strip().lower() for x in corr_feature_list if str(x).strip()]
+    if not features:
+        features = ["raw"]
+    unknown_features = sorted({f for f in features if f not in {"raw", "diff1", "diff2"}})
+    if unknown_features:
+        raise ValueError(f"Unknown corr_feature values: {unknown_features}")
+
+    pools = [int(x) for x in corr_spatial_pool_list] if corr_spatial_pool_list else [1]
+    if not pools:
+        pools = [1]
+    if any(int(p) < 1 for p in pools):
+        raise ValueError("corr_spatial_pool values must be >= 1.")
+
     out: List[CandidateSpec] = []
     if include_control:
         out.append(
@@ -266,29 +291,37 @@ def generate_candidates(
                 corr_lse_alpha=float(corr_lse_alpha),
                 extra_loss_start_iter=int(extra_loss_start_iter),
                 extra_loss_ramp_iters=int(extra_loss_ramp_iters),
+                corr_feature=features[0],
+                corr_spatial_pool=int(pools[0]),
             )
         )
     for w in corr_weight_list:
         for s in corr_sigma_list:
             for t in corr_abs_threshold_list:
-                name = (
-                    f"corr_w{_fmt_float_token(float(w))}"
-                    f"_s{_fmt_float_token(float(s))}"
-                    f"_t{_fmt_float_token(float(t))}"
-                )
-                out.append(
-                    CandidateSpec(
-                        name=name,
-                        corr_weight=float(w),
-                        corr_prior_sigma=float(s),
-                        corr_prior_abs_threshold=float(t),
-                        corr_reduce=str(corr_reduce),
-                        corr_topk=int(corr_topk) if corr_topk is not None else None,
-                        corr_lse_alpha=float(corr_lse_alpha),
-                        extra_loss_start_iter=int(extra_loss_start_iter),
-                        extra_loss_ramp_iters=int(extra_loss_ramp_iters),
-                    )
-                )
+                for feat in features:
+                    for pool in pools:
+                        name = (
+                            f"corr_w{_fmt_float_token(float(w))}"
+                            f"_s{_fmt_float_token(float(s))}"
+                            f"_t{_fmt_float_token(float(t))}"
+                            f"_feat{feat}"
+                            f"_pool{int(pool)}"
+                        )
+                        out.append(
+                            CandidateSpec(
+                                name=name,
+                                corr_weight=float(w),
+                                corr_prior_sigma=float(s),
+                                corr_prior_abs_threshold=float(t),
+                                corr_reduce=str(corr_reduce),
+                                corr_topk=int(corr_topk) if corr_topk is not None else None,
+                                corr_lse_alpha=float(corr_lse_alpha),
+                                extra_loss_start_iter=int(extra_loss_start_iter),
+                                extra_loss_ramp_iters=int(extra_loss_ramp_iters),
+                                corr_feature=str(feat),
+                                corr_spatial_pool=int(pool),
+                            )
+                        )
     # Deduplicate by key while preserving order.
     dedup: List[CandidateSpec] = []
     seen = set()
@@ -395,20 +428,29 @@ def _write_csv(path: Path, rows: Sequence[Dict[str, object]]) -> None:
             w.writerow(row)
 
 
-def _candidate_summary(rows: Sequence[Dict[str, object]]) -> List[Dict[str, object]]:
+def _candidate_summary(rows: Sequence[Dict[str, object]], *, exclude_datasets: Sequence[str] = ()) -> List[Dict[str, object]]:
+    exclude = {str(x).strip() for x in exclude_datasets if str(x).strip()}
     grouped: Dict[str, List[Dict[str, object]]] = {}
     for row in rows:
         grouped.setdefault(str(row.get("candidate")), []).append(row)
     out: List[Dict[str, object]] = []
     for cand, items in grouped.items():
-        ok = [r for r in items if str(r.get("status")) == "ok"]
+        ranked_items = [r for r in items if str(r.get("dataset")) not in exclude]
+        ok_total = [r for r in items if str(r.get("status")) == "ok"]
+        ok_rank = [r for r in ranked_items if str(r.get("status")) == "ok"]
+
         def _mean(key: str) -> float:
-            vals = [float(r[key]) for r in ok if r.get(key) is not None and math.isfinite(float(r[key]))]
+            vals = [float(r[key]) for r in ok_rank if r.get(key) is not None and math.isfinite(float(r[key]))]
             return float(np.mean(vals)) if vals else float("nan")
         summary: Dict[str, object] = {
             "candidate": cand,
-            "n": len(items),
-            "n_ok": len(ok),
+            "n_total": len(items),
+            "n_ok_total": len(ok_total),
+            "n_rank": len(ranked_items),
+            "n_ok_rank": len(ok_rank),
+            # Keep legacy fields used by markdown helpers: treat as rank-only.
+            "n": len(ranked_items),
+            "n_ok": len(ok_rank),
             "eor_corr_score_mean": _mean("eor_corr_score"),
             "eor_corr_mean_mean": _mean("eor_corr_mean"),
             "eor_corr_p10_mean": _mean("eor_corr_p10"),
@@ -475,7 +517,7 @@ def _build_config(
             "lr_plateau_min_delta": float(args.lr_plateau_min_delta),
             "lr_plateau_cooldown": int(args.lr_plateau_cooldown),
             "lr_min": float(args.lr_min),
-            "freq_start_mhz": float(args.freq_start_mhz),
+            "freq_start_mhz": float(dataset.freq_start_mhz),
             "freq_delta_mhz": float(args.freq_delta_mhz),
         },
         "cut_xy": {
@@ -499,6 +541,9 @@ def _build_config(
             "eor_prior_mean": 0.0,
             "eor_prior_sigma": float(args.base_eor_prior_sigma),
             "eor_prior_amp_threshold": float(args.base_eor_amp_threshold),
+            "eor_amp_prior_mode": str(args.base_eor_amp_prior_mode),
+            "eor_hybrid_voxel_factor": float(args.base_eor_hybrid_voxel_factor),
+            "eor_hybrid_voxel_weight": float(args.base_eor_hybrid_voxel_weight),
             "fg_smooth_mode": str(args.base_fg_smooth_mode),
             "fg_smooth_mean": float(args.base_fg_smooth_mean),
             "fg_smooth_sigma": float(args.base_fg_smooth_sigma),
@@ -509,6 +554,8 @@ def _build_config(
             "corr_reduce": str(candidate.corr_reduce),
             "corr_topk": candidate.corr_topk,
             "corr_lse_alpha": float(candidate.corr_lse_alpha),
+            "corr_feature": str(candidate.corr_feature),
+            "corr_spatial_pool": int(candidate.corr_spatial_pool),
         },
         "evaluation": {
             "true_eor_cube": str(dataset.eor_true_cube),
@@ -568,6 +615,7 @@ def _run_job_result_only(
     row: Dict[str, object] = {
         "candidate": candidate.name,
         "dataset": dataset.name,
+        "freq_start_mhz": float(dataset.freq_start_mhz),
         "status": "ok" if int(return_code) == 0 else "failed",
         "return_code": int(return_code),
         "runtime_sec": float(runtime),
@@ -579,10 +627,15 @@ def _run_job_result_only(
         "corr_lse_alpha": float(candidate.corr_lse_alpha),
         "extra_loss_start_iter": int(candidate.extra_loss_start_iter),
         "extra_loss_ramp_iters": int(candidate.extra_loss_ramp_iters),
+        "corr_feature": str(candidate.corr_feature),
+        "corr_spatial_pool": int(candidate.corr_spatial_pool),
         "beta": float(args.base_beta),
         "gamma": float(args.base_gamma),
         "eor_prior_sigma": float(args.base_eor_prior_sigma),
         "eor_amp_threshold": float(args.base_eor_amp_threshold),
+        "eor_amp_prior_mode": str(args.base_eor_amp_prior_mode),
+        "eor_hybrid_voxel_factor": float(args.base_eor_hybrid_voxel_factor),
+        "eor_hybrid_voxel_weight": float(args.base_eor_hybrid_voxel_weight),
         "fg_smooth_mode": str(args.base_fg_smooth_mode),
         "fg_smooth_mean": float(args.base_fg_smooth_mean),
         "fg_smooth_sigma": float(args.base_fg_smooth_sigma),
@@ -660,7 +713,7 @@ def main() -> int:
     output_dir = args.output_dir.resolve() if args.output_dir else (work_root / "runs" / f"corr_scan_{stamp}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    datasets_all = build_datasets(data_dir)
+    datasets_all = build_datasets(data_dir, cube12_start_mhz=float(args.freq_start_mhz))
     enabled = {x.strip() for x in str(args.datasets).split(",") if x.strip()}
     datasets = [d for d in datasets_all if d.name in enabled]
     if not datasets:
@@ -684,6 +737,8 @@ def main() -> int:
         corr_lse_alpha=float(args.corr_lse_alpha),
         extra_loss_start_iter=int(args.extra_loss_start_iter),
         extra_loss_ramp_iters=int(args.extra_loss_ramp_iters),
+        corr_feature_list=_parse_csv_tokens(args.corr_feature_list),
+        corr_spatial_pool_list=_parse_int_list(args.corr_spatial_pool_list),
         include_control=bool(args.include_control),
     )
     if args.candidate_names.strip():
@@ -720,6 +775,9 @@ def main() -> int:
             "gamma": float(args.base_gamma),
             "eor_prior_sigma": float(args.base_eor_prior_sigma),
             "eor_amp_threshold": float(args.base_eor_amp_threshold),
+            "eor_amp_prior_mode": str(args.base_eor_amp_prior_mode),
+            "eor_hybrid_voxel_factor": float(args.base_eor_hybrid_voxel_factor),
+            "eor_hybrid_voxel_weight": float(args.base_eor_hybrid_voxel_weight),
             "fg_smooth_mode": str(args.base_fg_smooth_mode),
             "fg_smooth_mean": float(args.base_fg_smooth_mean),
             "fg_smooth_sigma": float(args.base_fg_smooth_sigma),
@@ -730,6 +788,7 @@ def main() -> int:
             "extra_loss_start_iter": int(args.extra_loss_start_iter),
             "extra_loss_ramp_iters": int(args.extra_loss_ramp_iters),
             "corr_prior_mean": float(args.corr_prior_mean),
+            "exclude_from_ranking": str(args.exclude_from_ranking),
         },
     }
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -761,8 +820,18 @@ def main() -> int:
         active: List[Tuple[object, JobSpec, float, object]] = []
         queued = list(jobs)
         while queued or active:
+            # Never run two jobs on the same GPU concurrently (gpu_map may reuse GPU ids).
+            active_gpus = {int(j.gpu_index) for (_, j, _, _) in active}
             while queued and len(active) < max_jobs:
-                job = queued.pop(0)
+                pick_idx: Optional[int] = None
+                for i, cand_job in enumerate(queued):
+                    if int(cand_job.gpu_index) in active_gpus:
+                        continue
+                    pick_idx = i
+                    break
+                if pick_idx is None:
+                    break
+                job = queued.pop(pick_idx)
                 job.run_dir.mkdir(parents=True, exist_ok=True)
                 cfg = _build_config(dataset=job.dataset, candidate=job.candidate, run_dir=job.run_dir, gpu_index=job.gpu_index, args=args)
                 with job.config_path.open("w", encoding="utf-8") as handle:
@@ -773,6 +842,7 @@ def main() -> int:
 
                 proc = subprocess.Popen(cmd, cwd=str(code_dir), stdout=log_handle, stderr=subprocess.STDOUT, text=True)
                 active.append((proc, job, time.time(), log_handle))
+                active_gpus.add(int(job.gpu_index))
                 print(f"  [launch] {job.dataset.name} gpu={job.gpu_index} pid={proc.pid}")
 
             still_active: List[Tuple[object, JobSpec, float, object]] = []
@@ -808,7 +878,7 @@ def main() -> int:
 
     detail_csv = output_dir / "corr_scan_results.csv"
     _write_csv(detail_csv, rows)
-    ranked = _candidate_summary(rows)
+    ranked = _candidate_summary(rows, exclude_datasets=_parse_csv_tokens(args.exclude_from_ranking))
     rank_csv = output_dir / "corr_scan_rank.csv"
     _write_csv(rank_csv, ranked)
     _write_markdown(output_dir / "corr_scan_summary.md", ranked, manifest["baseline_fixed"])

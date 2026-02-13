@@ -79,6 +79,7 @@ def parse_args() -> argparse.Namespace:
 
     # Scan knobs (mirrors run_lagcorr_envelope_scan.py).
     parser.add_argument("--datasets", type=str, default="cube1,cube2")
+    parser.add_argument("--exclude-from-ranking", type=str, default="cube1")
     parser.add_argument("--num-iters", type=int, default=2500)
     parser.add_argument("--print-every", type=int, default=200)
     parser.add_argument("--cut-size-frac", type=float, default=0.30)
@@ -103,6 +104,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-gamma", type=float, default=0.6)
     parser.add_argument("--base-eor-prior-sigma", type=float, default=0.02)
     parser.add_argument("--base-eor-amp-threshold", type=float, default=0.1)
+    parser.add_argument(
+        "--base-eor-amp-prior-mode",
+        type=str,
+        default="voxel_deadzone",
+        choices=["voxel_deadzone", "slice_rms_hinge", "hybrid"],
+    )
+    parser.add_argument("--base-eor-hybrid-voxel-factor", type=float, default=5.0)
+    parser.add_argument("--base-eor-hybrid-voxel-weight", type=float, default=0.1)
     parser.add_argument("--base-fg-smooth-mode", type=str, default="diff2_l2")
     parser.add_argument("--base-fg-smooth-mean", type=float, default=0.002)
     parser.add_argument("--base-fg-smooth-sigma", type=float, default=0.004)
@@ -120,13 +129,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--corr-topk", type=int, default=8)
     parser.add_argument("--corr-lse-alpha", type=float, default=10.0)
     parser.add_argument("--corr-weight", type=float, default=0.2)
+    parser.add_argument("--corr-feature", type=str, default="raw")
+    parser.add_argument("--corr-spatial-pool", type=int, default=1)
     parser.add_argument("--no-corr", action="store_true")
 
     # Lagcorr knobs.
     parser.add_argument("--lagcorr-weight", type=float, default=1.0)
     parser.add_argument("--lagcorr-spatial-pool-list", type=str, default="4")
+    parser.add_argument("--lagcorr-rms-min", type=float, default=0.0)
     parser.add_argument("--lagcorr-eor-start-iter", type=int, default=1200)
     parser.add_argument("--lagcorr-eor-ramp-iters", type=int, default=800)
+    parser.add_argument("--tail-weight-mode-list", type=str, default="hard")
+    parser.add_argument("--tail-sigmoid-center-mpc", type=float, default=150.0)
+    parser.add_argument("--tail-sigmoid-width-mpc", type=float, default=20.0)
+    parser.add_argument("--subterm-schedule-list", type=str, default="static")
+    parser.add_argument("--near-floor-mode-list", type=str, default="absolute_mean")
+    parser.add_argument("--near-rho1-coeffs", type=str, default="0,0.8,0.6,0.4,0.3,0.2,0.1,0,0")
     parser.add_argument("--tail-eps-list", type=str, default="0.05,0.08")
     parser.add_argument("--neg-delta-list", type=str, default="0.0,0.02")
     parser.add_argument("--near-rho-min-list", type=str, default="0.0,0.05,0.1")
@@ -220,6 +238,17 @@ def split_round_robin(items: Sequence[str], n_bins: int) -> List[List[str]]:
     for i, item in enumerate(items):
         bins[i % len(bins)].append(item)
     return bins
+
+
+def make_gpu_map_for_slot(datasets: Sequence[str], *, gpu0: int, gpu1: int) -> str:
+    names = [str(x).strip() for x in datasets if str(x).strip()]
+    if not names:
+        raise ValueError("No datasets provided for gpu_map.")
+    parts: List[str] = []
+    for i, name in enumerate(names):
+        gpu = int(gpu0) if (i % 2 == 0) else int(gpu1)
+        parts.append(f"{name}:{gpu}")
+    return ",".join(parts)
 
 
 def rsync_code(local_code_dir: Path, host: str, remote_root: str) -> None:
@@ -332,6 +361,10 @@ def main() -> int:
         for host in hosts:
             rsync_code(code_dir, host, remote_root)
 
+    dataset_names = _parse_csv_tokens(args.datasets)
+    if not dataset_names:
+        raise ValueError("No datasets provided.")
+
     launches: List[Dict[str, object]] = []
     for slot, subset in zip(worker_slots, splits):
         if not subset:
@@ -340,7 +373,7 @@ def main() -> int:
         alias = slot.alias
         worker = f"{alias}_g{slot.gpu0}_{slot.gpu1}"
         python_bin = python_map.get(host, str(args.python_bin))
-        gpu_map = f"cube1:{slot.gpu0},cube2:{slot.gpu1}"
+        gpu_map = make_gpu_map_for_slot(dataset_names, gpu0=slot.gpu0, gpu1=slot.gpu1)
         out_dir = f"{remote_run_root}/{worker}"
         log_path = f"{out_dir}/worker.log"
 
@@ -358,6 +391,8 @@ def main() -> int:
             _shq(out_dir),
             "--datasets",
             _shq(str(args.datasets)),
+            "--exclude-from-ranking",
+            _shq(str(args.exclude_from_ranking)),
             "--gpu-map",
             _shq(gpu_map),
             "--max-concurrent-jobs",
@@ -400,6 +435,12 @@ def main() -> int:
             _shq(str(args.base_eor_prior_sigma)),
             "--base-eor-amp-threshold",
             _shq(str(args.base_eor_amp_threshold)),
+            "--base-eor-amp-prior-mode",
+            _shq(str(args.base_eor_amp_prior_mode)),
+            "--base-eor-hybrid-voxel-factor",
+            _shq(str(args.base_eor_hybrid_voxel_factor)),
+            "--base-eor-hybrid-voxel-weight",
+            _shq(str(args.base_eor_hybrid_voxel_weight)),
             "--base-fg-smooth-mode",
             _shq(str(args.base_fg_smooth_mode)),
             "--base-fg-smooth-mean",
@@ -426,14 +467,32 @@ def main() -> int:
             _shq(str(args.corr_lse_alpha)),
             "--corr-weight",
             _shq(str(args.corr_weight)),
+            "--corr-feature",
+            _shq(str(args.corr_feature)),
+            "--corr-spatial-pool",
+            _shq(str(args.corr_spatial_pool)),
             "--lagcorr-weight",
             _shq(str(args.lagcorr_weight)),
             "--lagcorr-spatial-pool-list",
             _shq(str(args.lagcorr_spatial_pool_list)),
+            "--lagcorr-rms-min",
+            _shq(str(args.lagcorr_rms_min)),
             "--lagcorr-eor-start-iter",
             _shq(str(args.lagcorr_eor_start_iter)),
             "--lagcorr-eor-ramp-iters",
             _shq(str(args.lagcorr_eor_ramp_iters)),
+            "--tail-weight-mode-list",
+            _shq(str(args.tail_weight_mode_list)),
+            "--tail-sigmoid-center-mpc",
+            _shq(str(args.tail_sigmoid_center_mpc)),
+            "--tail-sigmoid-width-mpc",
+            _shq(str(args.tail_sigmoid_width_mpc)),
+            "--subterm-schedule-list",
+            _shq(str(args.subterm_schedule_list)),
+            "--near-floor-mode-list",
+            _shq(str(args.near_floor_mode_list)),
+            "--near-rho1-coeffs",
+            _shq(str(args.near_rho1_coeffs)),
             "--tail-eps-list",
             _shq(str(args.tail_eps_list)),
             "--neg-delta-list",

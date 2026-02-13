@@ -25,21 +25,15 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from astropy.io import fits
 
+from dataset_registry import DatasetSpec, build_datasets, default_dataset_name_hint
+
 
 LAG_INTERVALS_MHZ: List[float] = [0.1, 0.2, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 7.5]
-
-
-@dataclass(frozen=True)
-class DatasetSpec:
-    name: str
-    input_cube: Path
-    fg_true_cube: Path
-    eor_true_cube: Path
 
 
 @dataclass(frozen=True)
@@ -52,13 +46,22 @@ class CandidateSpec:
     corr_reduce: str
     corr_topk: int
     corr_lse_alpha: float
+    corr_feature: str
+    corr_spatial_pool: int
     lagcorr_weight: float
     lagcorr_spatial_pool: int
+    lagcorr_rms_min: float
     lagcorr_eor_start_iter: int
     lagcorr_eor_ramp_iters: int
+    lagcorr_eor_subterm_schedule: str
+    lagcorr_eor_tail_weight_mode: str
+    lagcorr_eor_tail_sigmoid_center_mpc: float
+    lagcorr_eor_tail_sigmoid_width_mpc: float
     lagcorr_eor_tail_eps: float
     lagcorr_eor_neg_delta: float
     lagcorr_eor_near_rho_min: float
+    lagcorr_eor_near_floor_mode: str
+    lagcorr_eor_near_rho1_coeffs: Union[float, List[float]]
     lagcorr_eor_rebound_eps_act: float
     lagcorr_eor_rebound_delta_up: float
     lagcorr_eor_w_tail: float
@@ -90,7 +93,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Output dir (default <work-root>/runs/lagcorr_env_scan_<timestamp>).",
     )
-    parser.add_argument("--datasets", type=str, default="cube1,cube2")
+    parser.add_argument("--datasets", type=str, default="cube1,cube2", help=f"Comma-separated datasets. Common: {default_dataset_name_hint()}")
+    parser.add_argument(
+        "--exclude-from-ranking",
+        type=str,
+        default="cube1",
+        help="Comma-separated dataset names excluded from lagcorr_env_rank.csv aggregation (still evaluated in results).",
+    )
     parser.add_argument(
         "--gpu-map",
         type=str,
@@ -122,6 +131,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-eor-prior-sigma", type=float, default=0.02)
     parser.add_argument("--base-eor-amp-threshold", type=float, default=0.1)
     parser.add_argument(
+        "--base-eor-amp-prior-mode",
+        type=str,
+        default="voxel_deadzone",
+        choices=["voxel_deadzone", "slice_rms_hinge", "hybrid"],
+    )
+    parser.add_argument("--base-eor-hybrid-voxel-factor", type=float, default=5.0)
+    parser.add_argument("--base-eor-hybrid-voxel-weight", type=float, default=0.1)
+    parser.add_argument(
         "--base-fg-smooth-mode",
         type=str,
         default="diff2_l2",
@@ -143,15 +160,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--corr-topk", type=int, default=8)
     parser.add_argument("--corr-lse-alpha", type=float, default=10.0)
     parser.add_argument("--corr-weight", type=float, default=0.2)
+    parser.add_argument("--corr-feature", type=str, default="raw", choices=["raw", "diff1", "diff2"])
+    parser.add_argument("--corr-spatial-pool", type=int, default=1)
     parser.add_argument("--no-corr", action="store_true")
 
     # Lagcorr global.
     parser.add_argument("--lagcorr-weight", type=float, default=1.0)
     parser.add_argument("--lagcorr-spatial-pool-list", type=str, default="4")
+    parser.add_argument("--lagcorr-rms-min", type=float, default=0.0)
     parser.add_argument("--lagcorr-eor-start-iter", type=int, default=1200)
     parser.add_argument("--lagcorr-eor-ramp-iters", type=int, default=800)
 
     # Envelope scan grid.
+    parser.add_argument(
+        "--tail-weight-mode-list",
+        type=str,
+        default="hard",
+        help="Comma-separated: hard,sigmoid_chan,sigmoid_chi_planck18",
+    )
+    parser.add_argument("--tail-sigmoid-center-mpc", type=float, default=150.0)
+    parser.add_argument("--tail-sigmoid-width-mpc", type=float, default=20.0)
+    parser.add_argument("--subterm-schedule-list", type=str, default="static", help="Comma-separated: static,staged_v1")
+    parser.add_argument("--near-floor-mode-list", type=str, default="absolute_mean", help="Comma-separated: absolute_mean,relative_rho1")
+    parser.add_argument(
+        "--near-rho1-coeffs",
+        type=str,
+        default="0,0.8,0.6,0.4,0.3,0.2,0.1,0,0",
+        help="Comma-separated non-negative coeffs (scalar or length=lag_count). Used when near-floor-mode=relative_rho1.",
+    )
     parser.add_argument("--tail-eps-list", type=str, default="0.05,0.08")
     parser.add_argument("--neg-delta-list", type=str, default="0.0,0.02")
     parser.add_argument("--near-rho-min-list", type=str, default="0.0,0.05,0.1")
@@ -193,28 +229,6 @@ def parse_gpu_map(text: str) -> Dict[str, int]:
     return out
 
 
-def build_datasets(data_dir: Path) -> List[DatasetSpec]:
-    datasets = [
-        DatasetSpec(
-            name="cube1",
-            input_cube=data_dir / "back" / "all_cube1.fits",
-            fg_true_cube=data_dir / "fg_cube1.fits",
-            eor_true_cube=data_dir / "eor_cube1.fits",
-        ),
-        DatasetSpec(
-            name="cube2",
-            input_cube=data_dir / "all_cube2.fits",
-            fg_true_cube=data_dir / "fg_cube2.fits",
-            eor_true_cube=data_dir / "eor_cube2.fits",
-        ),
-    ]
-    for ds in datasets:
-        for p in (ds.input_cube, ds.fg_true_cube, ds.eor_true_cube):
-            if not p.exists():
-                raise FileNotFoundError(f"Missing required file: {p}")
-    return datasets
-
-
 def _fmt_float_token(value: float) -> str:
     if not math.isfinite(float(value)):
         return "nan"
@@ -232,6 +246,17 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
     neg_delta = _parse_float_list(args.neg_delta_list)
     near_min = _parse_float_list(args.near_rho_min_list)
     rebound_up = _parse_float_list(args.rebound_delta_up_list)
+    tail_weight_modes = [t.strip() for t in str(args.tail_weight_mode_list).split(",") if t.strip()]
+    if not tail_weight_modes:
+        tail_weight_modes = ["hard"]
+    sched_modes = [t.strip() for t in str(args.subterm_schedule_list).split(",") if t.strip()]
+    if not sched_modes:
+        sched_modes = ["static"]
+    near_floor_modes = [t.strip() for t in str(args.near_floor_mode_list).split(",") if t.strip()]
+    if not near_floor_modes:
+        near_floor_modes = ["absolute_mean"]
+    near_coeff_vals = _parse_float_list(args.near_rho1_coeffs)
+    near_coeffs: Union[float, List[float]] = float(near_coeff_vals[0]) if len(near_coeff_vals) == 1 else [float(x) for x in near_coeff_vals]
 
     out: List[CandidateSpec] = []
     out.append(
@@ -244,13 +269,22 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
             corr_reduce=str(args.corr_reduce),
             corr_topk=int(args.corr_topk),
             corr_lse_alpha=float(args.corr_lse_alpha),
+            corr_feature=str(args.corr_feature),
+            corr_spatial_pool=int(args.corr_spatial_pool),
             lagcorr_weight=0.0,
             lagcorr_spatial_pool=int(pools[0]) if pools else 1,
+            lagcorr_rms_min=float(args.lagcorr_rms_min),
             lagcorr_eor_start_iter=int(args.lagcorr_eor_start_iter),
             lagcorr_eor_ramp_iters=int(args.lagcorr_eor_ramp_iters),
+            lagcorr_eor_subterm_schedule=str(sched_modes[0]),
+            lagcorr_eor_tail_weight_mode=str(tail_weight_modes[0]),
+            lagcorr_eor_tail_sigmoid_center_mpc=float(args.tail_sigmoid_center_mpc),
+            lagcorr_eor_tail_sigmoid_width_mpc=float(args.tail_sigmoid_width_mpc),
             lagcorr_eor_tail_eps=float(tail_eps[0]) if tail_eps else 0.05,
             lagcorr_eor_neg_delta=float(neg_delta[0]) if neg_delta else 0.0,
             lagcorr_eor_near_rho_min=float(near_min[0]) if near_min else 0.0,
+            lagcorr_eor_near_floor_mode=str(near_floor_modes[0]),
+            lagcorr_eor_near_rho1_coeffs=near_coeffs,
             lagcorr_eor_rebound_eps_act=float(args.rebound_eps_act),
             lagcorr_eor_rebound_delta_up=float(rebound_up[0]) if rebound_up else 0.02,
             lagcorr_eor_w_tail=float(args.w_tail),
@@ -260,43 +294,77 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
         )
     )
 
+    def _tw_token(mode: str) -> str:
+        m = str(mode).strip().lower()
+        if m == "hard":
+            return "hard"
+        if m == "sigmoid_chan":
+            return "chan"
+        if m == "sigmoid_chi_planck18":
+            return "chi"
+        return m.replace("-", "_")
+
+    def _nf_token(mode: str) -> str:
+        m = str(mode).strip().lower()
+        if m in {"absolute_mean", "absolute", "mean"}:
+            return "abs"
+        if m in {"relative_rho1", "rho1"}:
+            return "rho1"
+        return m.replace("-", "_")
+
     for pool in pools:
         for te in tail_eps:
             for nd in neg_delta:
-                for nm in near_min:
-                    for du in rebound_up:
-                        name = (
-                            f"env_pool{int(pool)}"
-                            f"_te{_fmt_float_token(te)}"
-                            f"_nd{_fmt_float_token(nd)}"
-                            f"_nm{_fmt_float_token(nm)}"
-                            f"_du{_fmt_float_token(du)}"
-                        )
-                        out.append(
-                            CandidateSpec(
-                                name=name,
-                                corr_enabled=corr_enabled,
-                                corr_weight=float(args.corr_weight) if corr_enabled else 0.0,
-                                corr_prior_sigma=float(args.corr_prior_sigma),
-                                corr_prior_abs_threshold=float(args.corr_abs_threshold),
-                                corr_reduce=str(args.corr_reduce),
-                                corr_topk=int(args.corr_topk),
-                                corr_lse_alpha=float(args.corr_lse_alpha),
-                                lagcorr_weight=float(args.lagcorr_weight),
-                                lagcorr_spatial_pool=int(pool),
-                                lagcorr_eor_start_iter=int(args.lagcorr_eor_start_iter),
-                                lagcorr_eor_ramp_iters=int(args.lagcorr_eor_ramp_iters),
-                                lagcorr_eor_tail_eps=float(te),
-                                lagcorr_eor_neg_delta=float(nd),
-                                lagcorr_eor_near_rho_min=float(nm),
-                                lagcorr_eor_rebound_eps_act=float(args.rebound_eps_act),
-                                lagcorr_eor_rebound_delta_up=float(du),
-                                lagcorr_eor_w_tail=float(args.w_tail),
-                                lagcorr_eor_w_neg=float(args.w_neg),
-                                lagcorr_eor_w_near=float(args.w_near),
-                                lagcorr_eor_w_rebound=float(args.w_rebound),
-                            )
-                        )
+                for du in rebound_up:
+                    for tw in tail_weight_modes:
+                        for nf in near_floor_modes:
+                            for sch in sched_modes:
+                                nm_list = near_min if str(nf).strip().lower() in {"absolute_mean", "absolute", "mean"} else [0.0]
+                                for nm in nm_list:
+                                    name = (
+                                        f"env_pool{int(pool)}"
+                                        f"_te{_fmt_float_token(te)}"
+                                        f"_nd{_fmt_float_token(nd)}"
+                                        f"_nm{_fmt_float_token(nm)}"
+                                        f"_du{_fmt_float_token(du)}"
+                                        f"_tw{_tw_token(tw)}"
+                                        f"_nf{_nf_token(nf)}"
+                                        f"_sch{str(sch).strip().lower()}"
+                                    )
+                                    out.append(
+                                        CandidateSpec(
+                                            name=name,
+                                            corr_enabled=corr_enabled,
+                                            corr_weight=float(args.corr_weight) if corr_enabled else 0.0,
+                                            corr_prior_sigma=float(args.corr_prior_sigma),
+                                            corr_prior_abs_threshold=float(args.corr_abs_threshold),
+                                            corr_reduce=str(args.corr_reduce),
+                                            corr_topk=int(args.corr_topk),
+                                            corr_lse_alpha=float(args.corr_lse_alpha),
+                                            corr_feature=str(args.corr_feature),
+                                            corr_spatial_pool=int(args.corr_spatial_pool),
+                                            lagcorr_weight=float(args.lagcorr_weight),
+                                            lagcorr_spatial_pool=int(pool),
+                                            lagcorr_rms_min=float(args.lagcorr_rms_min),
+                                            lagcorr_eor_start_iter=int(args.lagcorr_eor_start_iter),
+                                            lagcorr_eor_ramp_iters=int(args.lagcorr_eor_ramp_iters),
+                                            lagcorr_eor_subterm_schedule=str(sch),
+                                            lagcorr_eor_tail_weight_mode=str(tw),
+                                            lagcorr_eor_tail_sigmoid_center_mpc=float(args.tail_sigmoid_center_mpc),
+                                            lagcorr_eor_tail_sigmoid_width_mpc=float(args.tail_sigmoid_width_mpc),
+                                            lagcorr_eor_tail_eps=float(te),
+                                            lagcorr_eor_neg_delta=float(nd),
+                                            lagcorr_eor_near_rho_min=float(nm),
+                                            lagcorr_eor_near_floor_mode=str(nf),
+                                            lagcorr_eor_near_rho1_coeffs=near_coeffs,
+                                            lagcorr_eor_rebound_eps_act=float(args.rebound_eps_act),
+                                            lagcorr_eor_rebound_delta_up=float(du),
+                                            lagcorr_eor_w_tail=float(args.w_tail),
+                                            lagcorr_eor_w_neg=float(args.w_neg),
+                                            lagcorr_eor_w_near=float(args.w_near),
+                                            lagcorr_eor_w_rebound=float(args.w_rebound),
+                                        )
+                                    )
     # Dedup by name.
     seen: set[str] = set()
     dedup: List[CandidateSpec] = []
@@ -485,18 +553,21 @@ def _write_markdown(path: Path, ranked: Sequence[Dict[str, object]], meta: Dict[
     path.write_text("".join(lines), encoding="utf-8")
 
 
-def _candidate_summary(rows: Sequence[Dict[str, object]]) -> List[Dict[str, object]]:
+def _candidate_summary(rows: Sequence[Dict[str, object]], *, exclude_datasets: Sequence[str] = ()) -> List[Dict[str, object]]:
+    exclude = {str(x).strip() for x in exclude_datasets if str(x).strip()}
     grouped: Dict[str, List[Dict[str, object]]] = {}
     for row in rows:
         grouped.setdefault(str(row.get("candidate")), []).append(row)
     out: List[Dict[str, object]] = []
     for cand, items in grouped.items():
-        ok = [r for r in items if str(r.get("status")) == "ok"]
+        ranked_items = [r for r in items if str(r.get("dataset")) not in exclude]
+        ok_total = [r for r in items if str(r.get("status")) == "ok"]
+        ok_rank = [r for r in ranked_items if str(r.get("status")) == "ok"]
 
         def _mean(key: str) -> float:
             vals = [
                 float(r[key])
-                for r in ok
+                for r in ok_rank
                 if r.get(key) is not None and math.isfinite(float(r[key]))  # type: ignore[arg-type]
             ]
             return float(np.mean(vals)) if vals else float("nan")
@@ -504,8 +575,13 @@ def _candidate_summary(rows: Sequence[Dict[str, object]]) -> List[Dict[str, obje
         out.append(
             {
                 "candidate": cand,
-                "n": len(items),
-                "n_ok": len(ok),
+                "n_total": len(items),
+                "n_ok_total": len(ok_total),
+                "n_rank": len(ranked_items),
+                "n_ok_rank": len(ok_rank),
+                # Keep legacy fields (used by markdown summary) as rank-only.
+                "n": len(ranked_items),
+                "n_ok": len(ok_rank),
                 "eor_corr_score_mean": _mean("eor_corr_score"),
                 "eor_corr_mean_mean": _mean("eor_corr_mean"),
                 "eor_corr_p10_mean": _mean("eor_corr_p10"),
@@ -572,7 +648,7 @@ def _build_config(
             "lr_plateau_min_delta": float(args.lr_plateau_min_delta),
             "lr_plateau_cooldown": int(args.lr_plateau_cooldown),
             "lr_min": float(args.lr_min),
-            "freq_start_mhz": float(args.freq_start_mhz),
+            "freq_start_mhz": float(dataset.freq_start_mhz),
             "freq_delta_mhz": float(args.freq_delta_mhz),
         },
         "cut_xy": {
@@ -598,6 +674,9 @@ def _build_config(
             "eor_prior_mean": 0.0,
             "eor_prior_sigma": float(args.base_eor_prior_sigma),
             "eor_prior_amp_threshold": float(args.base_eor_amp_threshold),
+            "eor_amp_prior_mode": str(args.base_eor_amp_prior_mode),
+            "eor_hybrid_voxel_factor": float(args.base_eor_hybrid_voxel_factor),
+            "eor_hybrid_voxel_weight": float(args.base_eor_hybrid_voxel_weight),
             "fg_smooth_mode": str(args.base_fg_smooth_mode),
             "fg_smooth_mean": float(args.base_fg_smooth_mean),
             "fg_smooth_sigma": float(args.base_fg_smooth_sigma),
@@ -609,6 +688,8 @@ def _build_config(
             "corr_reduce": str(candidate.corr_reduce),
             "corr_topk": int(candidate.corr_topk),
             "corr_lse_alpha": float(candidate.corr_lse_alpha),
+            "corr_feature": str(candidate.corr_feature),
+            "corr_spatial_pool": int(candidate.corr_spatial_pool),
             # lagcorr
             "lagcorr_feature": "raw",
             "lagcorr_unit": "mhz",
@@ -617,13 +698,20 @@ def _build_config(
             "lagcorr_intervals": list(LAG_INTERVALS_MHZ),
             "lagcorr_max_pairs": 256,
             "lagcorr_spatial_pool": int(candidate.lagcorr_spatial_pool),
+            "lagcorr_rms_min": float(candidate.lagcorr_rms_min),
             "lagcorr_eor_mode": "envelope_v2",
             "lagcorr_eor_start_iter": int(candidate.lagcorr_eor_start_iter),
             "lagcorr_eor_ramp_iters": int(candidate.lagcorr_eor_ramp_iters),
+            "lagcorr_eor_subterm_schedule": str(candidate.lagcorr_eor_subterm_schedule),
+            "lagcorr_eor_tail_weight_mode": str(candidate.lagcorr_eor_tail_weight_mode),
+            "lagcorr_eor_tail_sigmoid_center_mpc": float(candidate.lagcorr_eor_tail_sigmoid_center_mpc),
+            "lagcorr_eor_tail_sigmoid_width_mpc": float(candidate.lagcorr_eor_tail_sigmoid_width_mpc),
             # Envelope parameters
             "lagcorr_eor_tail_eps": float(candidate.lagcorr_eor_tail_eps),
             "lagcorr_eor_neg_delta": float(candidate.lagcorr_eor_neg_delta),
             "lagcorr_eor_near_rho_min": float(candidate.lagcorr_eor_near_rho_min),
+            "lagcorr_eor_near_floor_mode": str(candidate.lagcorr_eor_near_floor_mode),
+            "lagcorr_eor_near_rho1_coeffs": candidate.lagcorr_eor_near_rho1_coeffs,
             "lagcorr_eor_rebound_eps_act": float(candidate.lagcorr_eor_rebound_eps_act),
             "lagcorr_eor_rebound_delta_up": float(candidate.lagcorr_eor_rebound_delta_up),
             "lagcorr_eor_w_tail": float(candidate.lagcorr_eor_w_tail),
@@ -654,7 +742,7 @@ def main() -> int:
     output_dir = args.output_dir.resolve() if args.output_dir else (work_root / "runs" / f"lagcorr_env_scan_{stamp}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    datasets_all = build_datasets(data_dir)
+    datasets_all = build_datasets(data_dir, cube12_start_mhz=float(args.freq_start_mhz))
     enabled = {x.strip() for x in str(args.datasets).split(",") if x.strip()}
     datasets = [d for d in datasets_all if d.name in enabled]
     if not datasets:
@@ -691,6 +779,9 @@ def main() -> int:
         "gamma": float(args.base_gamma),
         "eor_prior_sigma": float(args.base_eor_prior_sigma),
         "eor_amp_threshold": float(args.base_eor_amp_threshold),
+        "eor_amp_prior_mode": str(args.base_eor_amp_prior_mode),
+        "eor_hybrid_voxel_factor": float(args.base_eor_hybrid_voxel_factor),
+        "eor_hybrid_voxel_weight": float(args.base_eor_hybrid_voxel_weight),
         "fg_smooth_mode": str(args.base_fg_smooth_mode),
         "fg_smooth_mean": float(args.base_fg_smooth_mean),
         "fg_smooth_sigma": float(args.base_fg_smooth_sigma),
@@ -699,8 +790,15 @@ def main() -> int:
         "lr_scheduler": str(args.lr_scheduler),
         "extra_loss_start_iter": int(args.extra_loss_start_iter),
         "extra_loss_ramp_iters": int(args.extra_loss_ramp_iters),
+        "corr_feature": str(args.corr_feature),
+        "corr_spatial_pool": int(args.corr_spatial_pool),
         "lagcorr_eor_start_iter": int(args.lagcorr_eor_start_iter),
         "lagcorr_eor_ramp_iters": int(args.lagcorr_eor_ramp_iters),
+        "lagcorr_rms_min": float(args.lagcorr_rms_min),
+        "tail_sigmoid_center_mpc": float(args.tail_sigmoid_center_mpc),
+        "tail_sigmoid_width_mpc": float(args.tail_sigmoid_width_mpc),
+        "near_rho1_coeffs": str(args.near_rho1_coeffs),
+        "exclude_from_ranking": str(args.exclude_from_ranking),
     }
 
     manifest = {
@@ -745,8 +843,17 @@ def main() -> int:
         active: List[Tuple[object, JobSpec, float, object]] = []
         queued = list(cand_jobs)
         while queued or active:
+            active_gpus = {int(j.gpu_index) for (_, j, _, _) in active}
             while queued and len(active) < max_jobs:
-                job = queued.pop(0)
+                pick_idx: Optional[int] = None
+                for i, cand_job in enumerate(queued):
+                    if int(cand_job.gpu_index) in active_gpus:
+                        continue
+                    pick_idx = i
+                    break
+                if pick_idx is None:
+                    break
+                job = queued.pop(pick_idx)
                 job.run_dir.mkdir(parents=True, exist_ok=True)
                 cfg = _build_config(
                     dataset=job.dataset,
@@ -768,6 +875,7 @@ def main() -> int:
                     text=True,
                 )
                 active.append((proc, job, time.time(), log_handle))
+                active_gpus.add(int(job.gpu_index))
                 print(f"  [launch] {cand.name} {job.dataset.name} gpu={job.gpu_index} pid={proc.pid}")
 
             still_active: List[Tuple[object, JobSpec, float, object]] = []
@@ -781,22 +889,42 @@ def main() -> int:
                 row: Dict[str, object] = {
                     "candidate": cand.name,
                     "dataset": job.dataset.name,
+                    "freq_start_mhz": float(job.dataset.freq_start_mhz),
                     "status": "ok" if int(ret) == 0 else "failed",
                     "return_code": int(ret),
                     "runtime_sec": float(runtime),
+                    "beta": float(args.base_beta),
+                    "gamma": float(args.base_gamma),
+                    "eor_prior_sigma": float(args.base_eor_prior_sigma),
+                    "eor_amp_threshold": float(args.base_eor_amp_threshold),
+                    "eor_amp_prior_mode": str(args.base_eor_amp_prior_mode),
+                    "eor_hybrid_voxel_factor": float(args.base_eor_hybrid_voxel_factor),
+                    "eor_hybrid_voxel_weight": float(args.base_eor_hybrid_voxel_weight),
+                    "fg_smooth_mode": str(args.base_fg_smooth_mode),
+                    "fg_smooth_mean": float(args.base_fg_smooth_mean),
+                    "fg_smooth_sigma": float(args.base_fg_smooth_sigma),
                     "corr_weight": float(cand.corr_weight) if cand.corr_enabled else 0.0,
                     "corr_prior_sigma": float(cand.corr_prior_sigma),
                     "corr_prior_abs_threshold": float(cand.corr_prior_abs_threshold),
                     "corr_reduce": str(cand.corr_reduce),
                     "corr_topk": int(cand.corr_topk),
                     "corr_lse_alpha": float(cand.corr_lse_alpha),
+                    "corr_feature": str(cand.corr_feature),
+                    "corr_spatial_pool": int(cand.corr_spatial_pool),
                     "lagcorr_weight": float(cand.lagcorr_weight),
                     "lagcorr_spatial_pool": int(cand.lagcorr_spatial_pool),
+                    "lagcorr_rms_min": float(cand.lagcorr_rms_min),
                     "lagcorr_eor_start_iter": int(cand.lagcorr_eor_start_iter),
                     "lagcorr_eor_ramp_iters": int(cand.lagcorr_eor_ramp_iters),
+                    "lagcorr_eor_subterm_schedule": str(cand.lagcorr_eor_subterm_schedule),
+                    "lagcorr_eor_tail_weight_mode": str(cand.lagcorr_eor_tail_weight_mode),
+                    "lagcorr_eor_tail_sigmoid_center_mpc": float(cand.lagcorr_eor_tail_sigmoid_center_mpc),
+                    "lagcorr_eor_tail_sigmoid_width_mpc": float(cand.lagcorr_eor_tail_sigmoid_width_mpc),
                     "tail_eps": float(cand.lagcorr_eor_tail_eps),
                     "neg_delta": float(cand.lagcorr_eor_neg_delta),
                     "near_rho_min": float(cand.lagcorr_eor_near_rho_min),
+                    "near_floor_mode": str(cand.lagcorr_eor_near_floor_mode),
+                    "near_rho1_coeffs": json.dumps(cand.lagcorr_eor_near_rho1_coeffs),
                     "rebound_eps_act": float(cand.lagcorr_eor_rebound_eps_act),
                     "rebound_delta_up": float(cand.lagcorr_eor_rebound_delta_up),
                     "config_path": str(job.config_path),
@@ -874,7 +1002,7 @@ def main() -> int:
 
     detail_csv = output_dir / "lagcorr_env_results.csv"
     _write_csv(detail_csv, rows)
-    ranked = _candidate_summary(rows)
+    ranked = _candidate_summary(rows, exclude_datasets=_parse_csv_tokens(args.exclude_from_ranking))
     rank_csv = output_dir / "lagcorr_env_rank.csv"
     _write_csv(rank_csv, ranked)
     _write_markdown(output_dir / "lagcorr_env_summary.md", ranked, baseline_fixed)
@@ -885,4 +1013,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
