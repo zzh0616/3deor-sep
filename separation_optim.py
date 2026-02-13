@@ -120,6 +120,10 @@ def _warn_weight_defaults(config: OptimizationConfig) -> None:
     _warn_if_weight_not_one("corr_weight", config.corr_weight)
     _warn_if_weight_not_one("lagcorr_weight", config.lagcorr_weight)
     _warn_if_weight_not_one("fft_weight", config.fft_weight)
+    _warn_if_weight_not_one("fg_logcurv_weight", config.fg_logcurv_weight)
+    _warn_if_weight_not_one("fg_lowrank_weight", config.fg_lowrank_weight)
+    _warn_if_weight_not_one("eor_lagshape_weight", config.eor_lagshape_weight)
+    _warn_if_weight_not_one("eor_iso_weight", config.eor_iso_weight)
     _warn_if_weight_not_one("eor_mean_weight", config.eor_mean_weight)
     _warn_if_weight_not_one("eor_hf_weight", config.eor_hf_weight)
     _warn_if_weight_not_one("poly_weight", config.poly_weight)
@@ -144,6 +148,10 @@ class LossComponents:
     lagcorr: float
     lagcorr_gap: float
     fft_highfreq: float
+    fg_logcurv: float
+    fg_lowrank: float
+    eor_lagshape: float
+    eor_iso: float
     eor_mean: float
     eor_hf: float
     poly: float
@@ -160,6 +168,10 @@ class OptimizationConfig:
     beta: float = 1.0
     gamma: float = 1.0
     fft_weight: float = 1.0
+    fg_logcurv_weight: float = 1.0
+    fg_lowrank_weight: float = 1.0
+    eor_lagshape_weight: float = 1.0
+    eor_iso_weight: float = 1.0
     eor_mean_weight: float = 1.0
     eor_hf_weight: float = 1.0
     extra_loss_start_iter: int = 500
@@ -281,6 +293,27 @@ class OptimizationConfig:
     fft_z_clip: Optional[float] = None
     fft_prior_mean: float = 0.0
     fft_prior_sigma: float = DEFAULT_FFT_SIGMA
+    fg_logcurv_mean: float = 0.0
+    fg_logcurv_sigma: float = 1.0
+    fg_logcurv_eps: float = 1e-6
+    fg_logcurv_softplus_scale: float = 1.0
+    fg_lowrank_rank: int = 3
+    fg_lowrank_num_samples: int = 4096
+    fg_lowrank_spatial_pool: int = 8
+    fg_lowrank_normalize: str = "none"  # "none" or "rms"
+    fg_lowrank_tail_max: float = 0.0
+    fg_lowrank_sigma: float = 1.0
+    fg_lowrank_sample_mode: str = "stride"  # "stride" or "random"
+    fg_lowrank_random_seed: Optional[int] = None
+    fg_lowrank_eps: float = 1e-12
+    eor_lagshape_feature: str = "raw"  # "raw" or "diff1"
+    eor_lagshape_spatial_pool: int = 1
+    eor_iso_spatial_pool: int = 8
+    eor_iso_num_freq_samples: int = 8
+    eor_iso_num_radial_bins: int = 20
+    eor_iso_min_count: int = 32
+    eor_iso_use_log_power: bool = False
+    eor_iso_eps: float = 1e-12
     eor_hf_percent: float = 0.7
     eor_hf_r_max: float = 0.85
     enable_corr_check: bool = False
@@ -535,6 +568,10 @@ def optimize_components(
     extra_loss_start_iter: int = 500,
     extra_loss_ramp_iters: int = 0,
     fft_weight: float = 1.0,
+    fg_logcurv_weight: float = 1.0,
+    fg_lowrank_weight: float = 1.0,
+    eor_lagshape_weight: float = 1.0,
+    eor_iso_weight: float = 1.0,
     eor_mean_weight: float = 1.0,
     eor_hf_weight: float = 1.0,
     poly_weight: float = 1.0,
@@ -547,6 +584,27 @@ def optimize_components(
     fft_highfreq_percent: float = 0.7,
     fft_use_log_energy: bool = False,
     fft_z_clip: Optional[float] = None,
+    fg_logcurv_mean: Union[Tensor, float] = 0.0,
+    fg_logcurv_sigma: Union[Tensor, float] = 1.0,
+    fg_logcurv_eps: float = 1e-6,
+    fg_logcurv_softplus_scale: float = 1.0,
+    fg_lowrank_rank: int = 3,
+    fg_lowrank_num_samples: int = 4096,
+    fg_lowrank_spatial_pool: int = 8,
+    fg_lowrank_normalize: str = "none",
+    fg_lowrank_tail_max: float = 0.0,
+    fg_lowrank_sigma: float = 1.0,
+    fg_lowrank_sample_mode: str = "stride",
+    fg_lowrank_random_seed: Optional[int] = None,
+    fg_lowrank_eps: float = 1e-12,
+    eor_lagshape_feature: str = "raw",
+    eor_lagshape_spatial_pool: int = 1,
+    eor_iso_spatial_pool: int = 8,
+    eor_iso_num_freq_samples: int = 8,
+    eor_iso_num_radial_bins: int = 20,
+    eor_iso_min_count: int = 32,
+    eor_iso_use_log_power: bool = False,
+    eor_iso_eps: float = 1e-12,
     eor_hf_percent: float = 0.7,
     eor_hf_r_max: float = 0.85,
     freq_start_mhz: Optional[float] = None,
@@ -755,35 +813,35 @@ def optimize_components(
         raise ValueError("lagcorr_eor_component_weight must be a finite non-negative value.")
     if not math.isfinite(lagcorr_gap_weight_val) or lagcorr_gap_weight_val < 0:
         raise ValueError("lagcorr_gap_weight must be a finite non-negative value.")
-    if "lagcorr" in active_term_set and lagcorr_fg_component_weight_val + lagcorr_eor_component_weight_val <= 0.0:
+    if (
+        "lagcorr" in active_term_set
+        and (lagcorr_fg_component_weight_val + lagcorr_eor_component_weight_val + lagcorr_gap_weight_val)
+        <= 0.0
+    ):
         raise ValueError(
-            "At least one lagcorr component weight must be > 0 "
-            "(lagcorr_fg_component_weight or lagcorr_eor_component_weight)."
+            "At least one lagcorr component or gap weight must be > 0 "
+            "(lagcorr_fg_component_weight, lagcorr_eor_component_weight, or lagcorr_gap_weight)."
         )
-    if "lagcorr" in active_term_set and lagcorr_gap_weight_val > 0.0:
-        if lagcorr_fg_component_weight_val <= 0.0 or lagcorr_eor_component_weight_val <= 0.0:
-            raise ValueError(
-                "lagcorr_gap_weight > 0 requires both lagcorr_fg_component_weight and "
-                "lagcorr_eor_component_weight to be > 0."
-            )
     lagcorr_eor_mode_norm = str(lagcorr_eor_mode).strip().lower()
     lagcorr_rng: Optional[torch.Generator] = None
-    if "lagcorr" in active_term_set:
-        if lagcorr_eor_mode_norm not in {"gaussian", "normal", "envelope", "envelope_v2"}:
-            raise ValueError(
-                "lagcorr_eor_mode must be one of: gaussian, envelope_v2 (alias: envelope)."
-            )
-        pool_int = int(lagcorr_spatial_pool)
-        if pool_int < 1:
-            raise ValueError("lagcorr_spatial_pool must be >= 1.")
+    needs_lag_setup = bool(active_term_set & {"lagcorr", "eor_lagshape"})
+    if needs_lag_setup:
+        if "lagcorr" in active_term_set:
+            if lagcorr_eor_mode_norm not in {"gaussian", "normal", "envelope", "envelope_v2"}:
+                raise ValueError(
+                    "lagcorr_eor_mode must be one of: gaussian, envelope_v2 (alias: envelope)."
+                )
+            pool_int = int(lagcorr_spatial_pool)
+            if pool_int < 1:
+                raise ValueError("lagcorr_spatial_pool must be >= 1.")
         unit_norm = lagcorr_unit.strip().lower()
         if unit_norm not in {"mhz", "chan"}:
             raise ValueError("lagcorr_unit must be 'mhz' or 'chan'.")
         if lagcorr_intervals is None:
-            raise ValueError("lagcorr_intervals must be provided when enabling 'lagcorr'.")
+            raise ValueError("lagcorr_intervals must be provided when enabling 'lagcorr' or 'eor_lagshape'.")
         interval_tensor = ensure_tensor_on(lagcorr_intervals, y_tensor.device, y_tensor.dtype)
         if interval_tensor is None:
-            raise ValueError("lagcorr_intervals must be provided when enabling 'lagcorr'.")
+            raise ValueError("lagcorr_intervals must be provided when enabling 'lagcorr' or 'eor_lagshape'.")
         interval_tensor = interval_tensor.reshape(-1)
         if interval_tensor.numel() == 0:
             raise ValueError("lagcorr_intervals must contain at least one interval.")
@@ -822,12 +880,13 @@ def optimize_components(
                 )
             return tensor
 
-        if lagcorr_fg_component_weight_val > 0.0:
-            fg_lagcorr_mean_tensor = _require_vec("fg_lagcorr_mean", fg_lagcorr_mean)
-            fg_lagcorr_sigma_tensor = _require_vec("fg_lagcorr_sigma", fg_lagcorr_sigma)
-        if lagcorr_eor_component_weight_val > 0.0 and lagcorr_eor_mode_norm in {"gaussian", "normal"}:
-            eor_lagcorr_mean_tensor = _require_vec("eor_lagcorr_mean", eor_lagcorr_mean)
-            eor_lagcorr_sigma_tensor = _require_vec("eor_lagcorr_sigma", eor_lagcorr_sigma)
+        if "lagcorr" in active_term_set:
+            if lagcorr_fg_component_weight_val > 0.0:
+                fg_lagcorr_mean_tensor = _require_vec("fg_lagcorr_mean", fg_lagcorr_mean)
+                fg_lagcorr_sigma_tensor = _require_vec("fg_lagcorr_sigma", fg_lagcorr_sigma)
+            if lagcorr_eor_component_weight_val > 0.0 and lagcorr_eor_mode_norm in {"gaussian", "normal"}:
+                eor_lagcorr_mean_tensor = _require_vec("eor_lagcorr_mean", eor_lagcorr_mean)
+                eor_lagcorr_sigma_tensor = _require_vec("eor_lagcorr_sigma", eor_lagcorr_sigma)
         lagcorr_weight_tensor = ensure_tensor_on(lagcorr_lag_weights, y_tensor.device, y_tensor.dtype)
         if lagcorr_weight_tensor is None:
             lagcorr_weight_tensor = torch.ones_like(interval_tensor)
@@ -852,6 +911,16 @@ def optimize_components(
             lagcorr_rng = torch.Generator(device="cpu")
             if lagcorr_random_seed is not None:
                 lagcorr_rng.manual_seed(int(lagcorr_random_seed))
+
+    fg_lowrank_rng: Optional[torch.Generator] = None
+    fg_lowrank_sample_mode_norm = str(fg_lowrank_sample_mode).strip().lower()
+    if fg_lowrank_sample_mode_norm == "random":
+        fg_lowrank_rng = torch.Generator(device="cpu")
+        if fg_lowrank_random_seed is not None:
+            fg_lowrank_rng.manual_seed(int(fg_lowrank_random_seed))
+        else:
+            # Keep scans deterministic unless caller explicitly opts into randomness.
+            fg_lowrank_rng.manual_seed(0)
     lagcorr_eor_start_iter_val = (
         int(extra_loss_start_iter) if lagcorr_eor_start_iter is None else int(lagcorr_eor_start_iter)
     )
@@ -1116,7 +1185,9 @@ def optimize_components(
                 else:
                     extra_scale = 1.0
         lagcorr_eor_scale_val = 1.0
-        if "lagcorr" in active_term_set and lagcorr_eor_component_weight_val > 0.0:
+        if "lagcorr" in active_term_set and (
+            lagcorr_eor_component_weight_val > 0.0 or lagcorr_gap_weight_val > 0.0
+        ):
             if it < lagcorr_eor_start_iter_val:
                 lagcorr_eor_scale_val = 0.0
             elif lagcorr_eor_ramp_iters_val > 0:
@@ -1168,6 +1239,10 @@ def optimize_components(
             gamma=gamma,
             corr_weight=corr_weight,
             fft_weight=fft_weight,
+            fg_logcurv_weight=fg_logcurv_weight,
+            fg_lowrank_weight=fg_lowrank_weight,
+            eor_lagshape_weight=eor_lagshape_weight,
+            eor_iso_weight=eor_iso_weight,
             eor_mean_weight=eor_mean_weight,
             eor_hf_weight=eor_hf_weight,
             poly_weight=poly_weight,
@@ -1236,6 +1311,27 @@ def optimize_components(
             fft_percent=fft_highfreq_percent,
             fft_use_log_energy=fft_use_log_energy,
             fft_z_clip=fft_z_clip,
+            fg_logcurv_mean=fg_logcurv_mean,
+            fg_logcurv_sigma=fg_logcurv_sigma,
+            fg_logcurv_eps=fg_logcurv_eps,
+            fg_logcurv_softplus_scale=fg_logcurv_softplus_scale,
+            fg_lowrank_rank=fg_lowrank_rank,
+            fg_lowrank_num_samples=fg_lowrank_num_samples,
+            fg_lowrank_spatial_pool=fg_lowrank_spatial_pool,
+            fg_lowrank_normalize=fg_lowrank_normalize,
+            fg_lowrank_tail_max=fg_lowrank_tail_max,
+            fg_lowrank_sigma=fg_lowrank_sigma,
+            fg_lowrank_sample_mode=fg_lowrank_sample_mode,
+            fg_lowrank_rng=fg_lowrank_rng,
+            fg_lowrank_eps=fg_lowrank_eps,
+            eor_lagshape_feature=eor_lagshape_feature,
+            eor_lagshape_spatial_pool=eor_lagshape_spatial_pool,
+            eor_iso_spatial_pool=eor_iso_spatial_pool,
+            eor_iso_num_freq_samples=eor_iso_num_freq_samples,
+            eor_iso_num_radial_bins=eor_iso_num_radial_bins,
+            eor_iso_min_count=eor_iso_min_count,
+            eor_iso_use_log_power=eor_iso_use_log_power,
+            eor_iso_eps=eor_iso_eps,
             eor_hf_percent=eor_hf_percent,
             eor_hf_r_max=eor_hf_r_max,
             poly_degree=poly_degree,
@@ -1287,6 +1383,10 @@ def optimize_components(
             lagcorr=float(components["lagcorr"].item()),
             lagcorr_gap=float(components["lagcorr_gap"].item()),
             fft_highfreq=float(components["fft_highfreq"].item()),
+            fg_logcurv=float(components["fg_logcurv"].item()),
+            fg_lowrank=float(components["fg_lowrank"].item()),
+            eor_lagshape=float(components["eor_lagshape"].item()),
+            eor_iso=float(components["eor_iso"].item()),
             eor_mean=float(components["eor_mean"].item()),
             eor_hf=float(components["eor_hf"].item()),
             poly=float(components["poly"].item()),
@@ -1301,6 +1401,8 @@ def optimize_components(
                 f"eor={entry.eor_reg:.4e} corr={entry.corr:.4e} "
                 f"lagcorr={entry.lagcorr:.4e} laggap={entry.lagcorr_gap:.4e} "
                 f"corr_coeff={entry.corr_coeff:.3f} fft={entry.fft_highfreq:.4e} "
+                f"logcurv={entry.fg_logcurv:.4e} lowrank={entry.fg_lowrank:.4e} "
+                f"lagshape={entry.eor_lagshape:.4e} iso={entry.eor_iso:.4e} "
                 f"eor_mean={entry.eor_mean:.4e} eor_hf={entry.eor_hf:.4e} "
                 f"poly={entry.poly:.4e} lr={current_lr:.6g} lr_fg={lr_fg:.6g}"
             )
@@ -1344,7 +1446,7 @@ def _create_synthetic_cube(
     return fg_true, eor_true
 
 
-def read_fits_cube(path: Path) -> Tensor:
+def read_fits_cube(path: Path, *, cut_indices: Optional["CutXYIndices"] = None) -> Tensor:
     """
     Load a 3D cube from a FITS file.
     """
@@ -1353,13 +1455,20 @@ def read_fits_cube(path: Path) -> Tensor:
     except ImportError as exc:  # pragma: no cover - dependency check
         raise ImportError("Reading FITS files requires the 'astropy' package.") from exc
 
-    data = fits.getdata(path)
-    if data.ndim != 3:
-        raise ValueError(f"Expected a 3D cube in {path}, found shape {data.shape}")
-    return torch.from_numpy(np.asarray(data, dtype=np.float32))
+    with fits.open(path, memmap=True) as hdul:
+        data = hdul[0].data
+        if data.ndim != 3:
+            raise ValueError(f"Expected a 3D cube in {path}, found shape {data.shape}")
+        view = data
+        if cut_indices is not None:
+            slices: List[slice] = [slice(None)] * 3
+            slices[cut_indices.x_axis] = slice(cut_indices.x0, cut_indices.x1)
+            slices[cut_indices.y_axis] = slice(cut_indices.y0, cut_indices.y1)
+            view = view[tuple(slices)]
+        return torch.from_numpy(np.asarray(view, dtype=np.float32))
 
 
-def read_fits_array(path: Path) -> Tensor:
+def read_fits_array(path: Path, *, cut_indices: Optional["CutXYIndices"] = None) -> Tensor:
     """
     Load a 2D image or 3D cube from a FITS file.
     """
@@ -1368,10 +1477,20 @@ def read_fits_array(path: Path) -> Tensor:
     except ImportError as exc:  # pragma: no cover - dependency check
         raise ImportError("Reading FITS files requires the 'astropy' package.") from exc
 
-    data = fits.getdata(path)
-    if data.ndim not in (2, 3):
-        raise ValueError(f"Expected a 2D/3D array in {path}, found shape {data.shape}")
-    return torch.from_numpy(np.asarray(data, dtype=np.float32))
+    with fits.open(path, memmap=True) as hdul:
+        data = hdul[0].data
+        if data.ndim not in (2, 3):
+            raise ValueError(f"Expected a 2D/3D array in {path}, found shape {data.shape}")
+        view = data
+        if cut_indices is not None:
+            if data.ndim == 3:
+                slices3: List[slice] = [slice(None)] * 3
+                slices3[cut_indices.x_axis] = slice(cut_indices.x0, cut_indices.x1)
+                slices3[cut_indices.y_axis] = slice(cut_indices.y0, cut_indices.y1)
+                view = view[tuple(slices3)]
+            else:
+                view = view[cut_indices.x0 : cut_indices.x1, cut_indices.y0 : cut_indices.y1]
+        return torch.from_numpy(np.asarray(view, dtype=np.float32))
 
 
 def apply_mask_xy(cube: Tensor, mask: Tensor, freq_axis: int) -> Tensor:
@@ -1779,6 +1898,9 @@ def save_true_signal_corr_vs_lag_plot(
     Plot mean correlation vs. frequency lag for FG and EoR, with +/-1σ bands.
     """
     try:
+        import matplotlib
+
+        matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
     except ImportError as exc:  # pragma: no cover - dependency check
         raise ImportError("Plotting correlations requires the 'matplotlib' package.") from exc
@@ -2783,34 +2905,39 @@ def _optimize_from_fits(
     device = config.resolved_device()
     dtype = config.resolved_dtype()
 
+    # Resolve cut_xy indices before reading full data so we can slice on disk.
+    try:
+        from astropy.io import fits
+    except ImportError as exc:  # pragma: no cover - dependency check
+        raise ImportError("Reading FITS files requires the 'astropy' package.") from exc
+
+    with fits.open(input_path, memmap=True) as hdul:
+        input_shape = tuple(int(v) for v in hdul[0].data.shape)
+    cut_indices = build_cut_xy_indices(input_shape, freq_axis=config.freq_axis, config=config)
+    if cut_indices is not None:
+        print(
+            "Applying cut_xy (on-disk slice): "
+            f"x[{cut_indices.x0}:{cut_indices.x1}] y[{cut_indices.y0}:{cut_indices.y1}] "
+            f"(size={cut_indices.size_px}px, unit={cut_indices.unit}, freq_axis={cut_indices.freq_axis})"
+        )
+
     print(f"Loading cube from {input_path} on device {device} ...")
-    y_cube = read_fits_cube(input_path)
+    y_cube = read_fits_cube(input_path, cut_indices=cut_indices)
 
     mask_tensor: Optional[Tensor] = None
     if config.mask_cube:
         mask_path = Path(config.mask_cube)
         print(f"Loading mask cube from {mask_path} ...")
-        mask_tensor = read_fits_array(mask_path)
+        mask_tensor = read_fits_array(mask_path, cut_indices=cut_indices)
         y_cube = apply_mask_xy(y_cube, mask_tensor, freq_axis=config.freq_axis)
-
-    cut_indices = build_cut_xy_indices(tuple(y_cube.shape), freq_axis=config.freq_axis, config=config)
-    if cut_indices is not None:
-        print(
-            "Applying cut_xy: "
-            f"x[{cut_indices.x0}:{cut_indices.x1}] y[{cut_indices.y0}:{cut_indices.y1}] "
-            f"(size={cut_indices.size_px}px, unit={cut_indices.unit}, freq_axis={cut_indices.freq_axis})"
-        )
-        y_cube = apply_cut_xy(y_cube, cut_indices)
 
     eor_true: Optional[Tensor] = None
     if config.true_eor_cube:
         true_eor_path = Path(config.true_eor_cube)
         print(f"Loading reference EoR cube from {true_eor_path} ...")
-        eor_true = read_fits_cube(true_eor_path)
+        eor_true = read_fits_cube(true_eor_path, cut_indices=cut_indices)
         if mask_tensor is not None:
             eor_true = apply_mask_xy(eor_true, mask_tensor, freq_axis=config.freq_axis)
-        if cut_indices is not None:
-            eor_true = apply_cut_xy(eor_true, cut_indices)
 
     data_error_value: Union[Tensor, float] = config.data_error
     eor_mean_value: Union[Tensor, float] = config.eor_prior_mean
@@ -2826,11 +2953,9 @@ def _optimize_from_fits(
 
     if config.fg_reference_cube:
         ref_path = Path(config.fg_reference_cube)
-        fg_ref_cube = read_fits_cube(ref_path)
+        fg_ref_cube = read_fits_cube(ref_path, cut_indices=cut_indices)
         if mask_tensor is not None:
             fg_ref_cube = apply_mask_xy(fg_ref_cube, mask_tensor, freq_axis=config.freq_axis)
-        if cut_indices is not None:
-            fg_ref_cube = apply_cut_xy(fg_ref_cube, cut_indices)
 
         if explicit_smooth_prior:
             fg_mean_value = config.fg_smooth_mean
@@ -2888,21 +3013,17 @@ def _optimize_from_fits(
     if config.init_fg_cube:
         fg_init_path = Path(config.init_fg_cube)
         print(f"Loading initial foreground guess from {fg_init_path} ...")
-        fg_init_tensor = read_fits_cube(fg_init_path)
+        fg_init_tensor = read_fits_cube(fg_init_path, cut_indices=cut_indices)
         if mask_tensor is not None:
             fg_init_tensor = apply_mask_xy(fg_init_tensor, mask_tensor, freq_axis=config.freq_axis)
-        if cut_indices is not None:
-            fg_init_tensor = apply_cut_xy(fg_init_tensor, cut_indices)
 
     eor_init_tensor = None
     if config.init_eor_cube:
         eor_init_path = Path(config.init_eor_cube)
         print(f"Loading initial EoR guess from {eor_init_path} ...")
-        eor_init_tensor = read_fits_cube(eor_init_path)
+        eor_init_tensor = read_fits_cube(eor_init_path, cut_indices=cut_indices)
         if mask_tensor is not None:
             eor_init_tensor = apply_mask_xy(eor_init_tensor, mask_tensor, freq_axis=config.freq_axis)
-        if cut_indices is not None:
-            eor_init_tensor = apply_cut_xy(eor_init_tensor, cut_indices)
 
     _warn_weight_defaults(config)
     active_terms_text = ",".join(active_extra_terms) if active_extra_terms else "none"
@@ -2991,6 +3112,10 @@ def _optimize_from_fits(
         extra_loss_start_iter=config.extra_loss_start_iter,
         extra_loss_ramp_iters=config.extra_loss_ramp_iters,
         fft_weight=config.fft_weight,
+        fg_logcurv_weight=config.fg_logcurv_weight,
+        fg_lowrank_weight=config.fg_lowrank_weight,
+        eor_lagshape_weight=config.eor_lagshape_weight,
+        eor_iso_weight=config.eor_iso_weight,
         eor_mean_weight=config.eor_mean_weight,
         eor_hf_weight=config.eor_hf_weight,
         poly_weight=config.poly_weight,
@@ -3003,6 +3128,27 @@ def _optimize_from_fits(
         fft_highfreq_percent=config.fft_highfreq_percent,
         fft_use_log_energy=config.fft_use_log_energy,
         fft_z_clip=config.fft_z_clip,
+        fg_logcurv_mean=config.fg_logcurv_mean,
+        fg_logcurv_sigma=config.fg_logcurv_sigma,
+        fg_logcurv_eps=config.fg_logcurv_eps,
+        fg_logcurv_softplus_scale=config.fg_logcurv_softplus_scale,
+        fg_lowrank_rank=config.fg_lowrank_rank,
+        fg_lowrank_num_samples=config.fg_lowrank_num_samples,
+        fg_lowrank_spatial_pool=config.fg_lowrank_spatial_pool,
+        fg_lowrank_normalize=config.fg_lowrank_normalize,
+        fg_lowrank_tail_max=config.fg_lowrank_tail_max,
+        fg_lowrank_sigma=config.fg_lowrank_sigma,
+        fg_lowrank_sample_mode=config.fg_lowrank_sample_mode,
+        fg_lowrank_random_seed=config.fg_lowrank_random_seed,
+        fg_lowrank_eps=config.fg_lowrank_eps,
+        eor_lagshape_feature=config.eor_lagshape_feature,
+        eor_lagshape_spatial_pool=config.eor_lagshape_spatial_pool,
+        eor_iso_spatial_pool=config.eor_iso_spatial_pool,
+        eor_iso_num_freq_samples=config.eor_iso_num_freq_samples,
+        eor_iso_num_radial_bins=config.eor_iso_num_radial_bins,
+        eor_iso_min_count=config.eor_iso_min_count,
+        eor_iso_use_log_power=config.eor_iso_use_log_power,
+        eor_iso_eps=config.eor_iso_eps,
         eor_hf_percent=config.eor_hf_percent,
         eor_hf_r_max=config.eor_hf_r_max,
         optimizer_name=config.optimizer_name,
@@ -3036,7 +3182,9 @@ def _optimize_from_fits(
             f"eor={final.eor_reg:.4e}, corr={final.corr:.4e}, "
             f"lagcorr={final.lagcorr:.4e}, laggap={final.lagcorr_gap:.4e}, "
             f"corr_coeff={final.corr_coeff:.3f}, "
-            f"fft={final.fft_highfreq:.4e}, eor_mean={final.eor_mean:.4e}, "
+            f"fft={final.fft_highfreq:.4e}, logcurv={final.fg_logcurv:.4e}, "
+            f"lowrank={final.fg_lowrank:.4e}, lagshape={final.eor_lagshape:.4e}, "
+            f"iso={final.eor_iso:.4e}, eor_mean={final.eor_mean:.4e}, "
             f"eor_hf={final.eor_hf:.4e}, poly={final.poly:.4e}"
         )
     print(f"Saved foreground estimate to {fg_output}")
@@ -3094,6 +3242,7 @@ def _optimize_from_fits(
                 Path(output_dir),
                 rec_power,
                 true_power,
+                config=power_cfg,
                 log_power_2d=power_cfg.log_power_2d,
                 log_axes_2d=power_cfg.log_bins_2d,
             )

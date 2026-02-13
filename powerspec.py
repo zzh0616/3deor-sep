@@ -5,6 +5,7 @@ Power spectrum utilities for foreground/EoR separation.
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +48,97 @@ class PowerSpecConfig:
     stat_mode: str = "median"  # "median" (default, robust) or "mean"
     log_bins_2d: bool = True  # use log-spaced k_perp/k_par bins for 2D spectra
     log_power_2d: bool = True  # plot 2D power spectra in log10 scale
+    # Optional EoR-window evaluation on 2D power spectra (cylindrical).
+    eor_window_enabled: bool = False
+    eor_window_kpar_min: float = 0.0  # require k_par >= this
+    eor_window_wedge_slope: float = 0.0  # wedge line: k_par >= slope * k_perp + intercept
+    eor_window_wedge_intercept: float = 0.0
+    eor_window_kperp_max: Optional[float] = None
+    eor_window_kpar_max: Optional[float] = None
+    eor_window_exclude_dc: bool = True  # drop k_perp=0 or k_par=0 bins
+    eor_window_eps: float = 1e-20  # numerical floor for log ratios
+
+
+def compute_eor_window_mask(
+    kperp_centers: np.ndarray,
+    kpar_centers: np.ndarray,
+    cfg: PowerSpecConfig,
+) -> np.ndarray:
+    kperp = np.asarray(kperp_centers, dtype=float).reshape(-1)
+    kpar = np.asarray(kpar_centers, dtype=float).reshape(-1)
+    kperp_grid = kperp[:, None]
+    kpar_grid = kpar[None, :]
+    slope = float(cfg.eor_window_wedge_slope)
+    intercept = float(cfg.eor_window_wedge_intercept)
+    kpar_min = float(cfg.eor_window_kpar_min)
+    if not np.isfinite([slope, intercept, kpar_min]).all():
+        raise ValueError("EoR window params must be finite.")
+
+    wedge_line = slope * kperp_grid + intercept
+    mask = (kpar_grid >= kpar_min) & (kpar_grid >= wedge_line)
+    if cfg.eor_window_kperp_max is not None:
+        mask &= kperp_grid <= float(cfg.eor_window_kperp_max)
+    if cfg.eor_window_kpar_max is not None:
+        mask &= kpar_grid <= float(cfg.eor_window_kpar_max)
+    if bool(cfg.eor_window_exclude_dc):
+        mask &= (kperp_grid > 0.0) & (kpar_grid > 0.0)
+    return mask
+
+
+def compute_power2d_window_metrics(
+    p2d_rec: np.ndarray,
+    p2d_true: np.ndarray,
+    mask: np.ndarray,
+    *,
+    eps: float,
+) -> Dict[str, float]:
+    eps_val = float(eps)
+    if not math.isfinite(eps_val) or eps_val <= 0.0:
+        raise ValueError("eps must be a finite positive value.")
+    rec = np.asarray(p2d_rec, dtype=float)
+    tru = np.asarray(p2d_true, dtype=float)
+    m = np.asarray(mask, dtype=bool)
+    if rec.shape != tru.shape or rec.shape != m.shape:
+        raise ValueError("p2d_rec/p2d_true/mask must have the same shape.")
+
+    # Exclude empty bins (p2d=0 by construction when a bin has no contributing modes).
+    valid = m & np.isfinite(rec) & np.isfinite(tru) & (rec > 0.0) & (tru > 0.0)
+    n = int(np.sum(valid))
+    if n == 0:
+        return {
+            "n_bins": 0.0,
+            "log10_mad": float("nan"),
+            "log10_p90_abs": float("nan"),
+            "log10_rmse": float("nan"),
+            "log10_corr": float("nan"),
+            "power_sum_ratio": float("nan"),
+        }
+
+    log_rec = np.log10(rec[valid] + eps_val)
+    log_tru = np.log10(tru[valid] + eps_val)
+    dlog = log_rec - log_tru
+    abs_dlog = np.abs(dlog)
+
+    # Robust primary metric: median absolute log10 ratio.
+    mad = float(np.median(abs_dlog))
+    p90 = float(np.percentile(abs_dlog, 90))
+    rmse = float(np.sqrt(np.mean(dlog**2)))
+
+    # Correlation on log power inside window (scale-insensitive).
+    if np.std(log_rec) < 1e-12 or np.std(log_tru) < 1e-12:
+        corr = float("nan")
+    else:
+        corr = float(np.corrcoef(log_rec, log_tru)[0, 1])
+
+    sum_ratio = float(np.sum(rec[valid]) / (np.sum(tru[valid]) + eps_val))
+    return {
+        "n_bins": float(n),
+        "log10_mad": mad,
+        "log10_p90_abs": p90,
+        "log10_rmse": rmse,
+        "log10_corr": corr,
+        "power_sum_ratio": sum_ratio,
+    }
 
 def _cosmo_from_cfg(cfg: PowerSpecConfig) -> FlatLambdaCDM:
     """
@@ -397,6 +489,9 @@ def _plot_1d(
     true: Optional[np.ndarray],
     rel: Optional[np.ndarray],
 ) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -433,6 +528,9 @@ def _plot_2d(
     log_scale: bool = False,
     log_axes: bool = False,
 ) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -479,9 +577,21 @@ def save_power_outputs(
     output_dir: Path,
     rec: Dict[str, np.ndarray],
     true: Optional[Dict[str, np.ndarray]] = None,
-    log_power_2d: bool = True,
-    log_axes_2d: bool = False,
+    *,
+    config: Optional[PowerSpecConfig] = None,
+    log_power_2d: Optional[bool] = None,
+    log_axes_2d: Optional[bool] = None,
 ) -> None:
+    if config is not None:
+        if log_power_2d is None:
+            log_power_2d = bool(config.log_power_2d)
+        if log_axes_2d is None:
+            log_axes_2d = bool(config.log_bins_2d)
+    if log_power_2d is None:
+        log_power_2d = True
+    if log_axes_2d is None:
+        log_axes_2d = False
+
     output_dir.mkdir(parents=True, exist_ok=True)
     k = rec["k_centers"]
     p1d_rec = rec["p1d"]
@@ -550,3 +660,46 @@ def save_power_outputs(
                 log_scale=True,
                 log_axes=log_axes_2d,
             )
+
+        # Optional EoR-window metrics on 2D power spectra (inside the window only).
+        if config is not None and bool(config.eor_window_enabled):
+            try:
+                mask = compute_eor_window_mask(kperp, kpar, config)
+                metrics = compute_power2d_window_metrics(
+                    p2d_rec,
+                    true_p2d,
+                    mask,
+                    eps=float(config.eor_window_eps),
+                )
+                out = {
+                    "eor_window_params": {
+                        "kpar_min": float(config.eor_window_kpar_min),
+                        "wedge_slope": float(config.eor_window_wedge_slope),
+                        "wedge_intercept": float(config.eor_window_wedge_intercept),
+                        "kperp_max": None if config.eor_window_kperp_max is None else float(config.eor_window_kperp_max),
+                        "kpar_max": None if config.eor_window_kpar_max is None else float(config.eor_window_kpar_max),
+                        "exclude_dc": bool(config.eor_window_exclude_dc),
+                        "eps": float(config.eor_window_eps),
+                    },
+                    "metrics": metrics,
+                }
+                (output_dir / "power2d_eor_window_metrics.json").write_text(
+                    json.dumps(out, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+
+                # Save the mask and a diagnostic log10-difference map.
+                _save_2d_fits(output_dir / "power2d_eor_window_mask.fits", mask.astype(np.int16))
+                dlog = np.full_like(p2d_rec, np.nan, dtype=np.float32)
+                win = mask & (p2d_rec > 0.0) & (true_p2d > 0.0)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    dlog[win] = (
+                        np.log10(p2d_rec[win] + float(config.eor_window_eps))
+                        - np.log10(true_p2d[win] + float(config.eor_window_eps))
+                    ).astype(np.float32)
+                _save_2d_fits(output_dir / "power2d_eor_window_dlog10.fits", dlog)
+            except Exception as exc:
+                (output_dir / "power2d_eor_window_error.txt").write_text(
+                    f"{type(exc).__name__}: {exc}\n",
+                    encoding="utf-8",
+                )

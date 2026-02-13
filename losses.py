@@ -20,6 +20,10 @@ VALID_EXTRA_LOSS_TERMS: Tuple[str, ...] = (
     "rfft",
     "poly_reparam",
     "lagcorr",
+    "fg_logcurv",
+    "fg_lowrank",
+    "eor_lagshape",
+    "eor_iso",
     "eor_mean",
     "eor_hf",
 )
@@ -966,6 +970,219 @@ def polynomial_prior_loss(
     return torch.mean((residual / sigma_tensor) ** 2)
 
 
+def foreground_logcurvature_loss(
+    fg: Tensor,
+    *,
+    freq_axis: int,
+    sigma: Union[Tensor, float],
+    mean: Union[Tensor, float] = 0.0,
+    eps: float = 1e-6,
+    softplus_scale: float = 1.0,
+) -> Tensor:
+    """
+    Penalize curvature (2nd finite difference) of log-spectrum log(T_fg) along frequency.
+
+    This is a lightweight proxy for "power-law + small curvature" without fitting
+    a full polynomial per pixel.
+    """
+    if fg.shape[freq_axis] < 3:
+        return torch.zeros((), dtype=fg.dtype, device=fg.device)
+
+    eps_val = float(eps)
+    if not math.isfinite(eps_val) or eps_val <= 0.0:
+        raise ValueError("fg_logcurv_eps must be a finite positive value.")
+    scale = float(softplus_scale)
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ValueError("fg_logcurv_softplus_scale must be a finite positive value.")
+
+    # Differentiable positivity map; avoids log() issues when the FG estimate dips negative.
+    fg_pos = F.softplus(fg / scale) * scale + eps_val
+    log_fg = torch.log(fg_pos)
+    diff2 = torch.diff(log_fg, n=2, dim=freq_axis)
+
+    mean_t = prepare_broadcastable_prior(mean, diff2, "fg_logcurv_mean")
+    sigma_t = prepare_broadcastable_prior(sigma, diff2, "fg_logcurv_sigma")
+    if mean_t is None:
+        mean_t = torch.zeros(1, device=diff2.device, dtype=diff2.dtype)
+    if sigma_t is None:
+        sigma_t = torch.ones(1, device=diff2.device, dtype=diff2.dtype)
+    sigma_t = clamp_eps(sigma_t, eps=EPS_LOSS)
+    return torch.mean(((diff2 - mean_t) / sigma_t) ** 2)
+
+
+def foreground_lowrank_tail_loss(
+    fg: Tensor,
+    *,
+    freq_axis: int,
+    rank: int,
+    num_samples: int,
+    spatial_pool: int = 1,
+    normalize: str = "none",
+    tail_max: float = 0.0,
+    sigma: float = 1.0,
+    sample_mode: str = "stride",
+    rng: Optional[torch.Generator] = None,
+    eps: float = 1e-12,
+) -> Tensor:
+    """
+    Encourage FG spectra to lie in a low-dimensional subspace (low-rank across frequency).
+
+    We form X in R^{F x Npix} and penalize the fraction of covariance eigen-energy
+    outside the top-`rank` modes, estimated from a subset of pixels.
+    """
+    rank_int = int(rank)
+    if rank_int < 1:
+        raise ValueError("fg_lowrank_rank must be >= 1.")
+    num_samples_int = int(num_samples)
+    if num_samples_int < 1:
+        raise ValueError("fg_lowrank_num_samples must be >= 1.")
+    pool_int = int(spatial_pool)
+    if pool_int < 1:
+        raise ValueError("fg_lowrank_spatial_pool must be >= 1.")
+    tail_max_val = float(tail_max)
+    if not math.isfinite(tail_max_val) or tail_max_val < 0.0:
+        raise ValueError("fg_lowrank_tail_max must be a finite non-negative value.")
+    sigma_val = float(sigma)
+    if not math.isfinite(sigma_val) or sigma_val <= 0.0:
+        raise ValueError("fg_lowrank_sigma must be a finite positive value.")
+    eps_val = float(eps)
+    if not math.isfinite(eps_val) or eps_val <= 0.0:
+        raise ValueError("fg_lowrank_eps must be a finite positive value.")
+
+    norm_mode = str(normalize).strip().lower()
+    if norm_mode not in {"none", "rms"}:
+        raise ValueError("fg_lowrank_normalize must be one of: none, rms.")
+    sample_mode_norm = str(sample_mode).strip().lower()
+    if sample_mode_norm not in {"stride", "random"}:
+        raise ValueError("fg_lowrank_sample_mode must be one of: stride, random.")
+
+    fg_use = fg
+    if pool_int > 1:
+        fg_use = _maybe_avg_pool_spatial(fg_use, freq_axis=freq_axis, pool=pool_int)
+
+    moved = fg_use.movedim(freq_axis, 0)
+    num_freqs = int(moved.shape[0])
+    if rank_int >= num_freqs:
+        return torch.zeros((), dtype=fg.dtype, device=fg.device)
+    X = moved.reshape(num_freqs, -1)  # (F, Npix)
+
+    if norm_mode == "rms":
+        denom = torch.sqrt(torch.mean(X**2, dim=0))
+        denom = torch.clamp(denom, min=eps_val)
+        X = X / denom
+
+    n_pix = int(X.shape[1])
+    s = min(num_samples_int, n_pix)
+    if s <= 1:
+        return torch.zeros((), dtype=fg.dtype, device=fg.device)
+
+    if sample_mode_norm == "random":
+        if rng is None:
+            rng = torch.Generator(device="cpu")
+        idx = torch.randperm(n_pix, device="cpu", generator=rng)[:s].to(device=X.device, dtype=torch.int64)
+    else:
+        step = max(n_pix // s, 1)
+        idx = torch.arange(0, step * s, step, device=X.device, dtype=torch.int64)[:s]
+    Xs = X.index_select(1, idx)  # (F, s)
+
+    safe_dtype = torch.float32 if fg.dtype not in (torch.float32, torch.float64) else fg.dtype
+    Xs = Xs.to(dtype=safe_dtype)
+    cov = (Xs @ Xs.T) / float(s)  # (F, F)
+    eigs = torch.linalg.eigvalsh(cov)  # ascending
+    eigs = torch.clamp(eigs, min=0.0)
+    total = torch.sum(eigs)
+    tail = torch.sum(eigs[:-rank_int])
+    tail_ratio = tail / torch.clamp(total, min=eps_val)
+    resid = torch.clamp(tail_ratio - tail_max_val, min=0.0)
+    z = resid / sigma_val
+    return z * z
+
+
+def eor_transverse_isotropy_loss(
+    eor: Tensor,
+    *,
+    freq_axis: int,
+    spatial_pool: int = 8,
+    num_freq_samples: int = 8,
+    num_radial_bins: int = 20,
+    min_count: int = 32,
+    use_log_power: bool = False,
+    eps: float = 1e-12,
+) -> Tensor:
+    """
+    Weak transverse isotropy regularizer for the EoR component.
+
+    For a small subset of frequency slices, compute 2D FFT power and penalize
+    azimuthal variance within radial |k_perp| bins.
+    """
+    pool_int = int(spatial_pool)
+    if pool_int < 1:
+        raise ValueError("eor_iso_spatial_pool must be >= 1.")
+    nfreq = int(eor.shape[freq_axis])
+    nsel = int(num_freq_samples)
+    if nsel < 1:
+        raise ValueError("eor_iso_num_freq_samples must be >= 1.")
+    nbins = int(num_radial_bins)
+    if nbins < 1:
+        raise ValueError("eor_iso_num_radial_bins must be >= 1.")
+    min_count_int = int(min_count)
+    if min_count_int < 1:
+        raise ValueError("eor_iso_min_count must be >= 1.")
+    eps_val = float(eps)
+    if not math.isfinite(eps_val) or eps_val <= 0.0:
+        raise ValueError("eor_iso_eps must be a finite positive value.")
+
+    eor_use = eor
+    if pool_int > 1:
+        eor_use = _maybe_avg_pool_spatial(eor_use, freq_axis=freq_axis, pool=pool_int)
+
+    moved = eor_use.movedim(freq_axis, 0)
+    nf, nx, ny = moved.shape
+    if nx < 4 or ny < 4:
+        return torch.zeros((), dtype=eor.dtype, device=eor.device)
+
+    # Evenly-spaced deterministic sampling of frequency slices.
+    if nsel >= nf:
+        freq_idx = torch.arange(nf, device=eor.device, dtype=torch.int64)
+    else:
+        freq_idx = torch.linspace(0, nf - 1, steps=nsel, device=eor.device).round().to(torch.int64)
+        freq_idx = torch.unique_consecutive(freq_idx)
+        if int(freq_idx.numel()) == 0:
+            freq_idx = torch.arange(1, device=eor.device, dtype=torch.int64)
+
+    # Build k_perp radius grid once.
+    kx = torch.fft.fftfreq(nx, d=1.0, device=eor.device, dtype=moved.dtype)
+    ky = torch.fft.fftfreq(ny, d=1.0, device=eor.device, dtype=moved.dtype)
+    kx_g, ky_g = torch.meshgrid(kx, ky, indexing="ij")
+    r = torch.sqrt(kx_g**2 + ky_g**2).reshape(-1)
+    r_max = torch.max(r)
+    edges = torch.linspace(0.0, float(r_max.item()), steps=nbins + 1, device=eor.device, dtype=moved.dtype)
+
+    loss_terms: List[Tensor] = []
+    for i in freq_idx.tolist():
+        sl = moved[int(i)]
+        sl = sl - sl.mean()
+        Fk = torch.fft.fftn(sl, dim=(-2, -1))
+        power = (Fk.real**2 + Fk.imag**2).reshape(-1)
+        if use_log_power:
+            power = torch.log1p(torch.clamp(power, min=0.0))
+
+        bin_idx = torch.bucketize(r, edges, right=False) - 1
+        for b in range(nbins):
+            m = bin_idx == b
+            if int(m.sum().item()) < min_count_int:
+                continue
+            vals = power[m]
+            mean = vals.mean()
+            var = vals.var(unbiased=False)
+            cv2 = var / (mean * mean + eps_val)
+            loss_terms.append(cv2)
+
+    if not loss_terms:
+        return torch.zeros((), dtype=eor.dtype, device=eor.device)
+    return torch.mean(torch.stack(loss_terms))
+
+
 def loss_function(
     fg: Tensor,
     eor: Tensor,
@@ -979,6 +1196,10 @@ def loss_function(
     delta: Optional[float] = None,
     fft_weight: float = 1.0,
     poly_weight: float = 1.0,
+    fg_logcurv_weight: float = 1.0,
+    fg_lowrank_weight: float = 1.0,
+    eor_lagshape_weight: float = 1.0,
+    eor_iso_weight: float = 1.0,
     eor_mean_weight: float = 1.0,
     eor_hf_weight: float = 1.0,
     lagcorr_weight: float = 1.0,
@@ -1043,6 +1264,27 @@ def loss_function(
     poly_degree: int = 3,
     poly_sigma: Optional[Union[Tensor, float]] = None,
     poly_residual: Optional[Tensor] = None,
+    fg_logcurv_mean: Optional[Union[Tensor, float]] = None,
+    fg_logcurv_sigma: Optional[Union[Tensor, float]] = None,
+    fg_logcurv_eps: float = 1e-6,
+    fg_logcurv_softplus_scale: float = 1.0,
+    fg_lowrank_rank: int = 3,
+    fg_lowrank_num_samples: int = 4096,
+    fg_lowrank_spatial_pool: int = 8,
+    fg_lowrank_normalize: str = "none",
+    fg_lowrank_tail_max: float = 0.0,
+    fg_lowrank_sigma: float = 1.0,
+    fg_lowrank_sample_mode: str = "stride",
+    fg_lowrank_rng: Optional[torch.Generator] = None,
+    fg_lowrank_eps: float = 1e-12,
+    eor_lagshape_feature: str = "raw",
+    eor_lagshape_spatial_pool: int = 1,
+    eor_iso_spatial_pool: int = 8,
+    eor_iso_num_freq_samples: int = 8,
+    eor_iso_num_radial_bins: int = 20,
+    eor_iso_min_count: int = 32,
+    eor_iso_use_log_power: bool = False,
+    eor_iso_eps: float = 1e-12,
     lagcorr_pair_sampling: str = "head",
     lagcorr_rng: Optional[torch.Generator] = None,
     lagcorr_prior_weights: Optional[Union[Tensor, Sequence[float], float]] = None,
@@ -1211,20 +1453,101 @@ def loss_function(
         eor_component_scale = max(0.0, min(1.0, eor_component_scale))
         effective_eor_component = eor_component * eor_component_scale
         total_component = fg_component + effective_eor_component
-        if fg_component <= 0.0 and eor_component <= 0.0:
-            raise ValueError(
-                "At least one lagcorr component weight must be > 0 "
-                "(lagcorr_fg_component_weight or lagcorr_eor_component_weight)."
-            )
         gap_weight = float(lagcorr_gap_weight)
         if not math.isfinite(gap_weight) or gap_weight < 0.0:
             raise ValueError("lagcorr_gap_weight must be a finite non-negative value.")
         effective_gap_weight = gap_weight * eor_component_scale
+        if fg_component <= 0.0 and eor_component <= 0.0 and gap_weight <= 0.0:
+            raise ValueError(
+                "At least one lagcorr component or gap weight must be > 0 "
+                "(lagcorr_fg_component_weight, lagcorr_eor_component_weight, or lagcorr_gap_weight)."
+            )
 
-        if total_component <= 0.0:
+        if total_component <= 0.0 and effective_gap_weight <= 0.0:
             # Allow scheduling: when lagcorr_eor_scale=0 and lagcorr_fg_component_weight=0,
             # treat lagcorr as temporarily inactive (no penalty) rather than erroring.
             pass
+        elif total_component <= 0.0 and effective_gap_weight > 0.0:
+            # Gap-only mode (A4): allow relative lag separation without absolute FG/EoR priors.
+            lag_weight_vec = _resolve_lag_vector_prior(
+                lagcorr_prior_weights,
+                lag_count=int(lagcorr_lags.numel()),
+                device=fg.device,
+                dtype=fg.dtype,
+                name="lagcorr_prior_weights",
+                default=1.0,
+            )
+            assert lag_weight_vec is not None
+            if torch.any(~torch.isfinite(lag_weight_vec)):
+                raise ValueError("lagcorr_prior_weights must be finite.")
+            if torch.any(lag_weight_vec < 0.0):
+                raise ValueError("lagcorr_prior_weights must be non-negative.")
+            if float(torch.sum(lag_weight_vec).item()) <= 0.0:
+                raise ValueError("lagcorr_prior_weights must contain at least one positive entry.")
+
+            fg_for_lag = _apply_lagcorr_feature(fg, freq_axis=freq_axis, feature=lagcorr_feature)
+            eor_for_lag = _apply_lagcorr_feature(eor, freq_axis=freq_axis, feature=lagcorr_feature)
+            pool_int = int(lagcorr_spatial_pool)
+            if pool_int < 1:
+                raise ValueError("lagcorr_spatial_pool must be >= 1.")
+            if pool_int > 1:
+                fg_for_lag = _maybe_avg_pool_spatial(
+                    fg_for_lag, freq_axis=freq_axis, pool=pool_int
+                )
+                eor_for_lag = _maybe_avg_pool_spatial(
+                    eor_for_lag, freq_axis=freq_axis, pool=pool_int
+                )
+
+            fg_corr_lag_mean, _ = _frequency_lag_correlation_profile(
+                fg_for_lag,
+                freq_axis=freq_axis,
+                lag_channels=lagcorr_lags,
+                max_pairs=lagcorr_max_pairs,
+                pair_sampling=lagcorr_pair_sampling,
+                rng=lagcorr_rng,
+                rms_min=float(lagcorr_rms_min),
+            )
+            eor_corr_lag_mean, _ = _frequency_lag_correlation_profile(
+                eor_for_lag,
+                freq_axis=freq_axis,
+                lag_channels=lagcorr_lags,
+                max_pairs=lagcorr_max_pairs,
+                pair_sampling=lagcorr_pair_sampling,
+                rng=lagcorr_rng,
+                rms_min=float(lagcorr_rms_min),
+            )
+
+            gap_mode = str(lagcorr_gap_mode).strip().lower()
+            if gap_mode not in {"hinge", "squared"}:
+                raise ValueError("lagcorr_gap_mode must be 'hinge' or 'squared'.")
+            lag_count = int(fg_corr_lag_mean.numel())
+            margin_vec = _resolve_lag_vector_prior(
+                lagcorr_gap_margin,
+                lag_count=lag_count,
+                device=fg_corr_lag_mean.device,
+                dtype=fg_corr_lag_mean.dtype,
+                name="lagcorr_gap_margin",
+                default=0.0,
+            )
+            sigma_vec = _resolve_lag_vector_prior(
+                lagcorr_gap_sigma,
+                lag_count=lag_count,
+                device=fg_corr_lag_mean.device,
+                dtype=fg_corr_lag_mean.dtype,
+                name="lagcorr_gap_sigma",
+                default=1.0,
+            )
+            assert margin_vec is not None and sigma_vec is not None
+            sigma_vec = clamp_eps(sigma_vec, eps=EPS_LOSS)
+            lag_gap = fg_corr_lag_mean - eor_corr_lag_mean
+            if gap_mode == "hinge":
+                residual = torch.clamp(margin_vec - lag_gap, min=0.0)
+            else:
+                residual = lag_gap - margin_vec
+            gap_z2 = (residual / sigma_vec) ** 2
+            w_mask = lag_weight_vec > 0.0
+            lagcorr_gap_loss = _masked_weighted_mean(gap_z2, lag_weight_vec, w_mask)
+            lagcorr_loss = effective_gap_weight * lagcorr_gap_loss
         else:
             lag_weight_vec = _resolve_lag_vector_prior(
                 lagcorr_prior_weights,
@@ -1340,9 +1663,25 @@ def loss_function(
             if gap_mode not in {"hinge", "squared"}:
                 raise ValueError("lagcorr_gap_mode must be 'hinge' or 'squared'.")
             if effective_gap_weight > 0.0:
-                if fg_corr_lag_mean is None or eor_corr_lag_mean is None:
-                    raise ValueError(
-                        "lagcorr_gap_weight > 0 requires both FG and EoR lagcorr components enabled."
+                if fg_corr_lag_mean is None:
+                    fg_corr_lag_mean, _ = _frequency_lag_correlation_profile(
+                        fg_for_lag,
+                        freq_axis=freq_axis,
+                        lag_channels=lagcorr_lags,
+                        max_pairs=lagcorr_max_pairs,
+                        pair_sampling=lagcorr_pair_sampling,
+                        rng=lagcorr_rng,
+                        rms_min=float(lagcorr_rms_min),
+                    )
+                if eor_corr_lag_mean is None:
+                    eor_corr_lag_mean, _ = _frequency_lag_correlation_profile(
+                        eor_for_lag,
+                        freq_axis=freq_axis,
+                        lag_channels=lagcorr_lags,
+                        max_pairs=lagcorr_max_pairs,
+                        pair_sampling=lagcorr_pair_sampling,
+                        rng=lagcorr_rng,
+                        rms_min=float(lagcorr_rms_min),
                     )
                 lag_count = int(fg_corr_lag_mean.numel())
                 margin_vec = _resolve_lag_vector_prior(
@@ -1368,7 +1707,9 @@ def loss_function(
                     residual = torch.clamp(margin_vec - lag_gap, min=0.0)
                 else:
                     residual = lag_gap - margin_vec
-                lagcorr_gap_loss = torch.mean((residual / sigma_vec) ** 2)
+                gap_z2 = (residual / sigma_vec) ** 2
+                w_mask = lag_weight_vec > 0.0
+                lagcorr_gap_loss = _masked_weighted_mean(gap_z2, lag_weight_vec, w_mask)
                 lagcorr_loss = lagcorr_loss + effective_gap_weight * lagcorr_gap_loss
 
     fft_loss = torch.zeros_like(data_loss)
@@ -1421,12 +1762,126 @@ def loss_function(
         sigma_tensor = clamp_eps(sigma_tensor, eps=EPS_LOSS)
         poly_loss = torch.mean((poly_residual / sigma_tensor) ** 2)
 
+    fg_logcurv_loss = torch.zeros_like(data_loss)
+    if "fg_logcurv" in active_term_set and extra_scale > 0.0:
+        fg_logcurv_loss = foreground_logcurvature_loss(
+            fg,
+            freq_axis=freq_axis,
+            sigma=1.0 if fg_logcurv_sigma is None else fg_logcurv_sigma,
+            mean=0.0 if fg_logcurv_mean is None else fg_logcurv_mean,
+            eps=float(fg_logcurv_eps),
+            softplus_scale=float(fg_logcurv_softplus_scale),
+        )
+
+    fg_lowrank_loss = torch.zeros_like(data_loss)
+    if "fg_lowrank" in active_term_set and extra_scale > 0.0:
+        fg_lowrank_loss = foreground_lowrank_tail_loss(
+            fg,
+            freq_axis=freq_axis,
+            rank=int(fg_lowrank_rank),
+            num_samples=int(fg_lowrank_num_samples),
+            spatial_pool=int(fg_lowrank_spatial_pool),
+            normalize=str(fg_lowrank_normalize),
+            tail_max=float(fg_lowrank_tail_max),
+            sigma=float(fg_lowrank_sigma),
+            sample_mode=str(fg_lowrank_sample_mode),
+            rng=fg_lowrank_rng,
+            eps=float(fg_lowrank_eps),
+        )
+
+    eor_lagshape_loss = torch.zeros_like(data_loss)
+    if "eor_lagshape" in active_term_set and extra_scale > 0.0:
+        if lagcorr_lags is None:
+            raise ValueError("lagcorr_lags must be provided when enabling 'eor_lagshape'.")
+        feat_norm = str(eor_lagshape_feature).strip().lower()
+        if feat_norm not in {"raw", "diff1"}:
+            raise ValueError("eor_lagshape_feature must be 'raw' or 'diff1'.")
+        eor_for_shape = _apply_lagcorr_feature(eor, freq_axis=freq_axis, feature=feat_norm)
+        pool_int = int(eor_lagshape_spatial_pool)
+        if pool_int < 1:
+            raise ValueError("eor_lagshape_spatial_pool must be >= 1.")
+        if pool_int > 1:
+            eor_for_shape = _maybe_avg_pool_spatial(eor_for_shape, freq_axis=freq_axis, pool=pool_int)
+
+        lag_weight_vec = _resolve_lag_vector_prior(
+            lagcorr_prior_weights,
+            lag_count=int(lagcorr_lags.numel()),
+            device=eor.device,
+            dtype=eor.dtype,
+            name="lagcorr_prior_weights",
+            default=1.0,
+        )
+        assert lag_weight_vec is not None
+
+        lag_means, _ = _frequency_lag_correlation_profile(
+            eor_for_shape,
+            freq_axis=freq_axis,
+            lag_channels=lagcorr_lags,
+            max_pairs=lagcorr_max_pairs,
+            pair_sampling=lagcorr_pair_sampling,
+            rng=lagcorr_rng,
+            rms_min=float(lagcorr_rms_min),
+        )
+
+        # A3: weak tail bound + rebound suppression on |rho(lag)| (no hard template).
+        lags = lagcorr_lags.to(device=lag_means.device, dtype=torch.int64).reshape(-1)
+        order = torch.argsort(lags)
+        lags = lags.index_select(0, order)
+        rho = lag_means.reshape(-1).index_select(0, order)
+        w_sorted = lag_weight_vec.to(device=rho.device, dtype=rho.dtype).reshape(-1).index_select(0, order)
+        abs_rho = torch.abs(rho)
+
+        tail_eps_val = float(lagcorr_eor_tail_eps)
+        if not math.isfinite(tail_eps_val) or tail_eps_val < 0.0:
+            raise ValueError("lagcorr_eor_tail_eps must be finite and >= 0.")
+        far_min = int(lagcorr_eor_far_min_lag) if lagcorr_eor_far_min_lag is not None else int(torch.max(lags).item())
+        far_mask = lags >= far_min
+        tail_resid = torch.clamp(abs_rho - tail_eps_val, min=0.0) ** 2
+        loss_tail = _masked_weighted_mean(tail_resid, w_sorted, far_mask)
+
+        rebound_eps_act_val = float(lagcorr_eor_rebound_eps_act)
+        rebound_delta_up_val = float(lagcorr_eor_rebound_delta_up)
+        if not math.isfinite(rebound_eps_act_val) or rebound_eps_act_val < 0.0:
+            raise ValueError("lagcorr_eor_rebound_eps_act must be finite and >= 0.")
+        if not math.isfinite(rebound_delta_up_val) or rebound_delta_up_val < 0.0:
+            raise ValueError("lagcorr_eor_rebound_delta_up must be finite and >= 0.")
+        loss_rebound = torch.zeros_like(loss_tail)
+        if rho.numel() >= 2:
+            mid_max = (
+                int(lagcorr_eor_mid_max_lag)
+                if lagcorr_eor_mid_max_lag is not None
+                else int(torch.max(lags).item())
+            )
+            rebound_mask = (lags[1:] <= mid_max) & (abs_rho[:-1] > rebound_eps_act_val)
+            rebound_resid = torch.clamp(abs_rho[1:] - abs_rho[:-1] - rebound_delta_up_val, min=0.0) ** 2
+            w_pairs = w_sorted[:-1] if w_sorted is not None else None
+            loss_rebound = _masked_weighted_mean(rebound_resid, w_pairs, rebound_mask)
+
+        eor_lagshape_loss = float(lagcorr_eor_w_tail) * loss_tail + float(lagcorr_eor_w_rebound) * loss_rebound
+
+    eor_iso_loss = torch.zeros_like(data_loss)
+    if "eor_iso" in active_term_set and extra_scale > 0.0:
+        eor_iso_loss = eor_transverse_isotropy_loss(
+            eor,
+            freq_axis=freq_axis,
+            spatial_pool=int(eor_iso_spatial_pool),
+            num_freq_samples=int(eor_iso_num_freq_samples),
+            num_radial_bins=int(eor_iso_num_radial_bins),
+            min_count=int(eor_iso_min_count),
+            use_log_power=bool(eor_iso_use_log_power),
+            eps=float(eor_iso_eps),
+        )
+
     corr_term = corr_weight * corr_loss if "corr" in active_term_set else torch.zeros_like(data_loss)
     extra_terms = (
         corr_term
         + lagcorr_weight * lagcorr_loss
         + fft_weight * fft_loss
         + poly_weight * poly_loss
+        + float(fg_logcurv_weight) * fg_logcurv_loss
+        + float(fg_lowrank_weight) * fg_lowrank_loss
+        + float(eor_lagshape_weight) * eor_lagshape_loss
+        + float(eor_iso_weight) * eor_iso_loss
         + float(eor_mean_weight) * eor_mean_loss
         + float(eor_hf_weight) * eor_hf_loss
     )
@@ -1440,6 +1895,10 @@ def loss_function(
         "lagcorr": lagcorr_loss,
         "lagcorr_gap": lagcorr_gap_loss,
         "fft_highfreq": fft_loss,
+        "fg_logcurv": fg_logcurv_loss,
+        "fg_lowrank": fg_lowrank_loss,
+        "eor_lagshape": eor_lagshape_loss,
+        "eor_iso": eor_iso_loss,
         "eor_mean": eor_mean_loss,
         "eor_hf": eor_hf_loss,
         "poly": poly_loss,
