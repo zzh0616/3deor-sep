@@ -154,6 +154,31 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         help="Prior std for FG/EoR correlation coefficient (default 0.2).",
     )
     parser.add_argument(
+        "--corr-abs-threshold",
+        dest="corr_prior_abs_threshold",
+        type=float,
+        help="Dead-zone threshold for |corr-mean| (values below are not penalized; default 0.0).",
+    )
+    parser.add_argument(
+        "--corr-reduce",
+        dest="corr_reduce",
+        choices=["mean", "topk", "logsumexp"],
+        type=str,
+        help="Reduction over per-frequency corr penalties (default mean).",
+    )
+    parser.add_argument(
+        "--corr-topk",
+        dest="corr_topk",
+        type=int,
+        help="Top-k used when corr_reduce=topk.",
+    )
+    parser.add_argument(
+        "--corr-lse-alpha",
+        dest="corr_lse_alpha",
+        type=float,
+        help="Temperature used when corr_reduce=logsumexp (log-mean-exp).",
+    )
+    parser.add_argument(
         "--corr-weight",
         dest="corr_weight",
         type=float,
@@ -221,6 +246,67 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         dest="lagcorr_max_pairs",
         type=int,
         help="Maximum number of frequency-slice pairs used per lag (lagcorr mode).",
+    )
+    parser.add_argument(
+        "--lagcorr-spatial-pool",
+        dest="lagcorr_spatial_pool",
+        type=int,
+        help="Spatial avg-pooling factor (>=1) for lagcorr statistics (default 1).",
+    )
+    parser.add_argument(
+        "--lagcorr-eor-mode",
+        dest="lagcorr_eor_mode",
+        choices=["gaussian", "envelope_v2", "envelope"],
+        type=str,
+        help="EoR lagcorr prior mode (default gaussian).",
+    )
+    parser.add_argument(
+        "--lagcorr-eor-near-max-lag",
+        dest="lagcorr_eor_near_max_lag",
+        type=int,
+        help="Max lag (in channels) considered 'near' for envelope_v2 priors.",
+    )
+    parser.add_argument(
+        "--lagcorr-eor-mid-max-lag",
+        dest="lagcorr_eor_mid_max_lag",
+        type=int,
+        help="Max lag (in channels) considered 'mid' for rebound suppression (envelope_v2).",
+    )
+    parser.add_argument(
+        "--lagcorr-eor-far-min-lag",
+        dest="lagcorr_eor_far_min_lag",
+        type=int,
+        help="Min lag (in channels) considered 'far' for tail envelope (envelope_v2).",
+    )
+    parser.add_argument(
+        "--lagcorr-eor-tail-eps",
+        dest="lagcorr_eor_tail_eps",
+        type=float,
+        help="Allowed |rho(lag)| envelope at far lags before penalty (envelope_v2).",
+    )
+    parser.add_argument(
+        "--lagcorr-eor-neg-delta",
+        dest="lagcorr_eor_neg_delta",
+        type=float,
+        help="Allowance for negative rho at near lags (envelope_v2).",
+    )
+    parser.add_argument(
+        "--lagcorr-eor-near-rho-min",
+        dest="lagcorr_eor_near_rho_min",
+        type=float,
+        help="Weak floor on mean near-lag rho (envelope_v2; 0 disables).",
+    )
+    parser.add_argument(
+        "--lagcorr-eor-rebound-eps-act",
+        dest="lagcorr_eor_rebound_eps_act",
+        type=float,
+        help="Activation threshold on |rho| for rebound suppression (envelope_v2).",
+    )
+    parser.add_argument(
+        "--lagcorr-eor-rebound-delta-up",
+        dest="lagcorr_eor_rebound_delta_up",
+        type=float,
+        help="Allowed increase in |rho| per step before rebound penalty (envelope_v2).",
     )
     parser.add_argument(
         "--lagcorr-pair-sampling",
@@ -474,6 +560,10 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "mae_to_sigma_factor",
         "corr_prior_mean",
         "corr_prior_sigma",
+        "corr_prior_abs_threshold",
+        "corr_reduce",
+        "corr_topk",
+        "corr_lse_alpha",
         "corr_weight",
         "lagcorr_weight",
         "lagcorr_fg_component_weight",
@@ -487,6 +577,16 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "lagcorr_pair_sampling",
         "lagcorr_random_seed",
         "lagcorr_max_pairs",
+        "lagcorr_spatial_pool",
+        "lagcorr_eor_mode",
+        "lagcorr_eor_near_max_lag",
+        "lagcorr_eor_mid_max_lag",
+        "lagcorr_eor_far_min_lag",
+        "lagcorr_eor_tail_eps",
+        "lagcorr_eor_neg_delta",
+        "lagcorr_eor_near_rho_min",
+        "lagcorr_eor_rebound_eps_act",
+        "lagcorr_eor_rebound_delta_up",
         "lagcorr_lag_weights",
         "lagcorr_eor_start_iter",
         "lagcorr_eor_ramp_iters",

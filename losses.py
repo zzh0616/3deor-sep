@@ -152,6 +152,10 @@ def frequency_slice_correlation_penalty(
     freq_axis: int,
     prior_mean: Tensor,
     prior_sigma: Tensor,
+    prior_abs_threshold: Optional[Tensor] = None,
+    reduce: str = "mean",
+    topk: Optional[int] = None,
+    lse_alpha: float = 10.0,
 ) -> Tuple[Tensor, Tensor]:
     """
     Penalize FG/EoR correlation per frequency slice (no cross-frequency coupling).
@@ -159,7 +163,13 @@ def frequency_slice_correlation_penalty(
     The correlation is computed independently at each frequency slice over spatial
     pixels, then averaged:
 
-        loss = mean_f [ ((corr_f - mu_f) / sigma_f)^2 ].
+        residual_f = max(|corr_f - mu_f| - t_f, 0) / sigma_f
+        loss = Reduce_f [ residual_f^2 ].
+
+    Reduce options:
+      - mean: average over frequency slices
+      - topk: mean over largest-k residuals (requires topk>0)
+      - logsumexp: smooth max via log-mean-exp (zero when all residuals are zero)
     """
     if fg.shape != eor.shape:
         raise ValueError(
@@ -182,13 +192,43 @@ def frequency_slice_correlation_penalty(
 
     mean_tensor = prepare_broadcastable_prior(prior_mean, corr_per_freq, "corr_prior_mean")
     sigma_tensor = prepare_broadcastable_prior(prior_sigma, corr_per_freq, "corr_prior_sigma")
+    threshold_tensor = prepare_broadcastable_prior(
+        prior_abs_threshold, corr_per_freq, "corr_prior_abs_threshold"
+    )
     if mean_tensor is None:
         mean_tensor = torch.zeros(1, device=corr_per_freq.device, dtype=corr_per_freq.dtype)
     if sigma_tensor is None:
         sigma_tensor = torch.ones(1, device=corr_per_freq.device, dtype=corr_per_freq.dtype)
+    if threshold_tensor is None:
+        threshold_tensor = torch.zeros(1, device=corr_per_freq.device, dtype=corr_per_freq.dtype)
+    if torch.any(~torch.isfinite(threshold_tensor)):
+        raise ValueError("corr_prior_abs_threshold must be finite.")
+    if torch.any(threshold_tensor < 0.0):
+        raise ValueError("corr_prior_abs_threshold must be non-negative.")
     sigma_tensor = clamp_eps(sigma_tensor, eps=EPS_LOSS)
 
-    penalty = torch.mean(((corr_per_freq - mean_tensor) / sigma_tensor) ** 2)
+    residual = torch.clamp(torch.abs(corr_per_freq - mean_tensor) - threshold_tensor, min=0.0)
+    penalty_per_freq = (residual / sigma_tensor) ** 2
+    reduce_norm = str(reduce).strip().lower()
+    if reduce_norm == "mean":
+        penalty = torch.mean(penalty_per_freq)
+    elif reduce_norm == "topk":
+        if topk is None:
+            raise ValueError("corr reduce=topk requires topk to be set.")
+        k = int(topk)
+        if k <= 0:
+            raise ValueError("corr reduce=topk requires topk>0.")
+        k = min(k, int(penalty_per_freq.numel()))
+        penalty = torch.mean(torch.topk(penalty_per_freq, k=k, largest=True).values)
+    elif reduce_norm == "logsumexp":
+        alpha = float(lse_alpha)
+        if not math.isfinite(alpha) or alpha <= 0.0:
+            raise ValueError("corr reduce=logsumexp requires lse_alpha to be a finite positive value.")
+        n = int(penalty_per_freq.numel())
+        # log-mean-exp (LME) keeps penalty=0 when all residuals are 0.
+        penalty = (torch.logsumexp(alpha * penalty_per_freq, dim=0) - math.log(max(1, n))) / alpha
+    else:
+        raise ValueError("corr reduce must be one of: mean, topk, logsumexp.")
     corr_mean = torch.mean(corr_per_freq)
     return penalty, corr_mean
 
@@ -438,6 +478,242 @@ def _frequency_lag_correlation_stats(
     return loss_val, torch.stack(lag_means), torch.stack(lag_vars)
 
 
+def _maybe_avg_pool_spatial(cube: Tensor, *, freq_axis: int, pool: int) -> Tensor:
+    """
+    Optionally downsample spatial dimensions using avg-pooling (per frequency slice).
+
+    This is used to make correlation-style losses cheaper and less noisy. Pooling is
+    applied only on the two spatial axes (the axes other than freq_axis).
+    """
+    if pool is None:
+        return cube
+    pool_int = int(pool)
+    if pool_int <= 1:
+        return cube
+    if cube.ndim != 3:
+        raise ValueError(f"Expected 3D cube for spatial pooling, got shape {tuple(cube.shape)}")
+    # Move frequency to dim0 => (F, X, Y), then pool as (F, 1, X, Y).
+    moved = cube.movedim(freq_axis, 0)
+    if moved.shape[1] < pool_int or moved.shape[2] < pool_int:
+        raise ValueError(
+            f"lagcorr_spatial_pool={pool_int} is larger than spatial dims {tuple(moved.shape[1:])}."
+        )
+    pooled = F.avg_pool2d(moved.unsqueeze(1), kernel_size=pool_int, stride=pool_int).squeeze(1)
+    return pooled.movedim(0, freq_axis)
+
+
+def _frequency_lag_correlation_profile(
+    cube: Tensor,
+    *,
+    freq_axis: int,
+    lag_channels: Tensor,
+    max_pairs: Optional[int] = None,
+    pair_sampling: str = "head",
+    rng: Optional[torch.Generator] = None,
+    eps: float = 1e-8,
+) -> Tuple[Tensor, Tensor]:
+    """
+    Compute per-lag mean/variance of autocorrelation across frequency.
+
+    For each lag `L`, compute Pearson correlations between slice pairs `(i, i+L)`
+    across spatial pixels (flattened), optionally limited to `max_pairs`.
+
+    Returns:
+      - lag_means: Tensor of shape (K,) matching lag_channels ordering
+      - lag_vars:  Tensor of shape (K,) matching lag_channels ordering
+    """
+    if cube.ndim != 3:
+        raise ValueError(f"Expected a 3D cube, got shape {tuple(cube.shape)}")
+
+    lag_tensor = lag_channels
+    if not torch.is_tensor(lag_tensor):
+        lag_tensor = torch.as_tensor(lag_tensor, device=cube.device)
+    lag_tensor = lag_tensor.to(device=cube.device)
+    if lag_tensor.ndim == 0:
+        lag_tensor = lag_tensor.view(1)
+    lag_tensor = lag_tensor.to(dtype=torch.int64).reshape(-1)
+
+    if max_pairs is not None:
+        if not isinstance(max_pairs, int):
+            raise TypeError("max_pairs must be an int or None.")
+        if max_pairs <= 0:
+            max_pairs = None
+    pair_sampling_norm = str(pair_sampling).strip().lower()
+    if pair_sampling_norm not in {"head", "random"}:
+        raise ValueError("pair_sampling must be 'head' or 'random'.")
+
+    moved = cube.movedim(freq_axis, 0)
+    num_freqs = moved.shape[0]
+    flat = moved.reshape(num_freqs, -1)
+    centered = flat - flat.mean(dim=1, keepdim=True)
+    norms = torch.norm(centered, dim=1)
+    norms = torch.clamp(norms, min=eps)
+
+    lag_means: List[Tensor] = []
+    lag_vars: List[Tensor] = []
+    for lag in lag_tensor.tolist():
+        if lag < 1:
+            raise ValueError(f"lag_channels entries must be >= 1, got {lag}.")
+        if lag >= num_freqs:
+            raise ValueError(f"lag_channels entry {lag} exceeds num_freqs={num_freqs}.")
+
+        num_total = num_freqs - lag
+        num_pairs = min(num_total, max_pairs) if max_pairs is not None else num_total
+        if num_pairs <= 0:
+            raise ValueError("No valid lagcorr slice pairs available for correlation profile.")
+
+        if max_pairs is None or num_pairs == num_total or pair_sampling_norm == "head":
+            pair_idx = torch.arange(num_pairs, device=cube.device)
+        else:
+            pair_idx = torch.randperm(num_total, device="cpu", generator=rng)[:num_pairs]
+            pair_idx = pair_idx.to(device=cube.device, dtype=torch.int64)
+        pair_j = pair_idx + lag
+
+        a = centered.index_select(0, pair_idx)
+        b = centered.index_select(0, pair_j)
+        dot = torch.sum(a * b, dim=1)
+        denom = norms.index_select(0, pair_idx) * norms.index_select(0, pair_j)
+        denom = torch.clamp(denom, min=eps)
+        corr = dot / denom
+
+        lag_means.append(torch.mean(corr))
+        lag_vars.append(torch.var(corr, unbiased=False))
+
+    return torch.stack(lag_means), torch.stack(lag_vars)
+
+
+def _masked_weighted_mean(values: Tensor, weights: Optional[Tensor], mask: Tensor) -> Tensor:
+    device = values.device
+    dtype = values.dtype
+    if mask.numel() == 0:
+        return torch.zeros((), device=device, dtype=dtype)
+    mask = mask.to(device=device)
+    if bool(torch.sum(mask.to(dtype=torch.int64)).item()) == 0:
+        return torch.zeros((), device=device, dtype=dtype)
+    v = values[mask]
+    if weights is None:
+        return torch.mean(v)
+    w = weights.to(device=device, dtype=dtype)[mask]
+    w = torch.clamp(w, min=0.0)
+    w_sum = torch.sum(w)
+    if bool(torch.isfinite(w_sum)) and float(w_sum.item()) > 0.0:
+        return torch.sum(v * w) / w_sum
+    return torch.mean(v)
+
+
+def eor_lagcorr_envelope_loss(
+    *,
+    lag_channels: Tensor,
+    lag_means: Tensor,
+    lag_weights: Optional[Tensor] = None,
+    near_max_lag: Optional[int] = None,
+    mid_max_lag: Optional[int] = None,
+    far_min_lag: Optional[int] = None,
+    tail_eps: float = 0.05,
+    neg_delta: float = 0.0,
+    near_rho_min: float = 0.0,
+    rebound_eps_act: float = 0.05,
+    rebound_delta_up: float = 0.02,
+    w_tail: float = 1.0,
+    w_neg: float = 1.0,
+    w_near: float = 1.0,
+    w_rebound: float = 1.0,
+) -> Tensor:
+    """
+    Weak, physically-motivated envelope priors for EoR lag autocorrelation profile.
+
+    This loss depends only on the estimated EoR cube statistics (no truth/templates).
+
+    Terms (all hinge-style):
+      - tail:     penalize large-|rho| at far lags (decorrelation at large separation)
+      - neg:      penalize clearly negative rho at near lags
+      - near:     enforce a weak positive floor on mean near-lag correlation
+      - rebound:  discourage large increases in |rho(l)| with increasing lag (ringing)
+    """
+    if lag_channels.ndim != 1 or lag_means.ndim != 1:
+        raise ValueError("lag_channels and lag_means must be 1D tensors.")
+    if int(lag_channels.numel()) != int(lag_means.numel()):
+        raise ValueError("lag_channels and lag_means must have the same length.")
+
+    tail_eps_val = float(tail_eps)
+    neg_delta_val = float(neg_delta)
+    near_rho_min_val = float(near_rho_min)
+    rebound_eps_act_val = float(rebound_eps_act)
+    rebound_delta_up_val = float(rebound_delta_up)
+    for name, v in [
+        ("tail_eps", tail_eps_val),
+        ("neg_delta", neg_delta_val),
+        ("near_rho_min", near_rho_min_val),
+        ("rebound_eps_act", rebound_eps_act_val),
+        ("rebound_delta_up", rebound_delta_up_val),
+    ]:
+        if not math.isfinite(v):
+            raise ValueError(f"lagcorr envelope param {name} must be finite.")
+    if tail_eps_val < 0.0:
+        raise ValueError("tail_eps must be >= 0.")
+    if rebound_eps_act_val < 0.0:
+        raise ValueError("rebound_eps_act must be >= 0.")
+    if rebound_delta_up_val < 0.0:
+        raise ValueError("rebound_delta_up must be >= 0.")
+
+    weights = lag_weights
+    if weights is not None:
+        weights = weights.reshape(-1)
+        if int(weights.numel()) == 1:
+            weights = weights.repeat(int(lag_channels.numel()))
+        if int(weights.numel()) != int(lag_channels.numel()):
+            raise ValueError("lag_weights must be scalar or match lag_channels length.")
+
+    lags = lag_channels.to(dtype=torch.int64).reshape(-1)
+    order = torch.argsort(lags)
+    lags = lags.index_select(0, order)
+    rho = lag_means.reshape(-1).index_select(0, order)
+    w_sorted = weights.index_select(0, order) if weights is not None else None
+
+    max_lag = int(torch.max(lags).item()) if lags.numel() > 0 else 1
+    near_max = int(near_max_lag) if near_max_lag is not None else min(10, max_lag)
+    mid_max = int(mid_max_lag) if mid_max_lag is not None else min(30, max_lag)
+    far_min = int(far_min_lag) if far_min_lag is not None else max_lag
+
+    if near_max < 1 or mid_max < 1 or far_min < 1:
+        raise ValueError("near_max_lag/mid_max_lag/far_min_lag must be >= 1 when provided.")
+
+    abs_rho = torch.abs(rho)
+
+    # (1) Far-lag envelope towards 0: allow small sign-changing fluctuations around 0.
+    far_mask = lags >= far_min
+    far_resid = torch.clamp(abs_rho - tail_eps_val, min=0.0) ** 2
+    loss_tail = _masked_weighted_mean(far_resid, w_sorted, far_mask)
+
+    # (2) Near-lag negative suppression (weak): don't force strict non-negativity everywhere.
+    near_mask = lags <= near_max
+    neg_resid = torch.clamp(-rho - neg_delta_val, min=0.0) ** 2
+    loss_neg = _masked_weighted_mean(neg_resid, w_sorted, near_mask)
+
+    # (3) Near-lag floor: prevent "instant decorrelation" at small separation.
+    loss_near = torch.zeros_like(loss_tail)
+    if near_rho_min_val > 0.0:
+        rho_near = _masked_weighted_mean(rho, w_sorted, near_mask)
+        loss_near = torch.clamp(torch.as_tensor(near_rho_min_val, device=rho.device, dtype=rho.dtype) - rho_near, min=0.0) ** 2
+
+    # (4) Rebound suppression on |rho| up to mid_max: penalize large increases with lag.
+    loss_rebound = torch.zeros_like(loss_tail)
+    if rho.numel() >= 2:
+        rebound_mask = (lags[1:] <= mid_max) & (abs_rho[:-1] > rebound_eps_act_val)
+        rebound_resid = torch.clamp(abs_rho[1:] - abs_rho[:-1] - rebound_delta_up_val, min=0.0) ** 2
+        w_pairs = w_sorted[:-1] if w_sorted is not None else None
+        loss_rebound = _masked_weighted_mean(rebound_resid, w_pairs, rebound_mask)
+
+    # Weighted combination (weights are scalar multipliers inside the EoR lagcorr component).
+    total = (
+        float(w_tail) * loss_tail
+        + float(w_neg) * loss_neg
+        + float(w_near) * loss_near
+        + float(w_rebound) * loss_rebound
+    )
+    return total
+
+
 def _resolve_lag_vector_prior(
     value: Optional[Union[Tensor, Sequence[float], float]],
     *,
@@ -588,6 +864,10 @@ def loss_function(
     fg_smooth_sigma: Optional[Tensor],
     corr_prior_mean: Tensor,
     corr_prior_sigma: Tensor,
+    corr_prior_abs_threshold: Optional[Tensor] = None,
+    corr_reduce: str = "mean",
+    corr_topk: Optional[int] = None,
+    corr_lse_alpha: float = 10.0,
     fg_smooth_mode: str = "diff3_l2",
     fg_smooth_huber_delta: float = 1.0,
     loss_mode: str = "base",
@@ -600,6 +880,20 @@ def loss_function(
     eor_lagcorr_mean: Optional[Tensor] = None,
     eor_lagcorr_sigma: Optional[Tensor] = None,
     lagcorr_max_pairs: Optional[int] = None,
+    lagcorr_spatial_pool: int = 1,
+    lagcorr_eor_mode: str = "gaussian",
+    lagcorr_eor_near_max_lag: Optional[int] = None,
+    lagcorr_eor_mid_max_lag: Optional[int] = None,
+    lagcorr_eor_far_min_lag: Optional[int] = None,
+    lagcorr_eor_tail_eps: float = 0.05,
+    lagcorr_eor_neg_delta: float = 0.0,
+    lagcorr_eor_near_rho_min: float = 0.0,
+    lagcorr_eor_rebound_eps_act: float = 0.05,
+    lagcorr_eor_rebound_delta_up: float = 0.02,
+    lagcorr_eor_w_tail: float = 1.0,
+    lagcorr_eor_w_neg: float = 1.0,
+    lagcorr_eor_w_near: float = 1.0,
+    lagcorr_eor_w_rebound: float = 1.0,
     fft_prior_mean: Optional[Tensor] = None,
     fft_prior_sigma: Optional[Tensor] = None,
     fft_percent: float = 0.7,
@@ -662,6 +956,10 @@ def loss_function(
         freq_axis=freq_axis,
         prior_mean=corr_prior_mean,
         prior_sigma=corr_prior_sigma,
+        prior_abs_threshold=corr_prior_abs_threshold,
+        reduce=corr_reduce,
+        topk=corr_topk,
+        lse_alpha=corr_lse_alpha,
     )
 
     extra_scale = float(extra_loss_scale)
@@ -716,6 +1014,12 @@ def loss_function(
 
         fg_for_lag = _apply_lagcorr_feature(fg, freq_axis=freq_axis, feature=lagcorr_feature)
         eor_for_lag = _apply_lagcorr_feature(eor, freq_axis=freq_axis, feature=lagcorr_feature)
+        pool_int = int(lagcorr_spatial_pool)
+        if pool_int < 1:
+            raise ValueError("lagcorr_spatial_pool must be >= 1.")
+        if pool_int > 1:
+            fg_for_lag = _maybe_avg_pool_spatial(fg_for_lag, freq_axis=freq_axis, pool=pool_int)
+            eor_for_lag = _maybe_avg_pool_spatial(eor_for_lag, freq_axis=freq_axis, pool=pool_int)
 
         fg_loss = torch.zeros_like(data_loss)
         fg_corr_lag_mean: Optional[Tensor] = None
@@ -740,22 +1044,55 @@ def loss_function(
         eor_loss = torch.zeros_like(data_loss)
         eor_corr_lag_mean: Optional[Tensor] = None
         if eor_component > 0.0 and (effective_eor_component > 0.0 or effective_gap_weight > 0.0):
-            if eor_lagcorr_mean is None or eor_lagcorr_sigma is None:
-                raise ValueError(
-                    "eor_lagcorr_mean/eor_lagcorr_sigma must be provided when "
-                    "lagcorr_eor_component_weight > 0."
+            mode_norm = str(lagcorr_eor_mode).strip().lower()
+            if mode_norm in {"gaussian", "normal"}:
+                if eor_lagcorr_mean is None or eor_lagcorr_sigma is None:
+                    raise ValueError(
+                        "eor_lagcorr_mean/eor_lagcorr_sigma must be provided when "
+                        "lagcorr_eor_component_weight > 0 and lagcorr_eor_mode='gaussian'."
+                    )
+                eor_loss, eor_corr_lag_mean, _ = _frequency_lag_correlation_stats(
+                    eor_for_lag,
+                    freq_axis=freq_axis,
+                    lag_channels=lagcorr_lags,
+                    prior_mean=eor_lagcorr_mean,
+                    prior_sigma=eor_lagcorr_sigma,
+                    lag_weights=lag_weight_vec,
+                    max_pairs=lagcorr_max_pairs,
+                    pair_sampling=lagcorr_pair_sampling,
+                    rng=lagcorr_rng,
                 )
-            eor_loss, eor_corr_lag_mean, _ = _frequency_lag_correlation_stats(
-                eor_for_lag,
-                freq_axis=freq_axis,
-                lag_channels=lagcorr_lags,
-                prior_mean=eor_lagcorr_mean,
-                prior_sigma=eor_lagcorr_sigma,
-                lag_weights=lag_weight_vec,
-                max_pairs=lagcorr_max_pairs,
-                pair_sampling=lagcorr_pair_sampling,
-                rng=lagcorr_rng,
-            )
+            elif mode_norm in {"envelope", "envelope_v2"}:
+                lag_means, _ = _frequency_lag_correlation_profile(
+                    eor_for_lag,
+                    freq_axis=freq_axis,
+                    lag_channels=lagcorr_lags,
+                    max_pairs=lagcorr_max_pairs,
+                    pair_sampling=lagcorr_pair_sampling,
+                    rng=lagcorr_rng,
+                )
+                eor_corr_lag_mean = lag_means
+                eor_loss = eor_lagcorr_envelope_loss(
+                    lag_channels=lagcorr_lags,
+                    lag_means=lag_means,
+                    lag_weights=lag_weight_vec,
+                    near_max_lag=lagcorr_eor_near_max_lag,
+                    mid_max_lag=lagcorr_eor_mid_max_lag,
+                    far_min_lag=lagcorr_eor_far_min_lag,
+                    tail_eps=lagcorr_eor_tail_eps,
+                    neg_delta=lagcorr_eor_neg_delta,
+                    near_rho_min=lagcorr_eor_near_rho_min,
+                    rebound_eps_act=lagcorr_eor_rebound_eps_act,
+                    rebound_delta_up=lagcorr_eor_rebound_delta_up,
+                    w_tail=lagcorr_eor_w_tail,
+                    w_neg=lagcorr_eor_w_neg,
+                    w_near=lagcorr_eor_w_near,
+                    w_rebound=lagcorr_eor_w_rebound,
+                )
+            else:
+                raise ValueError(
+                    "lagcorr_eor_mode must be one of: gaussian, envelope_v2 (alias: envelope)."
+                )
 
         lagcorr_loss = (fg_component * fg_loss + effective_eor_component * eor_loss) / total_component
 

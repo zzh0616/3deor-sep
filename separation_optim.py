@@ -199,6 +199,10 @@ class OptimizationConfig:
     mae_to_sigma_factor: float = 1.4826
     corr_prior_mean: float = 0.0
     corr_prior_sigma: float = DEFAULT_CORR_SIGMA
+    corr_prior_abs_threshold: float = 0.0
+    corr_reduce: str = "mean"
+    corr_topk: Optional[int] = None
+    corr_lse_alpha: float = 10.0
     corr_weight: float = 1.0
     lagcorr_weight: float = 1.0
     lagcorr_fg_component_weight: float = 0.5
@@ -219,6 +223,20 @@ class OptimizationConfig:
     eor_lagcorr_mean: List[float] = field(default_factory=lambda: [0.0] * 9)
     eor_lagcorr_sigma: List[float] = field(default_factory=lambda: [1.0] * 9)
     lagcorr_max_pairs: Optional[int] = None
+    lagcorr_spatial_pool: int = 1
+    lagcorr_eor_mode: str = "gaussian"
+    lagcorr_eor_near_max_lag: Optional[int] = None
+    lagcorr_eor_mid_max_lag: Optional[int] = None
+    lagcorr_eor_far_min_lag: Optional[int] = None
+    lagcorr_eor_tail_eps: float = 0.05
+    lagcorr_eor_neg_delta: float = 0.0
+    lagcorr_eor_near_rho_min: float = 0.0
+    lagcorr_eor_rebound_eps_act: float = 0.05
+    lagcorr_eor_rebound_delta_up: float = 0.02
+    lagcorr_eor_w_tail: float = 1.0
+    lagcorr_eor_w_neg: float = 1.0
+    lagcorr_eor_w_near: float = 1.0
+    lagcorr_eor_w_rebound: float = 1.0
     lagcorr_lag_weights: Union[float, List[float]] = 1.0
     lagcorr_eor_start_iter: Optional[int] = None
     lagcorr_eor_ramp_iters: int = 0
@@ -419,6 +437,10 @@ def optimize_components(
     fg_smooth_huber_delta: float = 1.0,
     corr_prior_mean: Union[Tensor, float] = 0.0,
     corr_prior_sigma: Union[Tensor, float] = DEFAULT_CORR_SIGMA,
+    corr_prior_abs_threshold: Union[Tensor, float] = 0.0,
+    corr_reduce: str = "mean",
+    corr_topk: Optional[int] = None,
+    corr_lse_alpha: float = 10.0,
     corr_weight: float = 1.0,
     lagcorr_weight: float = 1.0,
     lagcorr_fg_component_weight: float = 0.5,
@@ -437,6 +459,20 @@ def optimize_components(
     eor_lagcorr_mean: Optional[Sequence[float]] = None,
     eor_lagcorr_sigma: Optional[Sequence[float]] = None,
     lagcorr_max_pairs: Optional[int] = None,
+    lagcorr_spatial_pool: int = 1,
+    lagcorr_eor_mode: str = "gaussian",
+    lagcorr_eor_near_max_lag: Optional[int] = None,
+    lagcorr_eor_mid_max_lag: Optional[int] = None,
+    lagcorr_eor_far_min_lag: Optional[int] = None,
+    lagcorr_eor_tail_eps: float = 0.05,
+    lagcorr_eor_neg_delta: float = 0.0,
+    lagcorr_eor_near_rho_min: float = 0.0,
+    lagcorr_eor_rebound_eps_act: float = 0.05,
+    lagcorr_eor_rebound_delta_up: float = 0.02,
+    lagcorr_eor_w_tail: float = 1.0,
+    lagcorr_eor_w_neg: float = 1.0,
+    lagcorr_eor_w_near: float = 1.0,
+    lagcorr_eor_w_rebound: float = 1.0,
     lagcorr_lag_weights: Union[Tensor, Sequence[float], float] = 1.0,
     lagcorr_eor_start_iter: Optional[int] = None,
     lagcorr_eor_ramp_iters: int = 0,
@@ -486,6 +522,11 @@ def optimize_components(
         fg_smooth_huber_delta: Delta for Huber smoothness mode (diff2_huber).
         corr_prior_mean: Prior mean for FG/EoR correlation coefficient.
         corr_prior_sigma: Prior std for FG/EoR correlation coefficient.
+        corr_prior_abs_threshold: Dead-zone threshold for |corr-mean|.
+            Values with |corr-mean| below this threshold are not penalized.
+        corr_reduce: Reduction mode over per-frequency penalties ("mean", "topk", "logsumexp").
+        corr_topk: Top-k used when corr_reduce="topk".
+        corr_lse_alpha: Temperature used when corr_reduce="logsumexp" (log-mean-exp).
         corr_weight: Weight for the per-frequency FG/EoR correlation consistency loss.
         lagcorr_weight: Weight for the frequency-lag autocorrelation loss (lagcorr mode).
         lagcorr_fg_component_weight: Relative weight of the FG lagcorr component.
@@ -495,6 +536,8 @@ def optimize_components(
         lagcorr_gap_sigma: Scale for lag-gap residual normalization, scalar or per-lag.
         lagcorr_gap_mode: Gap residual mode ("hinge" or "squared").
         lagcorr_feature: Feature transform used by lagcorr ("raw" or "diff1").
+        lagcorr_spatial_pool: Optional spatial avg-pooling factor (>=1) for lagcorr statistics.
+        lagcorr_eor_mode: EoR lagcorr prior mode ("gaussian" or "envelope_v2").
         lagcorr_lag_weights: Relative per-lag weights for lagcorr residual aggregation.
             Scalar for uniform weighting or vector matching lagcorr_intervals.
         lagcorr_eor_start_iter: Optional start iteration for EoR lagcorr sub-term.
@@ -580,6 +623,11 @@ def optimize_components(
         corr_sigma_tensor = torch.full(
             (1,), DEFAULT_CORR_SIGMA, device=y_tensor.device, dtype=y_tensor.dtype
         )
+    corr_threshold_tensor = ensure_tensor_on(
+        corr_prior_abs_threshold, y_tensor.device, y_tensor.dtype
+    )
+    if corr_threshold_tensor is None:
+        corr_threshold_tensor = torch.zeros(1, device=y_tensor.device, dtype=y_tensor.dtype)
 
     lagcorr_lags_tensor: Optional[Tensor] = None
     fg_lagcorr_mean_tensor: Optional[Tensor] = None
@@ -610,8 +658,16 @@ def optimize_components(
                 "lagcorr_gap_weight > 0 requires both lagcorr_fg_component_weight and "
                 "lagcorr_eor_component_weight to be > 0."
             )
+    lagcorr_eor_mode_norm = str(lagcorr_eor_mode).strip().lower()
     lagcorr_rng: Optional[torch.Generator] = None
     if "lagcorr" in active_term_set:
+        if lagcorr_eor_mode_norm not in {"gaussian", "normal", "envelope", "envelope_v2"}:
+            raise ValueError(
+                "lagcorr_eor_mode must be one of: gaussian, envelope_v2 (alias: envelope)."
+            )
+        pool_int = int(lagcorr_spatial_pool)
+        if pool_int < 1:
+            raise ValueError("lagcorr_spatial_pool must be >= 1.")
         unit_norm = lagcorr_unit.strip().lower()
         if unit_norm not in {"mhz", "chan"}:
             raise ValueError("lagcorr_unit must be 'mhz' or 'chan'.")
@@ -661,7 +717,7 @@ def optimize_components(
         if lagcorr_fg_component_weight_val > 0.0:
             fg_lagcorr_mean_tensor = _require_vec("fg_lagcorr_mean", fg_lagcorr_mean)
             fg_lagcorr_sigma_tensor = _require_vec("fg_lagcorr_sigma", fg_lagcorr_sigma)
-        if lagcorr_eor_component_weight_val > 0.0:
+        if lagcorr_eor_component_weight_val > 0.0 and lagcorr_eor_mode_norm in {"gaussian", "normal"}:
             eor_lagcorr_mean_tensor = _require_vec("eor_lagcorr_mean", eor_lagcorr_mean)
             eor_lagcorr_sigma_tensor = _require_vec("eor_lagcorr_sigma", eor_lagcorr_sigma)
         lagcorr_weight_tensor = ensure_tensor_on(lagcorr_lag_weights, y_tensor.device, y_tensor.dtype)
@@ -863,6 +919,10 @@ def optimize_components(
             fg_smooth_huber_delta=fg_smooth_huber_delta_val,
             corr_prior_mean=corr_mean_tensor,
             corr_prior_sigma=corr_sigma_tensor,
+            corr_prior_abs_threshold=corr_threshold_tensor,
+            corr_reduce=corr_reduce,
+            corr_topk=corr_topk,
+            corr_lse_alpha=corr_lse_alpha,
             loss_mode=loss_mode,
             active_extra_terms=active_extra_terms,
             lagcorr_unit=lagcorr_unit,
@@ -873,6 +933,20 @@ def optimize_components(
             eor_lagcorr_mean=eor_lagcorr_mean_tensor,
             eor_lagcorr_sigma=eor_lagcorr_sigma_tensor,
             lagcorr_max_pairs=lagcorr_max_pairs,
+            lagcorr_spatial_pool=lagcorr_spatial_pool,
+            lagcorr_eor_mode=lagcorr_eor_mode_norm,
+            lagcorr_eor_near_max_lag=lagcorr_eor_near_max_lag,
+            lagcorr_eor_mid_max_lag=lagcorr_eor_mid_max_lag,
+            lagcorr_eor_far_min_lag=lagcorr_eor_far_min_lag,
+            lagcorr_eor_tail_eps=lagcorr_eor_tail_eps,
+            lagcorr_eor_neg_delta=lagcorr_eor_neg_delta,
+            lagcorr_eor_near_rho_min=lagcorr_eor_near_rho_min,
+            lagcorr_eor_rebound_eps_act=lagcorr_eor_rebound_eps_act,
+            lagcorr_eor_rebound_delta_up=lagcorr_eor_rebound_delta_up,
+            lagcorr_eor_w_tail=lagcorr_eor_w_tail,
+            lagcorr_eor_w_neg=lagcorr_eor_w_neg,
+            lagcorr_eor_w_near=lagcorr_eor_w_near,
+            lagcorr_eor_w_rebound=lagcorr_eor_w_rebound,
             lagcorr_pair_sampling=lagcorr_pair_sampling_norm,
             lagcorr_rng=lagcorr_rng,
             lagcorr_prior_weights=lagcorr_weight_tensor,
@@ -2559,6 +2633,10 @@ def _optimize_from_fits(
         fg_smooth_huber_delta=config.fg_smooth_huber_delta,
         corr_prior_mean=config.corr_prior_mean,
         corr_prior_sigma=config.corr_prior_sigma,
+        corr_prior_abs_threshold=config.corr_prior_abs_threshold,
+        corr_reduce=config.corr_reduce,
+        corr_topk=config.corr_topk,
+        corr_lse_alpha=config.corr_lse_alpha,
         corr_weight=config.corr_weight,
         lagcorr_weight=config.lagcorr_weight,
         lagcorr_fg_component_weight=config.lagcorr_fg_component_weight,
@@ -2577,6 +2655,20 @@ def _optimize_from_fits(
         eor_lagcorr_mean=config.eor_lagcorr_mean,
         eor_lagcorr_sigma=config.eor_lagcorr_sigma,
         lagcorr_max_pairs=config.lagcorr_max_pairs,
+        lagcorr_spatial_pool=config.lagcorr_spatial_pool,
+        lagcorr_eor_mode=config.lagcorr_eor_mode,
+        lagcorr_eor_near_max_lag=config.lagcorr_eor_near_max_lag,
+        lagcorr_eor_mid_max_lag=config.lagcorr_eor_mid_max_lag,
+        lagcorr_eor_far_min_lag=config.lagcorr_eor_far_min_lag,
+        lagcorr_eor_tail_eps=config.lagcorr_eor_tail_eps,
+        lagcorr_eor_neg_delta=config.lagcorr_eor_neg_delta,
+        lagcorr_eor_near_rho_min=config.lagcorr_eor_near_rho_min,
+        lagcorr_eor_rebound_eps_act=config.lagcorr_eor_rebound_eps_act,
+        lagcorr_eor_rebound_delta_up=config.lagcorr_eor_rebound_delta_up,
+        lagcorr_eor_w_tail=config.lagcorr_eor_w_tail,
+        lagcorr_eor_w_neg=config.lagcorr_eor_w_neg,
+        lagcorr_eor_w_near=config.lagcorr_eor_w_near,
+        lagcorr_eor_w_rebound=config.lagcorr_eor_w_rebound,
         lagcorr_lag_weights=config.lagcorr_lag_weights,
         lagcorr_eor_start_iter=config.lagcorr_eor_start_iter,
         lagcorr_eor_ramp_iters=config.lagcorr_eor_ramp_iters,
@@ -2737,6 +2829,10 @@ def run_synthetic_demo(config: OptimizationConfig) -> None:
         fg_smooth_huber_delta=config.fg_smooth_huber_delta,
         corr_prior_mean=config.corr_prior_mean,
         corr_prior_sigma=config.corr_prior_sigma,
+        corr_prior_abs_threshold=config.corr_prior_abs_threshold,
+        corr_reduce=config.corr_reduce,
+        corr_topk=config.corr_topk,
+        corr_lse_alpha=config.corr_lse_alpha,
         corr_weight=config.corr_weight,
         lagcorr_weight=config.lagcorr_weight,
         lagcorr_fg_component_weight=config.lagcorr_fg_component_weight,
@@ -2755,6 +2851,20 @@ def run_synthetic_demo(config: OptimizationConfig) -> None:
         eor_lagcorr_mean=config.eor_lagcorr_mean,
         eor_lagcorr_sigma=config.eor_lagcorr_sigma,
         lagcorr_max_pairs=config.lagcorr_max_pairs,
+        lagcorr_spatial_pool=config.lagcorr_spatial_pool,
+        lagcorr_eor_mode=config.lagcorr_eor_mode,
+        lagcorr_eor_near_max_lag=config.lagcorr_eor_near_max_lag,
+        lagcorr_eor_mid_max_lag=config.lagcorr_eor_mid_max_lag,
+        lagcorr_eor_far_min_lag=config.lagcorr_eor_far_min_lag,
+        lagcorr_eor_tail_eps=config.lagcorr_eor_tail_eps,
+        lagcorr_eor_neg_delta=config.lagcorr_eor_neg_delta,
+        lagcorr_eor_near_rho_min=config.lagcorr_eor_near_rho_min,
+        lagcorr_eor_rebound_eps_act=config.lagcorr_eor_rebound_eps_act,
+        lagcorr_eor_rebound_delta_up=config.lagcorr_eor_rebound_delta_up,
+        lagcorr_eor_w_tail=config.lagcorr_eor_w_tail,
+        lagcorr_eor_w_neg=config.lagcorr_eor_w_neg,
+        lagcorr_eor_w_near=config.lagcorr_eor_w_near,
+        lagcorr_eor_w_rebound=config.lagcorr_eor_w_rebound,
         lagcorr_lag_weights=config.lagcorr_lag_weights,
         lagcorr_eor_start_iter=config.lagcorr_eor_start_iter,
         lagcorr_eor_ramp_iters=config.lagcorr_eor_ramp_iters,

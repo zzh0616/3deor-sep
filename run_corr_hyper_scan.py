@@ -41,6 +41,10 @@ class CandidateSpec:
     name: str
     corr_weight: float
     corr_prior_sigma: float
+    corr_prior_abs_threshold: float
+    corr_reduce: str
+    corr_topk: Optional[int]
+    corr_lse_alpha: float
     extra_loss_start_iter: int
     extra_loss_ramp_iters: int
 
@@ -48,6 +52,10 @@ class CandidateSpec:
         return (
             round(float(self.corr_weight), 12),
             round(float(self.corr_prior_sigma), 12),
+            round(float(self.corr_prior_abs_threshold), 12),
+            str(self.corr_reduce),
+            None if self.corr_topk is None else int(self.corr_topk),
+            round(float(self.corr_lse_alpha), 12),
             int(self.extra_loss_start_iter),
             int(self.extra_loss_ramp_iters),
         )
@@ -130,7 +138,32 @@ def parse_args() -> argparse.Namespace:
         default="0.05,0.1,0.2",
         help="Comma-separated corr prior sigma values.",
     )
+    parser.add_argument(
+        "--corr-abs-threshold-list",
+        type=str,
+        default="0.0",
+        help="Comma-separated corr abs-threshold values for dead-zone hinge (default 0.0).",
+    )
     parser.add_argument("--corr-prior-mean", type=float, default=0.0, help="Corr prior mean (fixed for this scan).")
+    parser.add_argument(
+        "--corr-reduce",
+        type=str,
+        default="mean",
+        choices=["mean", "topk", "logsumexp"],
+        help="Reduction over per-frequency corr penalties (default mean).",
+    )
+    parser.add_argument(
+        "--corr-topk",
+        type=int,
+        default=8,
+        help="Top-k used when corr_reduce=topk (default 8).",
+    )
+    parser.add_argument(
+        "--corr-lse-alpha",
+        type=float,
+        default=10.0,
+        help="Temperature used when corr_reduce=logsumexp (default 10.0).",
+    )
     parser.add_argument("--extra-loss-start-iter", type=int, default=500, help="Iteration where corr term activates.")
     parser.add_argument("--extra-loss-ramp-iters", type=int, default=0, help="Ramp iterations for corr term.")
     parser.add_argument("--include-control", action="store_true", help="Include a base-only control run (corr disabled).")
@@ -210,6 +243,10 @@ def generate_candidates(
     *,
     corr_weight_list: Sequence[float],
     corr_sigma_list: Sequence[float],
+    corr_abs_threshold_list: Sequence[float],
+    corr_reduce: str,
+    corr_topk: Optional[int],
+    corr_lse_alpha: float,
     extra_loss_start_iter: int,
     extra_loss_ramp_iters: int,
     include_control: bool,
@@ -221,22 +258,37 @@ def generate_candidates(
                 name="control_base",
                 corr_weight=0.0,
                 corr_prior_sigma=float(corr_sigma_list[0]) if corr_sigma_list else 0.1,
+                corr_prior_abs_threshold=float(corr_abs_threshold_list[0])
+                if corr_abs_threshold_list
+                else 0.0,
+                corr_reduce=str(corr_reduce),
+                corr_topk=int(corr_topk) if corr_topk is not None else None,
+                corr_lse_alpha=float(corr_lse_alpha),
                 extra_loss_start_iter=int(extra_loss_start_iter),
                 extra_loss_ramp_iters=int(extra_loss_ramp_iters),
             )
         )
     for w in corr_weight_list:
         for s in corr_sigma_list:
-            name = f"corr_w{_fmt_float_token(float(w))}_s{_fmt_float_token(float(s))}"
-            out.append(
-                CandidateSpec(
-                    name=name,
-                    corr_weight=float(w),
-                    corr_prior_sigma=float(s),
-                    extra_loss_start_iter=int(extra_loss_start_iter),
-                    extra_loss_ramp_iters=int(extra_loss_ramp_iters),
+            for t in corr_abs_threshold_list:
+                name = (
+                    f"corr_w{_fmt_float_token(float(w))}"
+                    f"_s{_fmt_float_token(float(s))}"
+                    f"_t{_fmt_float_token(float(t))}"
                 )
-            )
+                out.append(
+                    CandidateSpec(
+                        name=name,
+                        corr_weight=float(w),
+                        corr_prior_sigma=float(s),
+                        corr_prior_abs_threshold=float(t),
+                        corr_reduce=str(corr_reduce),
+                        corr_topk=int(corr_topk) if corr_topk is not None else None,
+                        corr_lse_alpha=float(corr_lse_alpha),
+                        extra_loss_start_iter=int(extra_loss_start_iter),
+                        extra_loss_ramp_iters=int(extra_loss_ramp_iters),
+                    )
+                )
     # Deduplicate by key while preserving order.
     dedup: List[CandidateSpec] = []
     seen = set()
@@ -453,6 +505,10 @@ def _build_config(
             "fg_smooth_huber_delta": float(args.base_fg_smooth_huber_delta),
             "corr_prior_mean": float(args.corr_prior_mean),
             "corr_prior_sigma": float(candidate.corr_prior_sigma),
+            "corr_prior_abs_threshold": float(candidate.corr_prior_abs_threshold),
+            "corr_reduce": str(candidate.corr_reduce),
+            "corr_topk": candidate.corr_topk,
+            "corr_lse_alpha": float(candidate.corr_lse_alpha),
         },
         "evaluation": {
             "true_eor_cube": str(dataset.eor_true_cube),
@@ -517,6 +573,10 @@ def _run_job_result_only(
         "runtime_sec": float(runtime),
         "corr_weight": float(candidate.corr_weight),
         "corr_prior_sigma": float(candidate.corr_prior_sigma),
+        "corr_prior_abs_threshold": float(candidate.corr_prior_abs_threshold),
+        "corr_reduce": str(candidate.corr_reduce),
+        "corr_topk": "" if candidate.corr_topk is None else int(candidate.corr_topk),
+        "corr_lse_alpha": float(candidate.corr_lse_alpha),
         "extra_loss_start_iter": int(candidate.extra_loss_start_iter),
         "extra_loss_ramp_iters": int(candidate.extra_loss_ramp_iters),
         "beta": float(args.base_beta),
@@ -612,11 +672,16 @@ def main() -> int:
 
     corr_weight_list = _parse_float_list(args.corr_weight_list)
     corr_sigma_list = _parse_float_list(args.corr_sigma_list)
+    corr_abs_threshold_list = _parse_float_list(args.corr_abs_threshold_list)
     if not corr_weight_list or not corr_sigma_list:
         raise ValueError("corr-weight-list and corr-sigma-list must be non-empty.")
     candidates = generate_candidates(
         corr_weight_list=corr_weight_list,
         corr_sigma_list=corr_sigma_list,
+        corr_abs_threshold_list=corr_abs_threshold_list,
+        corr_reduce=str(args.corr_reduce),
+        corr_topk=int(args.corr_topk) if args.corr_topk is not None else None,
+        corr_lse_alpha=float(args.corr_lse_alpha),
         extra_loss_start_iter=int(args.extra_loss_start_iter),
         extra_loss_ramp_iters=int(args.extra_loss_ramp_iters),
         include_control=bool(args.include_control),

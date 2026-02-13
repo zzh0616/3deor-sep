@@ -107,7 +107,22 @@ def parse_args() -> argparse.Namespace:
     # Corr grid.
     parser.add_argument("--corr-weight-list", type=str, default="0.05,0.1,0.2,0.5,1.0,2.0")
     parser.add_argument("--corr-sigma-list", type=str, default="0.05,0.1,0.2")
+    parser.add_argument("--corr-abs-threshold-list", type=str, default="0.0")
     parser.add_argument("--corr-prior-mean", type=float, default=0.0)
+    parser.add_argument(
+        "--corr-reduce",
+        type=str,
+        default="mean",
+        choices=["mean", "topk", "logsumexp"],
+        help="Reduction over per-frequency corr penalties (default mean).",
+    )
+    parser.add_argument("--corr-topk", type=int, default=8, help="Top-k used when corr_reduce=topk.")
+    parser.add_argument(
+        "--corr-lse-alpha",
+        type=float,
+        default=10.0,
+        help="Temperature used when corr_reduce=logsumexp (log-mean-exp).",
+    )
     parser.add_argument("--extra-loss-start-iter", type=int, default=500)
     parser.add_argument("--extra-loss-ramp-iters", type=int, default=0)
     parser.add_argument("--include-control", action="store_true")
@@ -256,6 +271,10 @@ def main() -> int:
     candidates = generate_candidates(
         corr_weight_list=_parse_float_list(args.corr_weight_list),
         corr_sigma_list=_parse_float_list(args.corr_sigma_list),
+        corr_abs_threshold_list=_parse_float_list(args.corr_abs_threshold_list),
+        corr_reduce=str(args.corr_reduce),
+        corr_topk=int(args.corr_topk) if args.corr_topk is not None else None,
+        corr_lse_alpha=float(args.corr_lse_alpha),
         extra_loss_start_iter=int(args.extra_loss_start_iter),
         extra_loss_ramp_iters=int(args.extra_loss_ramp_iters),
         include_control=bool(args.include_control),
@@ -374,8 +393,16 @@ def main() -> int:
             _shq(str(args.corr_weight_list)),
             "--corr-sigma-list",
             _shq(str(args.corr_sigma_list)),
+            "--corr-abs-threshold-list",
+            _shq(str(args.corr_abs_threshold_list)),
             "--corr-prior-mean",
             _shq(str(args.corr_prior_mean)),
+            "--corr-reduce",
+            _shq(str(args.corr_reduce)),
+            "--corr-topk",
+            _shq(str(args.corr_topk)),
+            "--corr-lse-alpha",
+            _shq(str(args.corr_lse_alpha)),
             "--extra-loss-start-iter",
             _shq(str(args.extra_loss_start_iter)),
             "--extra-loss-ramp-iters",
@@ -438,4 +465,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
