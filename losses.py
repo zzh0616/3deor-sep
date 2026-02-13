@@ -987,149 +987,159 @@ def loss_function(
         eor_component_scale = max(0.0, min(1.0, eor_component_scale))
         effective_eor_component = eor_component * eor_component_scale
         total_component = fg_component + effective_eor_component
-        if total_component <= 0.0:
+        if fg_component <= 0.0 and eor_component <= 0.0:
             raise ValueError(
                 "At least one lagcorr component weight must be > 0 "
-                "(lagcorr_fg_component_weight or lagcorr_eor_component_weight*lagcorr_eor_scale)."
+                "(lagcorr_fg_component_weight or lagcorr_eor_component_weight)."
             )
         gap_weight = float(lagcorr_gap_weight)
         if not math.isfinite(gap_weight) or gap_weight < 0.0:
             raise ValueError("lagcorr_gap_weight must be a finite non-negative value.")
         effective_gap_weight = gap_weight * eor_component_scale
-        lag_weight_vec = _resolve_lag_vector_prior(
-            lagcorr_prior_weights,
-            lag_count=int(lagcorr_lags.numel()),
-            device=fg.device,
-            dtype=fg.dtype,
-            name="lagcorr_prior_weights",
-            default=1.0,
-        )
-        assert lag_weight_vec is not None
-        if torch.any(~torch.isfinite(lag_weight_vec)):
-            raise ValueError("lagcorr_prior_weights must be finite.")
-        if torch.any(lag_weight_vec < 0.0):
-            raise ValueError("lagcorr_prior_weights must be non-negative.")
-        if float(torch.sum(lag_weight_vec).item()) <= 0.0:
-            raise ValueError("lagcorr_prior_weights must contain at least one positive entry.")
 
-        fg_for_lag = _apply_lagcorr_feature(fg, freq_axis=freq_axis, feature=lagcorr_feature)
-        eor_for_lag = _apply_lagcorr_feature(eor, freq_axis=freq_axis, feature=lagcorr_feature)
-        pool_int = int(lagcorr_spatial_pool)
-        if pool_int < 1:
-            raise ValueError("lagcorr_spatial_pool must be >= 1.")
-        if pool_int > 1:
-            fg_for_lag = _maybe_avg_pool_spatial(fg_for_lag, freq_axis=freq_axis, pool=pool_int)
-            eor_for_lag = _maybe_avg_pool_spatial(eor_for_lag, freq_axis=freq_axis, pool=pool_int)
-
-        fg_loss = torch.zeros_like(data_loss)
-        fg_corr_lag_mean: Optional[Tensor] = None
-        if fg_component > 0.0:
-            if fg_lagcorr_mean is None or fg_lagcorr_sigma is None:
-                raise ValueError(
-                    "fg_lagcorr_mean/fg_lagcorr_sigma must be provided when "
-                    "lagcorr_fg_component_weight > 0."
-                )
-            fg_loss, fg_corr_lag_mean, _ = _frequency_lag_correlation_stats(
-                fg_for_lag,
-                freq_axis=freq_axis,
-                lag_channels=lagcorr_lags,
-                prior_mean=fg_lagcorr_mean,
-                prior_sigma=fg_lagcorr_sigma,
-                lag_weights=lag_weight_vec,
-                max_pairs=lagcorr_max_pairs,
-                pair_sampling=lagcorr_pair_sampling,
-                rng=lagcorr_rng,
-            )
-
-        eor_loss = torch.zeros_like(data_loss)
-        eor_corr_lag_mean: Optional[Tensor] = None
-        if eor_component > 0.0 and (effective_eor_component > 0.0 or effective_gap_weight > 0.0):
-            mode_norm = str(lagcorr_eor_mode).strip().lower()
-            if mode_norm in {"gaussian", "normal"}:
-                if eor_lagcorr_mean is None or eor_lagcorr_sigma is None:
-                    raise ValueError(
-                        "eor_lagcorr_mean/eor_lagcorr_sigma must be provided when "
-                        "lagcorr_eor_component_weight > 0 and lagcorr_eor_mode='gaussian'."
-                    )
-                eor_loss, eor_corr_lag_mean, _ = _frequency_lag_correlation_stats(
-                    eor_for_lag,
-                    freq_axis=freq_axis,
-                    lag_channels=lagcorr_lags,
-                    prior_mean=eor_lagcorr_mean,
-                    prior_sigma=eor_lagcorr_sigma,
-                    lag_weights=lag_weight_vec,
-                    max_pairs=lagcorr_max_pairs,
-                    pair_sampling=lagcorr_pair_sampling,
-                    rng=lagcorr_rng,
-                )
-            elif mode_norm in {"envelope", "envelope_v2"}:
-                lag_means, _ = _frequency_lag_correlation_profile(
-                    eor_for_lag,
-                    freq_axis=freq_axis,
-                    lag_channels=lagcorr_lags,
-                    max_pairs=lagcorr_max_pairs,
-                    pair_sampling=lagcorr_pair_sampling,
-                    rng=lagcorr_rng,
-                )
-                eor_corr_lag_mean = lag_means
-                eor_loss = eor_lagcorr_envelope_loss(
-                    lag_channels=lagcorr_lags,
-                    lag_means=lag_means,
-                    lag_weights=lag_weight_vec,
-                    near_max_lag=lagcorr_eor_near_max_lag,
-                    mid_max_lag=lagcorr_eor_mid_max_lag,
-                    far_min_lag=lagcorr_eor_far_min_lag,
-                    tail_eps=lagcorr_eor_tail_eps,
-                    neg_delta=lagcorr_eor_neg_delta,
-                    near_rho_min=lagcorr_eor_near_rho_min,
-                    rebound_eps_act=lagcorr_eor_rebound_eps_act,
-                    rebound_delta_up=lagcorr_eor_rebound_delta_up,
-                    w_tail=lagcorr_eor_w_tail,
-                    w_neg=lagcorr_eor_w_neg,
-                    w_near=lagcorr_eor_w_near,
-                    w_rebound=lagcorr_eor_w_rebound,
-                )
-            else:
-                raise ValueError(
-                    "lagcorr_eor_mode must be one of: gaussian, envelope_v2 (alias: envelope)."
-                )
-
-        lagcorr_loss = (fg_component * fg_loss + effective_eor_component * eor_loss) / total_component
-
-        gap_mode = str(lagcorr_gap_mode).strip().lower()
-        if gap_mode not in {"hinge", "squared"}:
-            raise ValueError("lagcorr_gap_mode must be 'hinge' or 'squared'.")
-        if effective_gap_weight > 0.0:
-            if fg_corr_lag_mean is None or eor_corr_lag_mean is None:
-                raise ValueError(
-                    "lagcorr_gap_weight > 0 requires both FG and EoR lagcorr components enabled."
-                )
-            lag_count = int(fg_corr_lag_mean.numel())
-            margin_vec = _resolve_lag_vector_prior(
-                lagcorr_gap_margin,
-                lag_count=lag_count,
-                device=fg_corr_lag_mean.device,
-                dtype=fg_corr_lag_mean.dtype,
-                name="lagcorr_gap_margin",
-                default=0.0,
-            )
-            sigma_vec = _resolve_lag_vector_prior(
-                lagcorr_gap_sigma,
-                lag_count=lag_count,
-                device=fg_corr_lag_mean.device,
-                dtype=fg_corr_lag_mean.dtype,
-                name="lagcorr_gap_sigma",
+        if total_component <= 0.0:
+            # Allow scheduling: when lagcorr_eor_scale=0 and lagcorr_fg_component_weight=0,
+            # treat lagcorr as temporarily inactive (no penalty) rather than erroring.
+            pass
+        else:
+            lag_weight_vec = _resolve_lag_vector_prior(
+                lagcorr_prior_weights,
+                lag_count=int(lagcorr_lags.numel()),
+                device=fg.device,
+                dtype=fg.dtype,
+                name="lagcorr_prior_weights",
                 default=1.0,
             )
-            assert margin_vec is not None and sigma_vec is not None
-            sigma_vec = clamp_eps(sigma_vec, eps=EPS_LOSS)
-            lag_gap = fg_corr_lag_mean - eor_corr_lag_mean
-            if gap_mode == "hinge":
-                residual = torch.clamp(margin_vec - lag_gap, min=0.0)
-            else:
-                residual = lag_gap - margin_vec
-            lagcorr_gap_loss = torch.mean((residual / sigma_vec) ** 2)
-            lagcorr_loss = lagcorr_loss + effective_gap_weight * lagcorr_gap_loss
+            assert lag_weight_vec is not None
+            if torch.any(~torch.isfinite(lag_weight_vec)):
+                raise ValueError("lagcorr_prior_weights must be finite.")
+            if torch.any(lag_weight_vec < 0.0):
+                raise ValueError("lagcorr_prior_weights must be non-negative.")
+            if float(torch.sum(lag_weight_vec).item()) <= 0.0:
+                raise ValueError("lagcorr_prior_weights must contain at least one positive entry.")
+
+            fg_for_lag = _apply_lagcorr_feature(fg, freq_axis=freq_axis, feature=lagcorr_feature)
+            eor_for_lag = _apply_lagcorr_feature(eor, freq_axis=freq_axis, feature=lagcorr_feature)
+            pool_int = int(lagcorr_spatial_pool)
+            if pool_int < 1:
+                raise ValueError("lagcorr_spatial_pool must be >= 1.")
+            if pool_int > 1:
+                fg_for_lag = _maybe_avg_pool_spatial(
+                    fg_for_lag, freq_axis=freq_axis, pool=pool_int
+                )
+                eor_for_lag = _maybe_avg_pool_spatial(
+                    eor_for_lag, freq_axis=freq_axis, pool=pool_int
+                )
+
+            fg_loss = torch.zeros_like(data_loss)
+            fg_corr_lag_mean: Optional[Tensor] = None
+            if fg_component > 0.0:
+                if fg_lagcorr_mean is None or fg_lagcorr_sigma is None:
+                    raise ValueError(
+                        "fg_lagcorr_mean/fg_lagcorr_sigma must be provided when "
+                        "lagcorr_fg_component_weight > 0."
+                    )
+                fg_loss, fg_corr_lag_mean, _ = _frequency_lag_correlation_stats(
+                    fg_for_lag,
+                    freq_axis=freq_axis,
+                    lag_channels=lagcorr_lags,
+                    prior_mean=fg_lagcorr_mean,
+                    prior_sigma=fg_lagcorr_sigma,
+                    lag_weights=lag_weight_vec,
+                    max_pairs=lagcorr_max_pairs,
+                    pair_sampling=lagcorr_pair_sampling,
+                    rng=lagcorr_rng,
+                )
+
+            eor_loss = torch.zeros_like(data_loss)
+            eor_corr_lag_mean: Optional[Tensor] = None
+            if eor_component > 0.0 and (effective_eor_component > 0.0 or effective_gap_weight > 0.0):
+                mode_norm = str(lagcorr_eor_mode).strip().lower()
+                if mode_norm in {"gaussian", "normal"}:
+                    if eor_lagcorr_mean is None or eor_lagcorr_sigma is None:
+                        raise ValueError(
+                            "eor_lagcorr_mean/eor_lagcorr_sigma must be provided when "
+                            "lagcorr_eor_component_weight > 0 and lagcorr_eor_mode='gaussian'."
+                        )
+                    eor_loss, eor_corr_lag_mean, _ = _frequency_lag_correlation_stats(
+                        eor_for_lag,
+                        freq_axis=freq_axis,
+                        lag_channels=lagcorr_lags,
+                        prior_mean=eor_lagcorr_mean,
+                        prior_sigma=eor_lagcorr_sigma,
+                        lag_weights=lag_weight_vec,
+                        max_pairs=lagcorr_max_pairs,
+                        pair_sampling=lagcorr_pair_sampling,
+                        rng=lagcorr_rng,
+                    )
+                elif mode_norm in {"envelope", "envelope_v2"}:
+                    lag_means, _ = _frequency_lag_correlation_profile(
+                        eor_for_lag,
+                        freq_axis=freq_axis,
+                        lag_channels=lagcorr_lags,
+                        max_pairs=lagcorr_max_pairs,
+                        pair_sampling=lagcorr_pair_sampling,
+                        rng=lagcorr_rng,
+                    )
+                    eor_corr_lag_mean = lag_means
+                    eor_loss = eor_lagcorr_envelope_loss(
+                        lag_channels=lagcorr_lags,
+                        lag_means=lag_means,
+                        lag_weights=lag_weight_vec,
+                        near_max_lag=lagcorr_eor_near_max_lag,
+                        mid_max_lag=lagcorr_eor_mid_max_lag,
+                        far_min_lag=lagcorr_eor_far_min_lag,
+                        tail_eps=lagcorr_eor_tail_eps,
+                        neg_delta=lagcorr_eor_neg_delta,
+                        near_rho_min=lagcorr_eor_near_rho_min,
+                        rebound_eps_act=lagcorr_eor_rebound_eps_act,
+                        rebound_delta_up=lagcorr_eor_rebound_delta_up,
+                        w_tail=lagcorr_eor_w_tail,
+                        w_neg=lagcorr_eor_w_neg,
+                        w_near=lagcorr_eor_w_near,
+                        w_rebound=lagcorr_eor_w_rebound,
+                    )
+                else:
+                    raise ValueError(
+                        "lagcorr_eor_mode must be one of: gaussian, envelope_v2 (alias: envelope)."
+                    )
+
+            lagcorr_loss = (fg_component * fg_loss + effective_eor_component * eor_loss) / total_component
+
+            gap_mode = str(lagcorr_gap_mode).strip().lower()
+            if gap_mode not in {"hinge", "squared"}:
+                raise ValueError("lagcorr_gap_mode must be 'hinge' or 'squared'.")
+            if effective_gap_weight > 0.0:
+                if fg_corr_lag_mean is None or eor_corr_lag_mean is None:
+                    raise ValueError(
+                        "lagcorr_gap_weight > 0 requires both FG and EoR lagcorr components enabled."
+                    )
+                lag_count = int(fg_corr_lag_mean.numel())
+                margin_vec = _resolve_lag_vector_prior(
+                    lagcorr_gap_margin,
+                    lag_count=lag_count,
+                    device=fg_corr_lag_mean.device,
+                    dtype=fg_corr_lag_mean.dtype,
+                    name="lagcorr_gap_margin",
+                    default=0.0,
+                )
+                sigma_vec = _resolve_lag_vector_prior(
+                    lagcorr_gap_sigma,
+                    lag_count=lag_count,
+                    device=fg_corr_lag_mean.device,
+                    dtype=fg_corr_lag_mean.dtype,
+                    name="lagcorr_gap_sigma",
+                    default=1.0,
+                )
+                assert margin_vec is not None and sigma_vec is not None
+                sigma_vec = clamp_eps(sigma_vec, eps=EPS_LOSS)
+                lag_gap = fg_corr_lag_mean - eor_corr_lag_mean
+                if gap_mode == "hinge":
+                    residual = torch.clamp(margin_vec - lag_gap, min=0.0)
+                else:
+                    residual = lag_gap - margin_vec
+                lagcorr_gap_loss = torch.mean((residual / sigma_vec) ** 2)
+                lagcorr_loss = lagcorr_loss + effective_gap_weight * lagcorr_gap_loss
 
     fft_loss = torch.zeros_like(data_loss)
     if "rfft" in active_term_set and extra_scale > 0.0:
