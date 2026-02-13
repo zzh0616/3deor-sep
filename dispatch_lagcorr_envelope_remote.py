@@ -344,8 +344,7 @@ def main() -> int:
         out_dir = f"{remote_run_root}/{worker}"
         log_path = f"{out_dir}/worker.log"
 
-        cmd = [
-            f"mkdir -p {out_dir}",
+        run_cmd = [
             "nohup",
             _shq(python_bin),
             _shq(f"{remote_root}/code/3dnet/run_lagcorr_envelope_scan.py"),
@@ -459,10 +458,14 @@ def main() -> int:
             _shq(python_bin),
         ]
         if bool(args.no_corr):
-            cmd.append("--no-corr")
+            run_cmd.append("--no-corr")
         if bool(args.dry_run):
-            cmd.append("--dry-run")
-        cmd_str = " ".join(cmd) + f" > {log_path} 2>&1 & echo $!"
+            run_cmd.append("--dry-run")
+        cmd_str = (
+            f"mkdir -p {_shq(out_dir)} && "
+            + " ".join(run_cmd)
+            + f" > {_shq(log_path)} 2>&1 & echo $!"
+        )
 
         rec = {
             "host": host,
@@ -507,4 +510,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
