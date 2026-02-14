@@ -221,6 +221,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--lagfg-const-mean", type=float, default=0.99)
     p.add_argument("--lagfg-const-sigma", type=float, default=0.05)
+    p.add_argument(
+        "--lagfg-prior-robust",
+        action="store_true",
+        help="Use median+MAD (robust) stats for fg_lagcorr_mean/sigma estimation.",
+    )
 
     p.add_argument(
         "--python-bin",
@@ -773,6 +778,8 @@ def _lagcorr_stats_from_cube(
     seed: int,
     rms_min: float,
     sigma_floor: float,
+    robust: bool = False,
+    mad_to_sigma_factor: float = 1.4826,
     eps: float = 1e-12,
 ) -> Tuple[List[float], List[float]]:
     feat = str(feature).strip().lower()
@@ -831,9 +838,14 @@ def _lagcorr_stats_from_cube(
         denom = norms[idx] * norms[jdx]
         denom = np.maximum(denom, float(eps))
         corr = dot / denom
-        mu = float(np.mean(corr))
-        var = float(np.var(corr))
-        sigma = math.sqrt(max(0.0, var))
+        if bool(robust):
+            mu = float(np.median(corr))
+            mad = float(np.median(np.abs(corr - mu)))
+            sigma = float(mad_to_sigma_factor) * mad
+        else:
+            mu = float(np.mean(corr))
+            var = float(np.var(corr))
+            sigma = math.sqrt(max(0.0, var))
         sigma = float(max(sigma, float(sigma_floor)))
         means.append(mu)
         sigmas.append(sigma)
@@ -1237,6 +1249,7 @@ def main() -> int:
                 seed=int(args.lagcorr_random_seed),
                 rms_min=0.0,
                 sigma_floor=float(args.lagcorr_sigma_floor),
+                robust=bool(args.lagfg_prior_robust),
             )
             fg_lagcorr_cache[(ds_name, feat, pool)] = (mu, sig)
 
