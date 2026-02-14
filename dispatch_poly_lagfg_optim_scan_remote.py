@@ -92,6 +92,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fg-smooth-modes", type=str, default="diff2_l2")
     p.add_argument("--poly-degrees", type=str, default="2,3,4,5")
     p.add_argument("--poly-x-modes", type=str, default="lin,log")
+    p.add_argument("--poly-models", type=str, default="exp", help="Comma-separated poly_model choices: add,exp.")
+    p.add_argument(
+        "--poly-resid-enabled-list",
+        type=str,
+        default="false",
+        help="Comma-separated booleans for poly_resid_enabled: true,false.",
+    )
     p.add_argument("--poly-weights", type=str, default="0.3,1.0,3.0,10.0")
     p.add_argument("--poly-sigma-min", type=float, default=0.003)
     p.add_argument("--poly-sigma-max", type=float, default=0.2)
@@ -358,6 +365,10 @@ def main() -> int:
             _shq(str(args.poly_degrees)),
             "--poly-x-modes",
             _shq(str(args.poly_x_modes)),
+            "--poly-models",
+            _shq(str(args.poly_models)),
+            "--poly-resid-enabled-list",
+            _shq(str(args.poly_resid_enabled_list)),
             "--poly-weights",
             _shq(str(args.poly_weights)),
             "--poly-sigma-min",
@@ -497,4 +508,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

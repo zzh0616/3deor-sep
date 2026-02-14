@@ -183,6 +183,13 @@ class OptimizationConfig:
     # - "lin": normalize frequency in MHz to [0,1]
     # - "log": normalize log(frequency) to [0,1] (often better for power-law-like spectra)
     poly_x_mode: str = "lin"
+    # Polynomial foreground model used when poly_reparam is active:
+    # - "add": fg = poly(x) + resid (legacy)
+    # - "exp": fg = exp(poly(x)) + resid  (better matches power-law-like spectra; keeps baseline positive)
+    poly_model: str = "add"
+    # If False, do not optimize an explicit per-voxel residual when poly_reparam is active.
+    # This makes FG fully determined by the polynomial model (strong identifiability at the cost of flexibility).
+    poly_resid_enabled: bool = True
     loss_mode: str = "base"  # legacy selector; prefer extra_loss_terms for multi-select
     extra_loss_terms: List[str] = field(default_factory=list)  # e.g. ["corr", "rfft"]
     optimizer_name: str = "adam"
@@ -403,6 +410,7 @@ def initialize_components_v2(
     init_mode: str = "smooth_zero",
     poly_degree: Optional[int] = None,
     poly_x_mode: str = "lin",
+    poly_model: str = "add",
     freqs: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Tensor]:
     """
@@ -416,14 +424,29 @@ def initialize_components_v2(
         return fg_init, (y - fg_init)
     if mode == "poly_residual":
         deg = int(poly_degree) if poly_degree is not None else 3
-        # Use the observation directly; EoR is assumed small so polyfit(y) approximates FG.
-        _, fitted = _fit_polynomial_coeffs(
-            y,
-            freq_axis=freq_axis,
-            degree=deg,
-            freqs=freqs,
-            x_mode=poly_x_mode,
-        )
+        model = str(poly_model).strip().lower()
+        if model == "exp":
+            y_safe = torch.clamp(y, min=1e-6)
+            y_log = torch.log(y_safe)
+            _, fitted_log = _fit_polynomial_coeffs(
+                y_log,
+                freq_axis=freq_axis,
+                degree=deg,
+                freqs=freqs,
+                x_mode=poly_x_mode,
+            )
+            # Avoid inf/NaN if a random init generates huge values.
+            fitted_log = torch.clamp(fitted_log, min=-20.0, max=20.0)
+            fitted = torch.exp(fitted_log)
+        else:
+            # Use the observation directly; EoR is assumed small so polyfit(y) approximates FG.
+            _, fitted = _fit_polynomial_coeffs(
+                y,
+                freq_axis=freq_axis,
+                degree=deg,
+                freqs=freqs,
+                x_mode=poly_x_mode,
+            )
         return fitted, (y - fitted)
     raise ValueError(f"Unsupported init_mode '{init_mode}'. Use smooth_zero, smooth_residual, or poly_residual.")
 
@@ -636,6 +659,8 @@ def optimize_components(
     poly_degree: int = 3,
     poly_sigma: Optional[Union[Tensor, float]] = DEFAULT_POLY_SIGMA,
     poly_x_mode: str = "lin",
+    poly_model: str = "add",
+    poly_resid_enabled: bool = True,
     init_mode: str = "smooth_zero",
     loss_mode: str = "base",
     extra_loss_terms: Optional[Union[str, Sequence[str]]] = None,
@@ -1118,13 +1143,19 @@ def optimize_components(
         init_mode=init_mode,
         poly_degree=int(poly_degree) if "poly_reparam" in active_term_set else None,
         poly_x_mode=poly_x_mode,
+        poly_model=poly_model,
         freqs=freqs_tensor,
     )
 
     # Poly reparam initialization
     poly_coeffs_param: Optional[torch.nn.Parameter] = None
     fg_resid_param: Optional[torch.nn.Parameter] = None
-    fg_param: torch.nn.Parameter
+    fg_param: Optional[torch.nn.Parameter] = None
+
+    poly_model_norm = str(poly_model).strip().lower()
+    if poly_model_norm not in {"add", "exp"}:
+        raise ValueError("poly_model must be 'add' or 'exp'.")
+    poly_resid_enabled_val = bool(poly_resid_enabled)
 
     def _prepare_init_guess(init_value: Optional[Tensor], name: str) -> Optional[Tensor]:
         if init_value is None:
@@ -1145,17 +1176,30 @@ def optimize_components(
         eor_init = eor_override
 
     if "poly_reparam" in active_term_set:
-        coeffs_init, fitted = _fit_polynomial_coeffs(
-            fg_init,
-            freq_axis=freq_axis,
-            degree=poly_degree,
-            freqs=freqs_tensor,
-            x_mode=poly_x_mode,
-        )
-        resid_init = fg_init - fitted
+        if poly_model_norm == "exp":
+            fg_safe = torch.clamp(fg_init, min=1e-6)
+            fg_log = torch.log(fg_safe)
+            coeffs_init, fitted_log = _fit_polynomial_coeffs(
+                fg_log,
+                freq_axis=freq_axis,
+                degree=poly_degree,
+                freqs=freqs_tensor,
+                x_mode=poly_x_mode,
+            )
+            fitted_log = torch.clamp(fitted_log, min=-20.0, max=20.0)
+            fitted = torch.exp(fitted_log)
+        else:
+            coeffs_init, fitted = _fit_polynomial_coeffs(
+                fg_init,
+                freq_axis=freq_axis,
+                degree=poly_degree,
+                freqs=freqs_tensor,
+                x_mode=poly_x_mode,
+            )
         poly_coeffs_param = torch.nn.Parameter(coeffs_init.clone())
-        fg_resid_param = torch.nn.Parameter(resid_init.clone())
-        fg_param = fg_resid_param
+        if poly_resid_enabled_val:
+            resid_init = fg_init - fitted
+            fg_resid_param = torch.nn.Parameter(resid_init.clone())
     else:
         fg_param = torch.nn.Parameter(fg_init.clone())
 
@@ -1164,10 +1208,14 @@ def optimize_components(
     # Build param groups so FG/EoR can use different learning rates and (optionally)
     # support alternating block updates.
     fg_params: List[torch.nn.Parameter] = []
-    if poly_coeffs_param is not None and fg_resid_param is not None:
-        fg_params.extend([fg_resid_param, poly_coeffs_param])
-    else:
+    if fg_param is not None:
         fg_params.append(fg_param)
+    if fg_resid_param is not None:
+        fg_params.append(fg_resid_param)
+    if poly_coeffs_param is not None:
+        fg_params.append(poly_coeffs_param)
+    if not fg_params:
+        raise ValueError("Internal error: no foreground parameters to optimize.")
     param_groups: List[Dict[str, object]] = [
         {"params": [eor], "lr": float(lr)},
         {"params": fg_params, "lr": float(lr) * lr_fg_factor_val},
@@ -1287,7 +1335,7 @@ def optimize_components(
             else:
                 lagcorr_rebound_scale = 1.0
         if "poly_reparam" in active_term_set:
-            assert poly_coeffs_param is not None and fg_resid_param is not None
+            assert poly_coeffs_param is not None
             poly_component = _eval_polynomial_from_coeffs(
                 poly_coeffs_param,
                 freq_axis,
@@ -1295,9 +1343,17 @@ def optimize_components(
                 freqs=freqs_tensor,
                 x_mode=poly_x_mode,
             )
-            fg_current = poly_component + fg_resid_param
-            poly_residual = fg_resid_param
+            if poly_model_norm == "exp":
+                poly_component = torch.clamp(poly_component, min=-20.0, max=20.0)
+                poly_component = torch.exp(poly_component)
+            if fg_resid_param is not None:
+                fg_current = poly_component + fg_resid_param
+                poly_residual = fg_resid_param
+            else:
+                fg_current = poly_component
+                poly_residual = None
         else:
+            assert fg_param is not None
             fg_current = fg_param
             poly_residual = None
 
@@ -1480,11 +1536,23 @@ def optimize_components(
             )
 
     if "poly_reparam" in active_term_set:
-        assert poly_coeffs_param is not None and fg_resid_param is not None
-        fg_final = _eval_polynomial_from_coeffs(
-            poly_coeffs_param, freq_axis, y_tensor.shape, freqs=freqs_tensor
-        ) + fg_resid_param
+        assert poly_coeffs_param is not None
+        poly_component = _eval_polynomial_from_coeffs(
+            poly_coeffs_param,
+            freq_axis,
+            y_tensor.shape,
+            freqs=freqs_tensor,
+            x_mode=poly_x_mode,
+        )
+        if poly_model_norm == "exp":
+            poly_component = torch.clamp(poly_component, min=-20.0, max=20.0)
+            poly_component = torch.exp(poly_component)
+        if fg_resid_param is not None:
+            fg_final = poly_component + fg_resid_param
+        else:
+            fg_final = poly_component
     else:
+        assert fg_param is not None
         fg_final = fg_param
 
     return fg_final.detach(), eor.detach(), history
@@ -3194,6 +3262,8 @@ def _optimize_from_fits(
         poly_degree=config.poly_degree,
         poly_sigma=config.poly_sigma,
         poly_x_mode=config.poly_x_mode,
+        poly_model=config.poly_model,
+        poly_resid_enabled=config.poly_resid_enabled,
         init_mode=config.init_mode,
         loss_mode=config.loss_mode,
         extra_loss_terms=active_extra_terms,

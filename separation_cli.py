@@ -520,6 +520,19 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         help="Polynomial coordinate: lin=freq, log=log(freq) (default lin).",
     )
     parser.add_argument(
+        "--poly-model",
+        type=str,
+        choices=["add", "exp"],
+        help="Polynomial foreground model in poly_reparam: add=poly+resid, exp=exp(poly)+resid (default add).",
+    )
+    parser.add_argument(
+        "--poly-disable-resid",
+        dest="poly_resid_enabled",
+        action="store_false",
+        default=None,
+        help="Disable explicit per-voxel residual when poly_reparam is active (FG becomes pure polynomial).",
+    )
+    parser.add_argument(
         "--freq-start-mhz",
         type=float,
         help="Starting frequency of the cube in MHz (for poly_reparam mode).",
@@ -681,6 +694,8 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "poly_degree",
         "poly_sigma",
         "poly_x_mode",
+        "poly_model",
+        "poly_resid_enabled",
         "freq_start_mhz",
         "freq_delta_mhz",
         "power_config",
