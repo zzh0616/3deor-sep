@@ -178,6 +178,11 @@ def wait_until_complete(
                 all_done = False
                 if not alive:
                     raise RuntimeError(f"{stage_tag} worker died early: {w.alias} done={done}/{exp} host={w.host}")
+                continue
+            # done>=exp: we still wait for the main scan process to exit, to avoid a race
+            # where eor_corr_profile.csv exists but the final CSV/MD artifacts are not written yet.
+            if alive:
+                all_done = False
         if all_done:
             print(f"[{_now()}] monitor {stage_tag} complete", flush=True)
             return
@@ -513,4 +518,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
