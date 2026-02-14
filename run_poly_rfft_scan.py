@@ -211,11 +211,32 @@ def _extract_cut_indices(shape: Sequence[int], cut_frac: float) -> Optional[Tupl
     f, ny, nx = int(shape[0]), int(shape[1]), int(shape[2])
     if f <= 0 or nx <= 0 or ny <= 0:
         return None
-    size = int(round(float(cut_frac) * min(nx, ny)))
-    size = max(1, min(size, nx, ny))
-    x0 = (nx - size) // 2
-    y0 = (ny - size) // 2
-    return (x0, x0 + size, y0, y0 + size)
+    min_dim = min(nx, ny)
+    size_px = int(round(float(cut_frac) * float(min_dim)))
+    size_px = max(1, min(size_px, min_dim))
+
+    # Match separation_optim.build_cut_xy_indices default behavior for unit='frac',
+    # center=(0.5,0.5): center at round(0.5*(N-1)), then clamp a fixed-size window.
+    center_x_px = int(round(0.5 * float(max(nx - 1, 0))))
+    center_y_px = int(round(0.5 * float(max(ny - 1, 0))))
+
+    def _clamp_fixed_window(start: int, size: int, length: int) -> Tuple[int, int]:
+        if size > length:
+            raise ValueError(f"Requested crop size {size} exceeds axis length {length}.")
+        end = start + size
+        if start < 0:
+            start = 0
+            end = size
+        if end > length:
+            end = length
+            start = length - size
+        return int(start), int(end)
+
+    start_x = int(center_x_px) - int(size_px) // 2
+    start_y = int(center_y_px) - int(size_px) // 2
+    x0, x1 = _clamp_fixed_window(start_x, int(size_px), int(nx))
+    y0, y1 = _clamp_fixed_window(start_y, int(size_px), int(ny))
+    return (int(x0), int(x1), int(y0), int(y1))
 
 
 def _load_cube_cut(path: Path, cut: Optional[Tuple[int, int, int, int]]) -> np.ndarray:
