@@ -32,6 +32,19 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         type=str,
         help="Optional FITS mask (2D or 3D) applied to all inputs before cut_xy and loss evaluation.",
     )
+    parser.add_argument(
+        "--psf-cube",
+        type=str,
+        help=(
+            "Optional 3D FITS cube containing a PSF used as a forward operator in the data term. "
+            "When set, the data term compares PSF(fg+eor) to the observation instead of fg+eor directly."
+        ),
+    )
+    parser.add_argument(
+        "--psf-scale",
+        type=float,
+        help="Optional scalar multiplier applied after the PSF operator (default 1.0).",
+    )
     parser.add_argument("--fg-output", type=str, help="Output FITS path for foreground estimate.")
     parser.add_argument("--eor-output", type=str, help="Output FITS path for EoR estimate.")
     parser.add_argument("--num-iters", type=int, help="Number of optimization iterations.")
@@ -721,6 +734,8 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "init_eor_cube",
         "init_mode",
         "mask_cube",
+        "psf_cube",
+        "psf_scale",
         "enable_corr_check",
         "corr_check_every",
         "optimizer_name",

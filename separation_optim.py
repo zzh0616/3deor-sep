@@ -238,6 +238,11 @@ class OptimizationConfig:
     # - poly_residual: FG=polyfit(y) and EoR=y-FG (degree = poly_degree)
     init_mode: str = "smooth_zero"
     mask_cube: Optional[str] = None
+    # Optional PSF cube used to build a forward operator for the data term.
+    # When provided, the observation is assumed to live in the *instrumented*
+    # domain and the data term compares A(fg+eor) to y.
+    psf_cube: Optional[str] = None
+    psf_scale: float = 1.0
     data_error: float = DEFAULT_DATA_ERROR
     eor_prior_mean: float = 0.0
     eor_prior_sigma: float = DEFAULT_EOR_SIGMA
@@ -3117,6 +3122,21 @@ def _optimize_from_fits(
         mask_tensor = read_fits_array(mask_path, cut_indices=cut_indices)
         y_cube = apply_mask_xy(y_cube, mask_tensor, freq_axis=config.freq_axis)
 
+    psf_op: Optional[ForwardOperator] = None
+    if config.psf_cube:
+        psf_path = Path(config.psf_cube)
+        if not psf_path.exists():
+            raise FileNotFoundError(f"PSF cube '{psf_path}' not found.")
+        print(f"Loading PSF cube from {psf_path} ...")
+        psf_cube = read_fits_cube(psf_path, cut_indices=cut_indices)
+        target_dtype = dtype if dtype is not None else y_cube.dtype
+        psf_cube = psf_cube.to(device=device, dtype=target_dtype)
+        from instrument_ops import make_psf_convolution_operator
+
+        psf_op = make_psf_convolution_operator(
+            psf_cube, freq_axis=config.freq_axis, scale=config.psf_scale
+        )
+
     eor_true: Optional[Tensor] = None
     if config.true_eor_cube:
         true_eor_path = Path(config.true_eor_cube)
@@ -3217,6 +3237,7 @@ def _optimize_from_fits(
 
     fg_est, eor_est, history = optimize_components(
         y_cube,
+        psf=psf_op,
         num_iters=config.num_iters,
         lr=config.lr,
         alpha=config.alpha,
