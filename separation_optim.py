@@ -190,6 +190,11 @@ class OptimizationConfig:
     # If False, do not optimize an explicit per-voxel residual when poly_reparam is active.
     # This makes FG fully determined by the polynomial model (strong identifiability at the cost of flexibility).
     poly_resid_enabled: bool = True
+    # If True, do not optimize EoR as an independent parameter. Instead set:
+    #   eor = y_obs - fg
+    # and backpropagate EoR priors through fg. This removes the fg/eor degeneracy
+    # when the observation is (nearly) noise-free and improves identifiability.
+    eor_as_residual: bool = False
     loss_mode: str = "base"  # legacy selector; prefer extra_loss_terms for multi-select
     extra_loss_terms: List[str] = field(default_factory=list)  # e.g. ["corr", "rfft"]
     optimizer_name: str = "adam"
@@ -661,6 +666,7 @@ def optimize_components(
     poly_x_mode: str = "lin",
     poly_model: str = "add",
     poly_resid_enabled: bool = True,
+    eor_as_residual: bool = False,
     init_mode: str = "smooth_zero",
     loss_mode: str = "base",
     extra_loss_terms: Optional[Union[str, Sequence[str]]] = None,
@@ -804,6 +810,8 @@ def optimize_components(
     alt_update_mode_norm = str(alt_update_mode).strip().lower()
     if alt_update_mode_norm not in {"none", "fg_then_eor"}:
         raise ValueError("alt_update_mode must be one of: none, fg_then_eor.")
+    if bool(eor_as_residual) and alt_update_mode_norm != "none":
+        raise ValueError("alt_update_mode must be 'none' when eor_as_residual=True.")
     alt_fg_steps_val = max(1, int(alt_fg_steps))
     alt_eor_steps_val = max(1, int(alt_eor_steps))
 
@@ -1203,7 +1211,9 @@ def optimize_components(
     else:
         fg_param = torch.nn.Parameter(fg_init.clone())
 
-    eor = torch.nn.Parameter(eor_init.clone())
+    eor: Optional[torch.nn.Parameter] = None
+    if not bool(eor_as_residual):
+        eor = torch.nn.Parameter(eor_init.clone())
 
     # Build param groups so FG/EoR can use different learning rates and (optionally)
     # support alternating block updates.
@@ -1216,10 +1226,13 @@ def optimize_components(
         fg_params.append(poly_coeffs_param)
     if not fg_params:
         raise ValueError("Internal error: no foreground parameters to optimize.")
-    param_groups: List[Dict[str, object]] = [
-        {"params": [eor], "lr": float(lr)},
-        {"params": fg_params, "lr": float(lr) * lr_fg_factor_val},
-    ]
+    param_groups: List[Dict[str, object]] = []
+    if eor is not None:
+        param_groups.append({"params": [eor], "lr": float(lr)})
+        param_groups.append({"params": fg_params, "lr": float(lr) * lr_fg_factor_val})
+    else:
+        # Keep semantics: lr is the base LR; lr_fg_factor still applies to FG.
+        param_groups.append({"params": fg_params, "lr": float(lr) * lr_fg_factor_val})
     optimizer_name_norm = str(optimizer_name).strip().lower()
     if optimizer_name_norm == "sgd":
         optimizer = torch.optim.SGD(param_groups, lr=lr, momentum=momentum)
@@ -1357,9 +1370,12 @@ def optimize_components(
             fg_current = fg_param
             poly_residual = None
 
+        # If eor_as_residual, remove the fg/eor degeneracy by setting eor = y - fg.
+        eor_current = (y_tensor - fg_current) if eor is None else eor
+
         total_loss, components = loss_function(
             fg_current,
-            eor,
+            eor_current,
             y_tensor,
             psf=psf,
             alpha=alpha,
@@ -1474,7 +1490,8 @@ def optimize_components(
             update_fg = phase < alt_fg_steps_val
             if update_fg:
                 # Freeze EoR update.
-                eor.grad = None
+                if eor is not None:
+                    eor.grad = None
             else:
                 # Freeze FG (and poly coeffs when used) update.
                 for p in fg_params:
@@ -1496,7 +1513,7 @@ def optimize_components(
         ):
             with torch.no_grad():
                 corr_values = compute_frequency_correlations(
-                    eor, aligned_eor_true, freq_axis=freq_axis
+                    eor_current, aligned_eor_true, freq_axis=freq_axis
                 )
             mean_corr = float(np.nanmean(corr_values))
             print(f"[check] iter {it:04d}: mean EoR corr={mean_corr:.4f}")
@@ -1555,7 +1572,11 @@ def optimize_components(
         assert fg_param is not None
         fg_final = fg_param
 
-    return fg_final.detach(), eor.detach(), history
+    if eor is not None:
+        eor_final = eor
+    else:
+        eor_final = y_tensor - fg_final
+    return fg_final.detach(), eor_final.detach(), history
 
 
 def _create_synthetic_cube(
@@ -3264,6 +3285,7 @@ def _optimize_from_fits(
         poly_x_mode=config.poly_x_mode,
         poly_model=config.poly_model,
         poly_resid_enabled=config.poly_resid_enabled,
+        eor_as_residual=config.eor_as_residual,
         init_mode=config.init_mode,
         loss_mode=config.loss_mode,
         extra_loss_terms=active_extra_terms,

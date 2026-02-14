@@ -533,6 +533,16 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         help="Disable explicit per-voxel residual when poly_reparam is active (FG becomes pure polynomial).",
     )
     parser.add_argument(
+        "--eor-as-residual",
+        dest="eor_as_residual",
+        action="store_true",
+        default=None,
+        help=(
+            "Do not optimize EoR as a free parameter; instead set EoR = y - FG and backpropagate "
+            "EoR priors through FG. This removes FG/EoR degeneracy in near-noiseless injected cubes."
+        ),
+    )
+    parser.add_argument(
         "--freq-start-mhz",
         type=float,
         help="Starting frequency of the cube in MHz (for poly_reparam mode).",
@@ -696,6 +706,7 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "poly_x_mode",
         "poly_model",
         "poly_resid_enabled",
+        "eor_as_residual",
         "freq_start_mhz",
         "freq_delta_mhz",
         "power_config",
