@@ -514,6 +514,12 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         help="Std used to scale polynomial prior residuals (default 0.05).",
     )
     parser.add_argument(
+        "--poly-x-mode",
+        type=str,
+        choices=["lin", "log"],
+        help="Polynomial coordinate: lin=freq, log=log(freq) (default lin).",
+    )
+    parser.add_argument(
         "--freq-start-mhz",
         type=float,
         help="Starting frequency of the cube in MHz (for poly_reparam mode).",
@@ -568,6 +574,12 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         "--init-eor-cube",
         type=str,
         help="FITS cube providing an initial EoR guess.",
+    )
+    parser.add_argument(
+        "--init-mode",
+        type=str,
+        choices=["smooth_zero", "smooth_residual", "poly_residual"],
+        help="Initialization policy when init cubes are not provided (default smooth_zero).",
     )
     parser.add_argument(
         "--run-demo",
@@ -668,6 +680,7 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "poly_weight",
         "poly_degree",
         "poly_sigma",
+        "poly_x_mode",
         "freq_start_mhz",
         "freq_delta_mhz",
         "power_config",
@@ -677,6 +690,7 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "corr_plot",
         "init_fg_cube",
         "init_eor_cube",
+        "init_mode",
         "mask_cube",
         "enable_corr_check",
         "corr_check_every",

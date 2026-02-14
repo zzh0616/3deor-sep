@@ -179,6 +179,10 @@ class OptimizationConfig:
     poly_weight: float = 1.0
     poly_degree: int = 3
     poly_sigma: float = DEFAULT_POLY_SIGMA
+    # Coordinate used by polynomial priors/reparameterization:
+    # - "lin": normalize frequency in MHz to [0,1]
+    # - "log": normalize log(frequency) to [0,1] (often better for power-law-like spectra)
+    poly_x_mode: str = "lin"
     loss_mode: str = "base"  # legacy selector; prefer extra_loss_terms for multi-select
     extra_loss_terms: List[str] = field(default_factory=list)  # e.g. ["corr", "rfft"]
     optimizer_name: str = "adam"
@@ -215,6 +219,11 @@ class OptimizationConfig:
     corr_plot: Optional[str] = None
     init_fg_cube: Optional[str] = None
     init_eor_cube: Optional[str] = None
+    # Initialization policy when init_fg_cube/init_eor_cube are not provided.
+    # - smooth_zero: FG=smooth(y) and EoR=0 (legacy)
+    # - smooth_residual: FG=smooth(y) and EoR=y-FG
+    # - poly_residual: FG=polyfit(y) and EoR=y-FG (degree = poly_degree)
+    init_mode: str = "smooth_zero"
     mask_cube: Optional[str] = None
     data_error: float = DEFAULT_DATA_ERROR
     eor_prior_mean: float = 0.0
@@ -387,6 +396,38 @@ def initialize_components(y: Tensor, freq_axis: int = 0) -> Tuple[Tensor, Tensor
     return fg_init, eor_init
 
 
+def initialize_components_v2(
+    y: Tensor,
+    *,
+    freq_axis: int = 0,
+    init_mode: str = "smooth_zero",
+    poly_degree: Optional[int] = None,
+    poly_x_mode: str = "lin",
+    freqs: Optional[Tensor] = None,
+) -> Tuple[Tensor, Tensor]:
+    """
+    Initialization variants (does NOT use injected truth cubes).
+    """
+    mode = str(init_mode).strip().lower()
+    if mode == "smooth_zero":
+        return initialize_components(y, freq_axis=freq_axis)
+    if mode == "smooth_residual":
+        fg_init = _smooth_initial_foreground(y, freq_axis=freq_axis)
+        return fg_init, (y - fg_init)
+    if mode == "poly_residual":
+        deg = int(poly_degree) if poly_degree is not None else 3
+        # Use the observation directly; EoR is assumed small so polyfit(y) approximates FG.
+        _, fitted = _fit_polynomial_coeffs(
+            y,
+            freq_axis=freq_axis,
+            degree=deg,
+            freqs=freqs,
+            x_mode=poly_x_mode,
+        )
+        return fitted, (y - fitted)
+    raise ValueError(f"Unsupported init_mode '{init_mode}'. Use smooth_zero, smooth_residual, or poly_residual.")
+
+
 def _polynomial_design(num_freqs: int, degree: int, device: torch.device, dtype: torch.dtype) -> Tensor:
     freqs = torch.linspace(0.0, 1.0, num_freqs, device=device, dtype=dtype)
     return torch.stack([freqs**i for i in range(degree + 1)], dim=1)  # (F, degree+1)
@@ -397,19 +438,28 @@ def _fit_polynomial_coeffs(
     freq_axis: int,
     degree: int,
     freqs: Optional[Tensor] = None,
+    x_mode: str = "lin",
 ) -> Tuple[Tensor, Tensor]:
     y_front = y.movedim(freq_axis, 0)
     num_freqs = y_front.shape[0]
     if freqs is None:
+        # Fall back to a linear [0,1] coordinate when explicit frequencies are not provided.
         design = _polynomial_design(num_freqs, degree, device=y.device, dtype=y.dtype)
     else:
         if freqs.numel() != num_freqs:
             raise ValueError("Frequency array length does not match cube frequency dimension.")
         freqs = freqs.to(device=y.device, dtype=y.dtype)
-        f_min = freqs.min()
-        f_max = freqs.max()
+        x_mode_norm = str(x_mode).strip().lower()
+        if x_mode_norm == "lin":
+            coords_raw = freqs
+        elif x_mode_norm == "log":
+            coords_raw = torch.log(torch.clamp(freqs, min=1e-6))
+        else:
+            raise ValueError("poly_x_mode must be 'lin' or 'log'.")
+        f_min = coords_raw.min()
+        f_max = coords_raw.max()
         scale = torch.clamp(f_max - f_min, min=1e-8)
-        coords = (freqs - f_min) / scale
+        coords = (coords_raw - f_min) / scale
         design = torch.stack([coords**i for i in range(degree + 1)], dim=1)
     y_flat = y_front.reshape(num_freqs, -1)
     safe_dtype = torch.float32 if y.dtype not in (torch.float32, torch.float64) else y.dtype
@@ -428,6 +478,7 @@ def _eval_polynomial_from_coeffs(
     freq_axis: int,
     target_shape: Sequence[int],
     freqs: Optional[Tensor] = None,
+    x_mode: str = "lin",
 ) -> Tensor:
     """
     Evaluate a polynomial foreground model from coefficients.
@@ -445,10 +496,17 @@ def _eval_polynomial_from_coeffs(
         if freqs.numel() != num_freqs:
             raise ValueError("Frequency array length does not match cube frequency dimension.")
         freqs = freqs.to(device=coeffs.device, dtype=coeffs.dtype)
-        f_min = freqs.min()
-        f_max = freqs.max()
+        x_mode_norm = str(x_mode).strip().lower()
+        if x_mode_norm == "lin":
+            coords_raw = freqs
+        elif x_mode_norm == "log":
+            coords_raw = torch.log(torch.clamp(freqs, min=1e-6))
+        else:
+            raise ValueError("poly_x_mode must be 'lin' or 'log'.")
+        f_min = coords_raw.min()
+        f_max = coords_raw.max()
         scale = torch.clamp(f_max - f_min, min=1e-8)
-        coords = (freqs - f_min) / scale
+        coords = (coords_raw - f_min) / scale
         design = torch.stack([coords**i for i in range(coeffs.shape[0])], dim=1)
     poly = torch.tensordot(design, coeffs, dims=([1], [0]))  # (F, spatial...)
     poly = poly.movedim(0, freq_axis)
@@ -577,6 +635,8 @@ def optimize_components(
     poly_weight: float = 1.0,
     poly_degree: int = 3,
     poly_sigma: Optional[Union[Tensor, float]] = DEFAULT_POLY_SIGMA,
+    poly_x_mode: str = "lin",
+    init_mode: str = "smooth_zero",
     loss_mode: str = "base",
     extra_loss_terms: Optional[Union[str, Sequence[str]]] = None,
     fft_prior_mean: Optional[Union[Tensor, float]] = None,
@@ -1052,7 +1112,14 @@ def optimize_components(
             + freq_delta_mhz * torch.arange(nfreq, device=y_tensor.device, dtype=y_tensor.dtype)
         )
 
-    fg_init, eor_init = initialize_components(y_tensor, freq_axis=freq_axis)
+    fg_init, eor_init = initialize_components_v2(
+        y_tensor,
+        freq_axis=freq_axis,
+        init_mode=init_mode,
+        poly_degree=int(poly_degree) if "poly_reparam" in active_term_set else None,
+        poly_x_mode=poly_x_mode,
+        freqs=freqs_tensor,
+    )
 
     # Poly reparam initialization
     poly_coeffs_param: Optional[torch.nn.Parameter] = None
@@ -1083,6 +1150,7 @@ def optimize_components(
             freq_axis=freq_axis,
             degree=poly_degree,
             freqs=freqs_tensor,
+            x_mode=poly_x_mode,
         )
         resid_init = fg_init - fitted
         poly_coeffs_param = torch.nn.Parameter(coeffs_init.clone())
@@ -1221,7 +1289,11 @@ def optimize_components(
         if "poly_reparam" in active_term_set:
             assert poly_coeffs_param is not None and fg_resid_param is not None
             poly_component = _eval_polynomial_from_coeffs(
-                poly_coeffs_param, freq_axis, y_tensor.shape, freqs=freqs_tensor
+                poly_coeffs_param,
+                freq_axis,
+                y_tensor.shape,
+                freqs=freqs_tensor,
+                x_mode=poly_x_mode,
             )
             fg_current = poly_component + fg_resid_param
             poly_residual = fg_resid_param
@@ -3121,6 +3193,8 @@ def _optimize_from_fits(
         poly_weight=config.poly_weight,
         poly_degree=config.poly_degree,
         poly_sigma=config.poly_sigma,
+        poly_x_mode=config.poly_x_mode,
+        init_mode=config.init_mode,
         loss_mode=config.loss_mode,
         extra_loss_terms=active_extra_terms,
         fft_prior_mean=fft_mean_value,
