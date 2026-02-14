@@ -577,12 +577,35 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
 
 
 def _extract_cut_indices(shape: Tuple[int, int, int], cut_frac: float) -> Tuple[int, int, int, int]:
+    """
+    Match separation_optim.build_cut_xy_indices for unit='frac', center=(0.5,0.5).
+
+    Note: separation_optim uses center_px = round(0.5 * (N-1)), which differs from
+    the common (N-size)//2 formula by 1px when N and size have different parity.
+    """
     _, ny, nx = shape
-    size = int(round(float(cut_frac) * float(min(ny, nx))))
-    size = max(1, min(size, ny, nx))
-    x0 = (nx - size) // 2
-    y0 = (ny - size) // 2
-    return int(x0), int(x0 + size), int(y0), int(y0 + size)
+    nx_i = int(nx)
+    ny_i = int(ny)
+    min_dim = int(min(nx_i, ny_i))
+    size = int(round(float(cut_frac) * float(min_dim)))
+    size = max(1, min(size, nx_i, ny_i))
+
+    def _clamp_fixed_window(start: int, size_px: int, n: int) -> Tuple[int, int]:
+        start_i = int(start)
+        size_i = int(size_px)
+        n_i = int(n)
+        if size_i >= n_i:
+            return (0, n_i)
+        start_i = max(0, min(start_i, n_i - size_i))
+        return (start_i, start_i + size_i)
+
+    center_x_px = int(round(0.5 * float(max(nx_i - 1, 0))))
+    center_y_px = int(round(0.5 * float(max(ny_i - 1, 0))))
+    start_x = int(center_x_px - size // 2)
+    start_y = int(center_y_px - size // 2)
+    x0, x1 = _clamp_fixed_window(start_x, size, nx_i)
+    y0, y1 = _clamp_fixed_window(start_y, size, ny_i)
+    return int(x0), int(x1), int(y0), int(y1)
 
 
 def _load_cube_cut(path: Path, *, cut: Tuple[int, int, int, int]) -> np.ndarray:
