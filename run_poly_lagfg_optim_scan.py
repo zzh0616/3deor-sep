@@ -21,7 +21,7 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -1044,6 +1044,12 @@ def main() -> int:
         if not candidates:
             raise ValueError("No candidates selected after --candidate-names filter.")
 
+    # Persist the concrete candidate list for reproducibility and for remote dispatching.
+    (output_dir / "candidate_names.txt").write_text("\n".join([c.name for c in candidates]) + "\n", encoding="utf-8")
+    with (output_dir / "candidates.jsonl").open("w", encoding="utf-8") as handle:
+        for cand in candidates:
+            handle.write(json.dumps(asdict(cand), sort_keys=True) + "\n")
+
     # Prepare dataset cache: cut indices + true cubes + obs (for lagfg priors).
     ds_cache: Dict[str, Dict[str, object]] = {}
     for ds in datasets:
@@ -1197,4 +1203,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
