@@ -363,67 +363,67 @@ def _read_eor_window_metrics(power_dir: Path) -> Dict[str, object]:
     try:
         data = json.loads(metrics_path.read_text(encoding="utf-8"))
     except Exception:
-        return {"ps2d_note": "bad_metrics_json"}
-    out: Dict[str, object] = {}
-    for k in [
-        "win_log10_corr",
-        "win_log10_mad",
-        "win_log10_p90_abs",
-        "win_log10_rmse",
-        "win_n_bins",
-        "win_power_sum_ratio",
-    ]:
-        if k in data:
-            out[f"ps2d_{k}"] = data[k]
-    return out
+        return {}
+    metrics = data.get("metrics", {})
+    if not isinstance(metrics, dict):
+        return {}
+    return {f"ps2d_win_{k}": v for k, v in metrics.items()}
 
 
-_CONV_RE = re.compile(r"^\\s*\\[convergence\\]\\s+(.*)$")
+_ITER_RE = re.compile(r"^\\[iter\\s+(\\d+)\\]\\s+total=([-0-9eE+.]+)")
+_CHECK_RE = re.compile(r"^\\[check\\]\\s+iter\\s+(\\d+):\\s+mean EoR corr=([-0-9eE+.]+)")
 
 
 def _parse_convergence_from_log(log_path: Path) -> Dict[str, object]:
-    if not log_path.exists():
-        return {}
-    lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    payload: Dict[str, object] = {}
-    for line in reversed(lines[-500:]):
-        m = _CONV_RE.match(line)
-        if not m:
-            continue
-        # Best-effort parse: format is "key=value key=value ..."
-        text = m.group(1).strip()
-        for tok in text.split():
-            if "=" not in tok:
+    """
+    Best-effort convergence indicators from run.log.
+    """
+    iters: List[int] = []
+    totals: List[float] = []
+    checks_i: List[int] = []
+    checks_corr: List[float] = []
+    try:
+        for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            m = _ITER_RE.match(line.strip())
+            if m:
+                iters.append(int(m.group(1)))
+                totals.append(float(m.group(2)))
                 continue
-            k, v = tok.split("=", 1)
-            k = k.strip()
-            v = v.strip().strip(",")
-            if not k:
-                continue
-            try:
-                if v.lower() in {"true", "false"}:
-                    payload[k] = (v.lower() == "true")
-                elif "." in v or "e" in v.lower():
-                    payload[k] = float(v)
-                else:
-                    payload[k] = int(v)
-            except Exception:
-                payload[k] = v
-        break
-    # Normalize expected keys (may be absent).
-    out: Dict[str, object] = {}
-    for k in [
-        "total_delta_last2",
-        "total_rel_delta_last2",
-        "eor_corr_delta_last2",
-        "total_last",
-        "iter_last",
-        "check_iter_last",
-        "check_corr_last",
-        "converged",
-    ]:
-        if k in payload:
-            out[f"conv_{k}"] = payload[k]
+            m = _CHECK_RE.match(line.strip())
+            if m:
+                checks_i.append(int(m.group(1)))
+                checks_corr.append(float(m.group(2)))
+    except OSError:
+        return {"converged": False, "conv_error": "read_failed"}
+
+    def _last_delta(vals: List[float], n: int) -> Optional[float]:
+        if len(vals) < n + 1:
+            return None
+        return float(vals[-1] - vals[-(n + 1)])
+
+    total_delta_2 = _last_delta(totals, 2)
+    corr_delta_2 = _last_delta(checks_corr, 2)
+    total_rel_delta_2: Optional[float] = None
+    if total_delta_2 is not None and totals:
+        denom = abs(float(totals[-1])) + 1e-12
+        total_rel_delta_2 = float(total_delta_2) / float(denom)
+    out: Dict[str, object] = {
+        "conv_total_delta_last2": total_delta_2,
+        "conv_total_rel_delta_last2": total_rel_delta_2,
+        "conv_eor_corr_delta_last2": corr_delta_2,
+        "conv_total_last": totals[-1] if totals else None,
+        "conv_iter_last": iters[-1] if iters else None,
+        "conv_check_iter_last": checks_i[-1] if checks_i else None,
+        "conv_check_corr_last": checks_corr[-1] if checks_corr else None,
+    }
+
+    corr_stable = True
+    if corr_delta_2 is not None:
+        corr_stable = abs(float(corr_delta_2)) < 2e-3
+    total_stable = True
+    if total_rel_delta_2 is not None:
+        total_stable = abs(float(total_rel_delta_2)) < 2e-2
+    out["converged"] = bool(corr_stable and total_stable)
     return out
 
 
@@ -1058,8 +1058,6 @@ def _run_job_result_only(
 
     row.update(_read_eor_window_metrics(run_dir / "powerspec"))
     row.update(_parse_convergence_from_log(run_dir / "run.log"))
-    # Convenience boolean: treat missing converged flag as True (older logs).
-    row["converged"] = bool(row.get("conv_converged", True))
     return row
 
 
@@ -1302,4 +1300,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
