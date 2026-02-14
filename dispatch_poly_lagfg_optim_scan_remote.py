@@ -145,6 +145,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lagfg-prior-source", type=str, default="obs_smooth")
     p.add_argument("--lagfg-const-mean", type=float, default=0.99)
     p.add_argument("--lagfg-const-sigma", type=float, default=0.05)
+    p.add_argument(
+        "--lagfg-prior-robust",
+        action="store_true",
+        help="Use median+MAD (robust) stats for fg_lagcorr_mean/sigma estimation on the worker.",
+    )
 
     # GPU availability policy (util low + enough free memory).
     p.add_argument("--gpu-util-max", type=int, default=5)
@@ -457,6 +462,11 @@ def main() -> int:
             _shq(str(args.lagfg_const_mean)),
             "--lagfg-const-sigma",
             _shq(str(args.lagfg_const_sigma)),
+            *(
+                ["--lagfg-prior-robust"]
+                if bool(args.lagfg_prior_robust)
+                else []
+            ),
             "--python-bin",
             _shq(worker_python_bin),
         ]
