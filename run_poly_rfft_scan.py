@@ -51,8 +51,8 @@ class JobSpec:
     eor_output: Path
 
 
-_ITER_RE = re.compile(r"^\\[iter\\s+(\\d+)\\]\\s+total=([0-9eE+\\-.]+)")
-_CHECK_RE = re.compile(r"^\\[check\\]\\s+iter\\s+(\\d+):\\s+mean EoR corr=([0-9eE+\\-.]+)")
+_ITER_RE = re.compile(r"^\\[iter\\s+(\\d+)\\]\\s+total=([-0-9eE+.]+)")
+_CHECK_RE = re.compile(r"^\\[check\\]\\s+iter\\s+(\\d+):\\s+mean EoR corr=([-0-9eE+.]+)")
 
 
 def parse_args() -> argparse.Namespace:
