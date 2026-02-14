@@ -127,6 +127,16 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Comma-separated candidate names to run; empty means all generated candidates.",
     )
+    p.add_argument(
+        "--candidates-jsonl",
+        type=Path,
+        default=None,
+        help=(
+            "Optional candidates.jsonl path produced by a previous --dry-run (or another host). "
+            "If provided, candidates are loaded from this file instead of regenerated. "
+            "This avoids RNG/version drift across machines."
+        ),
+    )
 
     p.add_argument("--datasets", type=str, default="cube1,cube2", help="Comma-separated datasets to run.")
     p.add_argument("--exclude-from-ranking", type=str, default="cube1", help="Comma-separated dataset names excluded.")
@@ -1137,7 +1147,25 @@ def main() -> int:
         if ds.name not in gpu_map:
             raise ValueError(f"Missing gpu-map entry for dataset '{ds.name}'.")
 
-    candidates = generate_candidates(args)
+    candidates: List[CandidateSpec]
+    if args.candidates_jsonl is not None:
+        src = Path(args.candidates_jsonl)
+        if not src.exists():
+            raise FileNotFoundError(f"--candidates-jsonl not found: {src}")
+        loaded: List[CandidateSpec] = []
+        for raw in src.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            data = json.loads(line)
+            if not isinstance(data, dict):
+                raise ValueError("--candidates-jsonl lines must be JSON objects.")
+            loaded.append(CandidateSpec(**data))
+        if not loaded:
+            raise ValueError("--candidates-jsonl contained no candidates.")
+        candidates = loaded
+    else:
+        candidates = generate_candidates(args)
     if args.candidate_names.strip():
         allow = {t.strip() for t in args.candidate_names.split(",") if t.strip()}
         known = {c.name for c in candidates}
