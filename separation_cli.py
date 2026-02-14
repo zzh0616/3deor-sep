@@ -522,8 +522,11 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
     parser.add_argument(
         "--poly-model",
         type=str,
-        choices=["add", "exp"],
-        help="Polynomial foreground model in poly_reparam: add=poly+resid, exp=exp(poly)+resid (default add).",
+        choices=["add", "exp", "exp_mul"],
+        help=(
+            "Polynomial foreground model in poly_reparam: "
+            "add=poly+resid, exp=exp(poly)+resid, exp_mul=exp(poly+resid) (default add)."
+        ),
     )
     parser.add_argument(
         "--poly-disable-resid",

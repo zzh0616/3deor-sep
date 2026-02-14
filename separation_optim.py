@@ -186,6 +186,7 @@ class OptimizationConfig:
     # Polynomial foreground model used when poly_reparam is active:
     # - "add": fg = poly(x) + resid (legacy)
     # - "exp": fg = exp(poly(x)) + resid  (better matches power-law-like spectra; keeps baseline positive)
+    # - "exp_mul": fg = exp(poly(x) + resid) (multiplicative residual in log-space; keeps fg positive)
     poly_model: str = "add"
     # If False, do not optimize an explicit per-voxel residual when poly_reparam is active.
     # This makes FG fully determined by the polynomial model (strong identifiability at the cost of flexibility).
@@ -430,7 +431,7 @@ def initialize_components_v2(
     if mode == "poly_residual":
         deg = int(poly_degree) if poly_degree is not None else 3
         model = str(poly_model).strip().lower()
-        if model == "exp":
+        if model in {"exp", "exp_mul"}:
             y_safe = torch.clamp(y, min=1e-6)
             y_log = torch.log(y_safe)
             _, fitted_log = _fit_polynomial_coeffs(
@@ -1161,8 +1162,8 @@ def optimize_components(
     fg_param: Optional[torch.nn.Parameter] = None
 
     poly_model_norm = str(poly_model).strip().lower()
-    if poly_model_norm not in {"add", "exp"}:
-        raise ValueError("poly_model must be 'add' or 'exp'.")
+    if poly_model_norm not in {"add", "exp", "exp_mul"}:
+        raise ValueError("poly_model must be one of: 'add', 'exp', 'exp_mul'.")
     poly_resid_enabled_val = bool(poly_resid_enabled)
 
     def _prepare_init_guess(init_value: Optional[Tensor], name: str) -> Optional[Tensor]:
@@ -1184,7 +1185,9 @@ def optimize_components(
         eor_init = eor_override
 
     if "poly_reparam" in active_term_set:
-        if poly_model_norm == "exp":
+        fitted_log: Optional[Tensor] = None
+        fg_log: Optional[Tensor] = None
+        if poly_model_norm in {"exp", "exp_mul"}:
             fg_safe = torch.clamp(fg_init, min=1e-6)
             fg_log = torch.log(fg_safe)
             coeffs_init, fitted_log = _fit_polynomial_coeffs(
@@ -1206,7 +1209,12 @@ def optimize_components(
             )
         poly_coeffs_param = torch.nn.Parameter(coeffs_init.clone())
         if poly_resid_enabled_val:
-            resid_init = fg_init - fitted
+            if poly_model_norm == "exp_mul":
+                assert fg_log is not None and fitted_log is not None
+                # Residual is in log-space so FG stays positive: fg = exp(poly + resid).
+                resid_init = fg_log - fitted_log
+            else:
+                resid_init = fg_init - fitted
             fg_resid_param = torch.nn.Parameter(resid_init.clone())
     else:
         fg_param = torch.nn.Parameter(fg_init.clone())
@@ -1356,15 +1364,28 @@ def optimize_components(
                 freqs=freqs_tensor,
                 x_mode=poly_x_mode,
             )
-            if poly_model_norm == "exp":
+            if poly_model_norm in {"exp", "exp_mul"}:
                 poly_component = torch.clamp(poly_component, min=-20.0, max=20.0)
-                poly_component = torch.exp(poly_component)
-            if fg_resid_param is not None:
-                fg_current = poly_component + fg_resid_param
-                poly_residual = fg_resid_param
+                if poly_model_norm == "exp_mul" and fg_resid_param is not None:
+                    fg_log_current = poly_component + fg_resid_param
+                    fg_log_current = torch.clamp(fg_log_current, min=-20.0, max=20.0)
+                    fg_current = torch.exp(fg_log_current)
+                    poly_residual = fg_resid_param
+                else:
+                    poly_component = torch.exp(poly_component)
+                    if fg_resid_param is not None:
+                        fg_current = poly_component + fg_resid_param
+                        poly_residual = fg_resid_param
+                    else:
+                        fg_current = poly_component
+                        poly_residual = None
             else:
-                fg_current = poly_component
-                poly_residual = None
+                if fg_resid_param is not None:
+                    fg_current = poly_component + fg_resid_param
+                    poly_residual = fg_resid_param
+                else:
+                    fg_current = poly_component
+                    poly_residual = None
         else:
             assert fg_param is not None
             fg_current = fg_param
@@ -1561,13 +1582,17 @@ def optimize_components(
             freqs=freqs_tensor,
             x_mode=poly_x_mode,
         )
-        if poly_model_norm == "exp":
+        if poly_model_norm in {"exp", "exp_mul"}:
             poly_component = torch.clamp(poly_component, min=-20.0, max=20.0)
-            poly_component = torch.exp(poly_component)
-        if fg_resid_param is not None:
-            fg_final = poly_component + fg_resid_param
+            if poly_model_norm == "exp_mul" and fg_resid_param is not None:
+                fg_log_final = poly_component + fg_resid_param
+                fg_log_final = torch.clamp(fg_log_final, min=-20.0, max=20.0)
+                fg_final = torch.exp(fg_log_final)
+            else:
+                poly_component = torch.exp(poly_component)
+                fg_final = poly_component + fg_resid_param if fg_resid_param is not None else poly_component
         else:
-            fg_final = poly_component
+            fg_final = poly_component + fg_resid_param if fg_resid_param is not None else poly_component
     else:
         assert fg_param is not None
         fg_final = fg_param
