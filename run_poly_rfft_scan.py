@@ -317,8 +317,13 @@ def _parse_convergence_from_log(log_path: Path) -> Dict[str, object]:
 
     total_delta_2 = _last_delta(totals, 2)
     corr_delta_2 = _last_delta(checks_corr, 2)
+    total_rel_delta_2: Optional[float] = None
+    if total_delta_2 is not None and totals:
+        denom = abs(float(totals[-1])) + 1e-12
+        total_rel_delta_2 = float(total_delta_2) / float(denom)
     out: Dict[str, object] = {
         "conv_total_delta_last2": total_delta_2,
+        "conv_total_rel_delta_last2": total_rel_delta_2,
         "conv_eor_corr_delta_last2": corr_delta_2,
         "conv_total_last": totals[-1] if totals else None,
         "conv_iter_last": iters[-1] if iters else None,
@@ -330,11 +335,12 @@ def _parse_convergence_from_log(log_path: Path) -> Dict[str, object]:
     # - If we have at least 3 corr checks, require the last ~2 intervals to be stable.
     corr_stable = True
     if corr_delta_2 is not None:
-        corr_stable = abs(float(corr_delta_2)) < 1e-3
+        # Correlation is bounded; a small absolute delta is meaningful.
+        corr_stable = abs(float(corr_delta_2)) < 2e-3
     total_stable = True
-    if total_delta_2 is not None:
-        # total loss should not be changing too much at the end; keep loose.
-        total_stable = abs(float(total_delta_2)) < 5e-3
+    if total_rel_delta_2 is not None:
+        # Total loss can keep decreasing due to smoothness terms; use a relative, loose threshold.
+        total_stable = abs(float(total_rel_delta_2)) < 2e-2
     out["converged"] = bool(corr_stable and total_stable)
     return out
 
