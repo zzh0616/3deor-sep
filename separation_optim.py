@@ -183,6 +183,8 @@ class OptimizationConfig:
     # - "power": monomials x^i (legacy)
     # - "chebyshev": Chebyshev T_i (better conditioned for higher degree)
     # - "legendre": Legendre P_i (orthogonal on [-1,1])
+    # - "dct": low-frequency cosine basis cos(pi*k*x)
+    # - "bspline": open-uniform clamped B-spline basis (up to cubic)
     poly_basis: str = "power"
     # Coordinate used by polynomial priors/reparameterization:
     # - "lin": normalize frequency in MHz to [0,1]
@@ -482,7 +484,7 @@ def _poly_design_from_unit_coords(coords_unit: Tensor, degree: int, basis: str) 
     Args:
         coords_unit: 1D tensor of shape (F,) with values in [0, 1].
         degree: Polynomial degree (>= 0).
-        basis: "power", "chebyshev", or "legendre".
+        basis: "power", "chebyshev", "legendre", "dct", or "bspline".
     Returns:
         Tensor of shape (F, degree+1).
     """
@@ -491,6 +493,75 @@ def _poly_design_from_unit_coords(coords_unit: Tensor, degree: int, basis: str) 
     basis_norm = str(basis).strip().lower()
     if basis_norm == "power":
         return torch.stack([coords_unit**i for i in range(degree + 1)], dim=1)
+
+    if basis_norm == "dct":
+        # Low-frequency cosine basis on [0, 1]:
+        #   phi_0(x) = 1
+        #   phi_k(x) = cos(pi*k*x)
+        # This behaves similarly to a DCT (type-II-like) low-mode expansion when coords are near-uniform.
+        cols = [torch.ones_like(coords_unit)]
+        for k in range(1, degree + 1):
+            cols.append(torch.cos(math.pi * float(k) * coords_unit))
+        return torch.stack(cols, dim=1)
+
+    if basis_norm == "bspline":
+        # Open-uniform clamped B-spline basis with up to cubic degree (p<=3).
+        # Here, `degree` controls the *number of coefficients* (degree+1), matching the poly API.
+        # The spline order p is chosen as min(3, n_ctrl-1).
+        n_ctrl = int(degree) + 1
+        if n_ctrl <= 1:
+            return torch.ones_like(coords_unit)[:, None]
+        p = min(3, n_ctrl - 1)
+        # Knot vector length = n_ctrl + p + 1.
+        # First/last (p+1) knots are clamped at 0 and 1; interior knots are uniform.
+        interior_count = n_ctrl - p - 1
+        if interior_count > 0:
+            denom = float(n_ctrl - p)
+            interior = torch.arange(1, interior_count + 1, device=coords_unit.device, dtype=coords_unit.dtype) / denom
+        else:
+            interior = torch.empty(0, device=coords_unit.device, dtype=coords_unit.dtype)
+        knots = torch.cat(
+            [
+                torch.zeros(p + 1, device=coords_unit.device, dtype=coords_unit.dtype),
+                interior,
+                torch.ones(p + 1, device=coords_unit.device, dtype=coords_unit.dtype),
+            ],
+            dim=0,
+        )
+        x = coords_unit
+        F = int(x.numel())
+        # Degree-0 basis
+        N = torch.zeros((n_ctrl, F), device=x.device, dtype=x.dtype)
+        for i in range(n_ctrl):
+            left = knots[i]
+            right = knots[i + 1]
+            if i == n_ctrl - 1:
+                mask = (x >= left) & (x <= right)
+            else:
+                mask = (x >= left) & (x < right)
+            N[i] = mask.to(dtype=x.dtype)
+        # Cox-de Boor recursion up to degree p.
+        for k in range(1, p + 1):
+            N_new = torch.zeros_like(N)
+            for i in range(n_ctrl):
+                # term1: (x - t_i) / (t_{i+k} - t_i) * N_{i,k-1}
+                denom1 = knots[i + k] - knots[i]
+                if float(denom1) > 0.0:
+                    term1 = (x - knots[i]) / denom1 * N[i]
+                else:
+                    term1 = 0.0
+                # term2: (t_{i+k+1} - x) / (t_{i+k+1} - t_{i+1}) * N_{i+1,k-1}
+                if i + 1 < n_ctrl:
+                    denom2 = knots[i + k + 1] - knots[i + 1]
+                    if float(denom2) > 0.0:
+                        term2 = (knots[i + k + 1] - x) / denom2 * N[i + 1]
+                    else:
+                        term2 = 0.0
+                else:
+                    term2 = 0.0
+                N_new[i] = term1 + term2
+            N = N_new
+        return N.T
 
     # Map [0,1] -> [-1,1] for orthogonal polynomial bases.
     x = coords_unit * 2.0 - 1.0
@@ -518,7 +589,7 @@ def _poly_design_from_unit_coords(coords_unit: Tensor, degree: int, basis: str) 
             cols.append(pn)
         return torch.stack(cols, dim=1)
 
-    raise ValueError("poly_basis must be one of: 'power', 'chebyshev', 'legendre'.")
+    raise ValueError("poly_basis must be one of: 'power', 'chebyshev', 'legendre', 'dct', 'bspline'.")
 
 
 def _fit_polynomial_coeffs(

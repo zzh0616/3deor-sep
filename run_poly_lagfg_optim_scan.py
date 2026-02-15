@@ -59,7 +59,7 @@ class CandidateSpec:
     poly_sigma: float
     poly_basis: str  # power/chebyshev/legendre
     poly_x_mode: str  # lin/log
-    poly_model: str  # add/exp
+    poly_model: str  # add/exp/exp_mul
     poly_resid_enabled: bool
 
     # Optimizer
@@ -158,10 +158,15 @@ def parse_args() -> argparse.Namespace:
         "--poly-bases",
         type=str,
         default="power",
-        help="Comma-separated polynomial bases for poly_reparam: power,chebyshev,legendre.",
+        help="Comma-separated bases for poly_reparam: power,chebyshev,legendre,dct,bspline.",
     )
     p.add_argument("--poly-x-modes", type=str, default="lin,log")
-    p.add_argument("--poly-models", type=str, default="exp", help="Comma-separated poly_model choices: add,exp.")
+    p.add_argument(
+        "--poly-models",
+        type=str,
+        default="exp_mul",
+        help="Comma-separated poly_model choices: add,exp,exp_mul.",
+    )
     p.add_argument(
         "--poly-resid-enabled-list",
         type=str,
@@ -507,13 +512,13 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
     remaining = max(0, int(args.num_candidates) - len(out))
     for i in range(remaining):
         poly_basis = str(rng.choice(poly_bases)).strip().lower()
-        if poly_basis not in {"power", "chebyshev", "legendre"}:
+        if poly_basis not in {"power", "chebyshev", "legendre", "dct", "bspline"}:
             raise ValueError(
-                f"Invalid poly_basis '{poly_basis}'. Expected power, chebyshev, or legendre."
+                f"Invalid poly_basis '{poly_basis}'. Expected power, chebyshev, legendre, dct, or bspline."
             )
         poly_degree = int(rng.choice(poly_degrees))
         poly_x_mode = str(rng.choice(poly_x_modes)).strip().lower()
-        poly_model = str(rng.choice(poly_models)).strip().lower() if poly_models else "exp"
+        poly_model = str(rng.choice(poly_models)).strip().lower() if poly_models else "exp_mul"
         poly_resid_enabled = bool(rng.choice(poly_resid_enabled_list))
         poly_sigma = _log_uniform(rng, float(args.poly_sigma_min), float(args.poly_sigma_max))
         poly_weight = float(rng.choice(poly_weights))

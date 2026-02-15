@@ -529,8 +529,8 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
     parser.add_argument(
         "--poly-basis",
         type=str,
-        choices=["power", "chebyshev", "legendre"],
-        help="Polynomial basis for poly_reparam: power, chebyshev, legendre (default power).",
+        choices=["power", "chebyshev", "legendre", "dct", "bspline"],
+        help="Basis for poly_reparam: power, chebyshev, legendre, dct, bspline (default power).",
     )
     parser.add_argument(
         "--poly-x-mode",

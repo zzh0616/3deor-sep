@@ -174,11 +174,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--poly-degree", type=int, default=3)
     p.add_argument("--poly-sigma", type=float, default=0.05)
     p.add_argument(
+        "--poly-degree-list",
+        type=str,
+        default="",
+        help="Optional comma-separated poly degrees to generate multiple poly-only candidates (overrides --poly-degree).",
+    )
+    p.add_argument(
         "--poly-basis",
         type=str,
         default="power",
-        choices=["power", "chebyshev", "legendre"],
-        help="Polynomial basis used by poly_reparam: power (legacy), chebyshev, legendre.",
+        choices=["power", "chebyshev", "legendre", "dct", "bspline"],
+        help="Basis used by poly_reparam: power (legacy), chebyshev, legendre, dct, bspline.",
+    )
+    p.add_argument(
+        "--poly-basis-list",
+        type=str,
+        default="",
+        help="Optional comma-separated poly bases to generate multiple poly-only candidates (overrides --poly-basis).",
     )
     p.add_argument(
         "--poly-x-mode",
@@ -188,6 +200,12 @@ def parse_args() -> argparse.Namespace:
         help="Polynomial coordinate for poly_reparam (default log).",
     )
     p.add_argument(
+        "--poly-x-mode-list",
+        type=str,
+        default="",
+        help="Optional comma-separated poly x-modes to generate multiple poly-only candidates (overrides --poly-x-mode).",
+    )
+    p.add_argument(
         "--poly-model",
         type=str,
         default="exp_mul",
@@ -195,10 +213,25 @@ def parse_args() -> argparse.Namespace:
         help="Polynomial foreground model for poly_reparam (default exp_mul).",
     )
     p.add_argument(
+        "--poly-model-list",
+        type=str,
+        default="",
+        help="Optional comma-separated poly models to generate multiple poly-only candidates (overrides --poly-model).",
+    )
+    p.add_argument(
         "--poly-enable-resid",
         dest="poly_resid_enabled",
         action="store_true",
         help="Enable explicit per-voxel residual when poly_reparam is active (default disabled).",
+    )
+    p.add_argument(
+        "--poly-resid-enabled-list",
+        type=str,
+        default="",
+        help=(
+            "Optional comma-separated booleans to generate multiple poly-only candidates "
+            "(overrides --poly-enable-resid). Example: true,false"
+        ),
     )
     p.add_argument(
         "--eor-as-residual",
@@ -802,16 +835,105 @@ def _write_markdown(path: Path, ranked: Sequence[Dict[str, object]], meta: Dict[
 def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
     out: List[CandidateSpec] = []
 
-    # Always include poly-only baseline candidate.
-    out.append(
-        CandidateSpec(
-            name=f"poly_w{_fmt_float_token(float(args.poly_weight))}_d{int(args.poly_degree)}_s{_fmt_float_token(float(args.poly_sigma))}",
-            extra_loss_terms=("poly_reparam",),
-            optim_overrides={},
-            weight_overrides={"poly_weight": float(args.poly_weight)},
-            prior_overrides={},
+    poly_degrees = _parse_int_list(args.poly_degree_list) if str(args.poly_degree_list).strip() else [int(args.poly_degree)]
+    poly_bases = _parse_csv_tokens(args.poly_basis_list) if str(args.poly_basis_list).strip() else [str(args.poly_basis)]
+    poly_x_modes = _parse_csv_tokens(args.poly_x_mode_list) if str(args.poly_x_mode_list).strip() else [str(args.poly_x_mode)]
+    poly_models = _parse_csv_tokens(args.poly_model_list) if str(args.poly_model_list).strip() else [str(args.poly_model)]
+
+    resid_list: List[bool] = []
+    if str(args.poly_resid_enabled_list).strip():
+        for tok in _parse_csv_tokens(args.poly_resid_enabled_list):
+            t = tok.strip().lower()
+            if t in {"true", "1", "yes", "y"}:
+                resid_list.append(True)
+            elif t in {"false", "0", "no", "n"}:
+                resid_list.append(False)
+            else:
+                raise ValueError("--poly-resid-enabled-list expects booleans like true/false.")
+    else:
+        resid_list = [bool(args.poly_resid_enabled)]
+
+    poly_basis_allowed = {"power", "chebyshev", "legendre", "dct", "bspline"}
+    poly_model_allowed = {"add", "exp", "exp_mul"}
+    poly_x_allowed = {"lin", "log"}
+
+    poly_variants: List[Tuple[int, str, str, str, bool]] = []
+    seen: set = set()
+    for d in poly_degrees:
+        for b in poly_bases:
+            b_norm = str(b).strip().lower()
+            if b_norm not in poly_basis_allowed:
+                raise ValueError(f"Invalid poly_basis '{b_norm}'. Expected one of: {sorted(poly_basis_allowed)}")
+            for x in poly_x_modes:
+                x_norm = str(x).strip().lower()
+                if x_norm not in poly_x_allowed:
+                    raise ValueError(f"Invalid poly_x_mode '{x_norm}'. Expected lin or log.")
+                for m in poly_models:
+                    m_norm = str(m).strip().lower()
+                    if m_norm not in poly_model_allowed:
+                        raise ValueError(f"Invalid poly_model '{m_norm}'. Expected one of: {sorted(poly_model_allowed)}")
+                    for r in resid_list:
+                        key = (int(d), b_norm, x_norm, m_norm, bool(r))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        poly_variants.append(key)
+
+    # Avoid accidental combinatorial explosions: only allow other extra-term scans when a single poly baseline is selected.
+    if len(poly_variants) > 1 and any(
+        bool(getattr(args, name))
+        for name in (
+            "include_corr",
+            "include_lagcorr_fg",
+            "include_laggap",
+            "include_fg_logcurv",
+            "include_fg_lowrank",
+            "include_eor_mean",
+            "include_eor_hf",
+            "include_eor_lagshape",
+            "include_eor_iso",
+            "include_combos",
         )
+    ):
+        raise ValueError(
+            "Multiple poly baselines were requested via --poly-*-list, but extra-term scans were also enabled. "
+            "Run the poly baseline grid first (poly-only), then run extra-term scans with a single poly baseline."
+        )
+
+    basis_tag = {"power": "pow", "chebyshev": "cheb", "legendre": "leg", "dct": "dct", "bspline": "bsp"}
+    legacy_single = (
+        len(poly_variants) == 1
+        and (not str(args.poly_degree_list).strip())
+        and (not str(args.poly_basis_list).strip())
+        and (not str(args.poly_x_mode_list).strip())
+        and (not str(args.poly_model_list).strip())
+        and (not str(args.poly_resid_enabled_list).strip())
     )
+    for d, b, x, m, r in poly_variants:
+        out.append(
+            CandidateSpec(
+                name=(
+                    f"poly_w{_fmt_float_token(float(args.poly_weight))}_d{int(d)}_s{_fmt_float_token(float(args.poly_sigma))}"
+                    if legacy_single
+                    else (
+                        f"poly_{basis_tag.get(b,b)}_{x}_{m}_r{1 if r else 0}"
+                        f"_w{_fmt_float_token(float(args.poly_weight))}"
+                        f"_d{int(d)}_s{_fmt_float_token(float(args.poly_sigma))}"
+                    )
+                ),
+                extra_loss_terms=("poly_reparam",),
+                optim_overrides={
+                    "poly_degree": int(d),
+                    "poly_sigma": float(args.poly_sigma),
+                    "poly_basis": str(b),
+                    "poly_x_mode": str(x),
+                    "poly_model": str(m),
+                    "poly_resid_enabled": bool(r),
+                },
+                weight_overrides={"poly_weight": float(args.poly_weight)},
+                prior_overrides={},
+            )
+        )
 
     if bool(args.include_control):
         out.append(

@@ -95,10 +95,15 @@ def parse_args() -> argparse.Namespace:
         "--poly-bases",
         type=str,
         default="power",
-        help="Comma-separated polynomial bases for poly_reparam: power,chebyshev,legendre.",
+        help="Comma-separated bases for poly_reparam: power,chebyshev,legendre,dct,bspline.",
     )
     p.add_argument("--poly-x-modes", type=str, default="lin,log")
-    p.add_argument("--poly-models", type=str, default="exp", help="Comma-separated poly_model choices: add,exp.")
+    p.add_argument(
+        "--poly-models",
+        type=str,
+        default="exp_mul",
+        help="Comma-separated poly_model choices: add,exp,exp_mul.",
+    )
     p.add_argument(
         "--poly-resid-enabled-list",
         type=str,
