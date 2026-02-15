@@ -171,8 +171,20 @@ def parse_args() -> argparse.Namespace:
 
     # Poly baseline (defaults set to current best on injected cube2).
     p.add_argument("--poly-weight", type=float, default=1.0)
+    p.add_argument(
+        "--poly-weight-list",
+        type=str,
+        default="",
+        help="Optional comma-separated poly weights to generate multiple poly-only candidates (overrides --poly-weight).",
+    )
     p.add_argument("--poly-degree", type=int, default=3)
     p.add_argument("--poly-sigma", type=float, default=0.05)
+    p.add_argument(
+        "--poly-sigma-list",
+        type=str,
+        default="",
+        help="Optional comma-separated poly sigmas to generate multiple poly-only candidates (overrides --poly-sigma).",
+    )
     p.add_argument(
         "--poly-degree-list",
         type=str,
@@ -835,6 +847,12 @@ def _write_markdown(path: Path, ranked: Sequence[Dict[str, object]], meta: Dict[
 def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
     out: List[CandidateSpec] = []
 
+    poly_weights = (
+        _parse_float_list(args.poly_weight_list) if str(args.poly_weight_list).strip() else [float(args.poly_weight)]
+    )
+    poly_sigmas = (
+        _parse_float_list(args.poly_sigma_list) if str(args.poly_sigma_list).strip() else [float(args.poly_sigma)]
+    )
     poly_degrees = _parse_int_list(args.poly_degree_list) if str(args.poly_degree_list).strip() else [int(args.poly_degree)]
     poly_bases = _parse_csv_tokens(args.poly_basis_list) if str(args.poly_basis_list).strip() else [str(args.poly_basis)]
     poly_x_modes = _parse_csv_tokens(args.poly_x_mode_list) if str(args.poly_x_mode_list).strip() else [str(args.poly_x_mode)]
@@ -857,27 +875,31 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
     poly_model_allowed = {"add", "exp", "exp_mul"}
     poly_x_allowed = {"lin", "log"}
 
-    poly_variants: List[Tuple[int, str, str, str, bool]] = []
+    poly_variants: List[Tuple[float, int, float, str, str, str, bool]] = []
     seen: set = set()
-    for d in poly_degrees:
-        for b in poly_bases:
-            b_norm = str(b).strip().lower()
-            if b_norm not in poly_basis_allowed:
-                raise ValueError(f"Invalid poly_basis '{b_norm}'. Expected one of: {sorted(poly_basis_allowed)}")
-            for x in poly_x_modes:
-                x_norm = str(x).strip().lower()
-                if x_norm not in poly_x_allowed:
-                    raise ValueError(f"Invalid poly_x_mode '{x_norm}'. Expected lin or log.")
-                for m in poly_models:
-                    m_norm = str(m).strip().lower()
-                    if m_norm not in poly_model_allowed:
-                        raise ValueError(f"Invalid poly_model '{m_norm}'. Expected one of: {sorted(poly_model_allowed)}")
-                    for r in resid_list:
-                        key = (int(d), b_norm, x_norm, m_norm, bool(r))
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        poly_variants.append(key)
+    for w in poly_weights:
+        for d in poly_degrees:
+            for sig in poly_sigmas:
+                for b in poly_bases:
+                    b_norm = str(b).strip().lower()
+                    if b_norm not in poly_basis_allowed:
+                        raise ValueError(f"Invalid poly_basis '{b_norm}'. Expected one of: {sorted(poly_basis_allowed)}")
+                    for x in poly_x_modes:
+                        x_norm = str(x).strip().lower()
+                        if x_norm not in poly_x_allowed:
+                            raise ValueError(f"Invalid poly_x_mode '{x_norm}'. Expected lin or log.")
+                        for m in poly_models:
+                            m_norm = str(m).strip().lower()
+                            if m_norm not in poly_model_allowed:
+                                raise ValueError(
+                                    f"Invalid poly_model '{m_norm}'. Expected one of: {sorted(poly_model_allowed)}"
+                                )
+                            for r in resid_list:
+                                key = (float(w), int(d), float(sig), b_norm, x_norm, m_norm, bool(r))
+                                if key in seen:
+                                    continue
+                                seen.add(key)
+                                poly_variants.append(key)
 
     # Avoid accidental combinatorial explosions: only allow other extra-term scans when a single poly baseline is selected.
     if len(poly_variants) > 1 and any(
@@ -904,33 +926,35 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
     legacy_single = (
         len(poly_variants) == 1
         and (not str(args.poly_degree_list).strip())
+        and (not str(args.poly_weight_list).strip())
+        and (not str(args.poly_sigma_list).strip())
         and (not str(args.poly_basis_list).strip())
         and (not str(args.poly_x_mode_list).strip())
         and (not str(args.poly_model_list).strip())
         and (not str(args.poly_resid_enabled_list).strip())
     )
-    for d, b, x, m, r in poly_variants:
+    for w, d, sig, b, x, m, r in poly_variants:
         out.append(
             CandidateSpec(
                 name=(
-                    f"poly_w{_fmt_float_token(float(args.poly_weight))}_d{int(d)}_s{_fmt_float_token(float(args.poly_sigma))}"
+                    f"poly_w{_fmt_float_token(float(w))}_d{int(d)}_s{_fmt_float_token(float(sig))}"
                     if legacy_single
                     else (
                         f"poly_{basis_tag.get(b,b)}_{x}_{m}_r{1 if r else 0}"
-                        f"_w{_fmt_float_token(float(args.poly_weight))}"
-                        f"_d{int(d)}_s{_fmt_float_token(float(args.poly_sigma))}"
+                        f"_w{_fmt_float_token(float(w))}"
+                        f"_d{int(d)}_s{_fmt_float_token(float(sig))}"
                     )
                 ),
                 extra_loss_terms=("poly_reparam",),
                 optim_overrides={
                     "poly_degree": int(d),
-                    "poly_sigma": float(args.poly_sigma),
+                    "poly_sigma": float(sig),
                     "poly_basis": str(b),
                     "poly_x_mode": str(x),
                     "poly_model": str(m),
                     "poly_resid_enabled": bool(r),
                 },
-                weight_overrides={"poly_weight": float(args.poly_weight)},
+                weight_overrides={"poly_weight": float(w)},
                 prior_overrides={},
             )
         )
