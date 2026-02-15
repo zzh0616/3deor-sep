@@ -527,6 +527,12 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         help="Std used to scale polynomial prior residuals (default 0.05).",
     )
     parser.add_argument(
+        "--poly-basis",
+        type=str,
+        choices=["power", "chebyshev", "legendre"],
+        help="Polynomial basis for poly_reparam: power, chebyshev, legendre (default power).",
+    )
+    parser.add_argument(
         "--poly-x-mode",
         type=str,
         choices=["lin", "log"],
@@ -719,6 +725,7 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "poly_weight",
         "poly_degree",
         "poly_sigma",
+        "poly_basis",
         "poly_x_mode",
         "poly_model",
         "poly_resid_enabled",

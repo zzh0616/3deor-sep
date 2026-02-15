@@ -57,6 +57,7 @@ class CandidateSpec:
     poly_weight: float
     poly_degree: int
     poly_sigma: float
+    poly_basis: str  # power/chebyshev/legendre
     poly_x_mode: str  # lin/log
     poly_model: str  # add/exp
     poly_resid_enabled: bool
@@ -153,6 +154,12 @@ def parse_args() -> argparse.Namespace:
     # Candidate space knobs (kept intentionally compact; tune by editing this file if needed).
     p.add_argument("--fg-smooth-modes", type=str, default="diff2_l2", help="Comma-separated fg_smooth_mode choices.")
     p.add_argument("--poly-degrees", type=str, default="2,3,4,5")
+    p.add_argument(
+        "--poly-bases",
+        type=str,
+        default="power",
+        help="Comma-separated polynomial bases for poly_reparam: power,chebyshev,legendre.",
+    )
     p.add_argument("--poly-x-modes", type=str, default="lin,log")
     p.add_argument("--poly-models", type=str, default="exp", help="Comma-separated poly_model choices: add,exp.")
     p.add_argument(
@@ -265,10 +272,13 @@ def _fmt_float_token(x: float) -> str:
 def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
     rng = np.random.default_rng(int(args.seed))
     controls: List[CandidateSpec] = []
+    poly_bases = _parse_csv_tokens(args.poly_bases) or ["power"]
+    basis_token_map = {"power": "pow", "chebyshev": "cheb", "legendre": "leg"}
 
     def _base_control(
         name: str,
         *,
+        poly_basis: str,
         poly_x_mode: str,
         poly_model: str,
         poly_resid_enabled: bool,
@@ -296,6 +306,7 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
             poly_weight=float(poly_weight),
             poly_degree=int(poly_degree),
             poly_sigma=float(poly_sigma),
+            poly_basis=str(poly_basis),
             poly_x_mode=str(poly_x_mode),
             poly_model=str(poly_model),
             poly_resid_enabled=bool(poly_resid_enabled),
@@ -330,6 +341,7 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
         [
             _base_control(
                 "ctrl00_poly_lin_init_smooth_zero",
+                poly_basis="power",
                 poly_x_mode="lin",
                 poly_model="add",
                 poly_resid_enabled=True,
@@ -341,6 +353,7 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
             ),
             _base_control(
                 "ctrl01_poly_lin_init_smooth_resid",
+                poly_basis="power",
                 poly_x_mode="lin",
                 poly_model="add",
                 poly_resid_enabled=True,
@@ -352,6 +365,7 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
             ),
             _base_control(
                 "ctrl02_poly_lin_init_poly_resid",
+                poly_basis="power",
                 poly_x_mode="lin",
                 poly_model="add",
                 poly_resid_enabled=True,
@@ -363,6 +377,7 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
             ),
             _base_control(
                 "ctrl03_poly_log_init_poly_resid",
+                poly_basis="power",
                 poly_x_mode="log",
                 poly_model="add",
                 poly_resid_enabled=True,
@@ -374,6 +389,7 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
             ),
             _base_control(
                 "ctrl04_poly_log_d3_s0p01_pw3_init_poly_resid",
+                poly_basis="power",
                 poly_x_mode="log",
                 poly_model="add",
                 poly_resid_enabled=True,
@@ -385,6 +401,7 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
             ),
             _base_control(
                 "ctrl05_poly_log_d4_s0p01_pw3_init_poly_resid",
+                poly_basis="power",
                 poly_x_mode="log",
                 poly_model="add",
                 poly_resid_enabled=True,
@@ -396,6 +413,7 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
             ),
             _base_control(
                 "ctrl06_poly_log_d3_s0p01_pw3_init_poly_resid_lagfg",
+                poly_basis="power",
                 poly_x_mode="log",
                 poly_model="add",
                 poly_resid_enabled=True,
@@ -407,6 +425,7 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
             ),
             _base_control(
                 "ctrl07_poly_exp_log_noresid_init_poly_resid",
+                poly_basis="power",
                 poly_x_mode="log",
                 poly_model="exp",
                 poly_resid_enabled=False,
@@ -418,6 +437,7 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
             ),
             _base_control(
                 "ctrl08_poly_exp_log_noresid_d4_pw3_init_poly_resid",
+                poly_basis="power",
                 poly_x_mode="log",
                 poly_model="exp",
                 poly_resid_enabled=False,
@@ -429,6 +449,7 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
             ),
             _base_control(
                 "ctrl09_poly_exp_log_noresid_d3_pw3_init_poly_resid_lagfg",
+                poly_basis="power",
                 poly_x_mode="log",
                 poly_model="exp",
                 poly_resid_enabled=False,
@@ -485,6 +506,11 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
 
     remaining = max(0, int(args.num_candidates) - len(out))
     for i in range(remaining):
+        poly_basis = str(rng.choice(poly_bases)).strip().lower()
+        if poly_basis not in {"power", "chebyshev", "legendre"}:
+            raise ValueError(
+                f"Invalid poly_basis '{poly_basis}'. Expected power, chebyshev, or legendre."
+            )
         poly_degree = int(rng.choice(poly_degrees))
         poly_x_mode = str(rng.choice(poly_x_modes)).strip().lower()
         poly_model = str(rng.choice(poly_models)).strip().lower() if poly_models else "exp"
@@ -531,8 +557,9 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
         lagpairs = int(rng.choice(lagcorr_max_pairs_list))
         lagrms = float(rng.choice(lagcorr_rms_min_list))
 
+        btag = basis_token_map.get(poly_basis, poly_basis[:3])
         name = (
-            f"r{i:04d}_px{poly_x_mode[0]}d{poly_degree}_ps{_fmt_float_token(poly_sigma)}"
+            f"r{i:04d}_pb{btag}_px{poly_x_mode[0]}d{poly_degree}_ps{_fmt_float_token(poly_sigma)}"
             f"_pw{_fmt_float_token(poly_weight)}"
             f"_pm{poly_model[0]}r{1 if poly_resid_enabled else 0}"
             f"_b{_fmt_float_token(beta)}_g{_fmt_float_token(gamma)}"
@@ -558,6 +585,7 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
                 poly_weight=float(poly_weight),
                 poly_degree=int(poly_degree),
                 poly_sigma=float(poly_sigma),
+                poly_basis=str(poly_basis),
                 poly_x_mode=str(poly_x_mode),
                 poly_model=str(poly_model),
                 poly_resid_enabled=bool(poly_resid_enabled),
@@ -914,6 +942,7 @@ def _build_config(
             "freq_delta_mhz": float(args.freq_delta_mhz),
             "poly_degree": int(cand.poly_degree),
             "poly_sigma": float(cand.poly_sigma),
+            "poly_basis": str(cand.poly_basis),
             "poly_x_mode": str(cand.poly_x_mode),
             "poly_model": str(cand.poly_model),
             "poly_resid_enabled": bool(cand.poly_resid_enabled),
@@ -1023,6 +1052,7 @@ def _run_job_result_only(
         "poly_weight": float(job.candidate.poly_weight),
         "poly_degree": int(job.candidate.poly_degree),
         "poly_sigma": float(job.candidate.poly_sigma),
+        "poly_basis": str(job.candidate.poly_basis),
         "poly_x_mode": str(job.candidate.poly_x_mode),
         "poly_model": str(job.candidate.poly_model),
         "poly_resid_enabled": bool(job.candidate.poly_resid_enabled),

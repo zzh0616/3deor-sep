@@ -88,6 +88,7 @@ All weights default to `1.0`. The code prints a warning if you deviate from 1.0.
 - `fft_prior_sigma` (`float`): High-frequency energy prior sigma.
 - `poly_degree` (`int`): Polynomial degree for polynomial priors.
 - `poly_sigma` (`float`): Residual sigma for polynomial priors.
+- `poly_basis` (`str`): Polynomial basis for `poly_reparam` / `poly_residual` init. One of `"power"` (default), `"chebyshev"`, `"legendre"`.
 
 ## `evaluation` Section
 

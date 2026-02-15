@@ -179,6 +179,11 @@ class OptimizationConfig:
     poly_weight: float = 1.0
     poly_degree: int = 3
     poly_sigma: float = DEFAULT_POLY_SIGMA
+    # Polynomial basis used by poly_reparam / poly_residual init:
+    # - "power": monomials x^i (legacy)
+    # - "chebyshev": Chebyshev T_i (better conditioned for higher degree)
+    # - "legendre": Legendre P_i (orthogonal on [-1,1])
+    poly_basis: str = "power"
     # Coordinate used by polynomial priors/reparameterization:
     # - "lin": normalize frequency in MHz to [0,1]
     # - "log": normalize log(frequency) to [0,1] (often better for power-law-like spectra)
@@ -420,6 +425,7 @@ def initialize_components_v2(
     freq_axis: int = 0,
     init_mode: str = "smooth_zero",
     poly_degree: Optional[int] = None,
+    poly_basis: str = "power",
     poly_x_mode: str = "lin",
     poly_model: str = "add",
     freqs: Optional[Tensor] = None,
@@ -445,6 +451,7 @@ def initialize_components_v2(
                 degree=deg,
                 freqs=freqs,
                 x_mode=poly_x_mode,
+                basis=poly_basis,
             )
             # Avoid inf/NaN if a random init generates huge values.
             fitted_log = torch.clamp(fitted_log, min=-20.0, max=20.0)
@@ -457,6 +464,7 @@ def initialize_components_v2(
                 degree=deg,
                 freqs=freqs,
                 x_mode=poly_x_mode,
+                basis=poly_basis,
             )
         return fitted, (y - fitted)
     raise ValueError(f"Unsupported init_mode '{init_mode}'. Use smooth_zero, smooth_residual, or poly_residual.")
@@ -467,22 +475,71 @@ def _polynomial_design(num_freqs: int, degree: int, device: torch.device, dtype:
     return torch.stack([freqs**i for i in range(degree + 1)], dim=1)  # (F, degree+1)
 
 
+def _poly_design_from_unit_coords(coords_unit: Tensor, degree: int, basis: str) -> Tensor:
+    """
+    Build a polynomial design matrix for a normalized coordinate in [0, 1].
+
+    Args:
+        coords_unit: 1D tensor of shape (F,) with values in [0, 1].
+        degree: Polynomial degree (>= 0).
+        basis: "power", "chebyshev", or "legendre".
+    Returns:
+        Tensor of shape (F, degree+1).
+    """
+    if degree < 0:
+        raise ValueError("Polynomial degree must be non-negative.")
+    basis_norm = str(basis).strip().lower()
+    if basis_norm == "power":
+        return torch.stack([coords_unit**i for i in range(degree + 1)], dim=1)
+
+    # Map [0,1] -> [-1,1] for orthogonal polynomial bases.
+    x = coords_unit * 2.0 - 1.0
+
+    if basis_norm == "chebyshev":
+        # Chebyshev T_0=1, T_1=x, T_{n+1}=2xT_n - T_{n-1}.
+        t0 = torch.ones_like(x)
+        if degree == 0:
+            return t0[:, None]
+        t1 = x
+        cols = [t0, t1]
+        for _n in range(2, degree + 1):
+            cols.append(2.0 * x * cols[-1] - cols[-2])
+        return torch.stack(cols, dim=1)
+
+    if basis_norm == "legendre":
+        # Legendre P_0=1, P_1=x, P_n=((2n-1)xP_{n-1}-(n-1)P_{n-2})/n.
+        p0 = torch.ones_like(x)
+        if degree == 0:
+            return p0[:, None]
+        p1 = x
+        cols = [p0, p1]
+        for n in range(2, degree + 1):
+            pn = ((2.0 * n - 1.0) * x * cols[-1] - (n - 1.0) * cols[-2]) / float(n)
+            cols.append(pn)
+        return torch.stack(cols, dim=1)
+
+    raise ValueError("poly_basis must be one of: 'power', 'chebyshev', 'legendre'.")
+
+
 def _fit_polynomial_coeffs(
     y: Tensor,
     freq_axis: int,
     degree: int,
     freqs: Optional[Tensor] = None,
     x_mode: str = "lin",
+    basis: str = "power",
 ) -> Tuple[Tensor, Tensor]:
     y_front = y.movedim(freq_axis, 0)
     num_freqs = y_front.shape[0]
+    safe_dtype = torch.float32 if y.dtype not in (torch.float32, torch.float64) else y.dtype
     if freqs is None:
         # Fall back to a linear [0,1] coordinate when explicit frequencies are not provided.
-        design = _polynomial_design(num_freqs, degree, device=y.device, dtype=y.dtype)
+        coords = torch.linspace(0.0, 1.0, num_freqs, device=y.device, dtype=safe_dtype)
+        design = _poly_design_from_unit_coords(coords, degree, basis=basis)
     else:
         if freqs.numel() != num_freqs:
             raise ValueError("Frequency array length does not match cube frequency dimension.")
-        freqs = freqs.to(device=y.device, dtype=y.dtype)
+        freqs = freqs.to(device=y.device, dtype=safe_dtype)
         x_mode_norm = str(x_mode).strip().lower()
         if x_mode_norm == "lin":
             coords_raw = freqs
@@ -494,9 +551,8 @@ def _fit_polynomial_coeffs(
         f_max = coords_raw.max()
         scale = torch.clamp(f_max - f_min, min=1e-8)
         coords = (coords_raw - f_min) / scale
-        design = torch.stack([coords**i for i in range(degree + 1)], dim=1)
+        design = _poly_design_from_unit_coords(coords, degree, basis=basis)
     y_flat = y_front.reshape(num_freqs, -1)
-    safe_dtype = torch.float32 if y.dtype not in (torch.float32, torch.float64) else y.dtype
     y_flat_cast = y_flat.to(dtype=safe_dtype)
     design_cast = design.to(dtype=safe_dtype)
     coeffs = torch.linalg.lstsq(design_cast, y_flat_cast).solution  # (degree+1, Npix)
@@ -513,6 +569,7 @@ def _eval_polynomial_from_coeffs(
     target_shape: Sequence[int],
     freqs: Optional[Tensor] = None,
     x_mode: str = "lin",
+    basis: str = "power",
 ) -> Tensor:
     """
     Evaluate a polynomial foreground model from coefficients.
@@ -522,14 +579,16 @@ def _eval_polynomial_from_coeffs(
     normalized [0, 1] grid is used.
     """
     num_freqs = target_shape[freq_axis]
+    safe_dtype = torch.float32 if coeffs.dtype not in (torch.float32, torch.float64) else coeffs.dtype
     if freqs is None:
-        design = _polynomial_design(
-            num_freqs, coeffs.shape[0] - 1, device=coeffs.device, dtype=coeffs.dtype
+        coords = torch.linspace(0.0, 1.0, num_freqs, device=coeffs.device, dtype=safe_dtype)
+        design = _poly_design_from_unit_coords(coords, coeffs.shape[0] - 1, basis=basis).to(
+            dtype=coeffs.dtype
         )
     else:
         if freqs.numel() != num_freqs:
             raise ValueError("Frequency array length does not match cube frequency dimension.")
-        freqs = freqs.to(device=coeffs.device, dtype=coeffs.dtype)
+        freqs = freqs.to(device=coeffs.device, dtype=safe_dtype)
         x_mode_norm = str(x_mode).strip().lower()
         if x_mode_norm == "lin":
             coords_raw = freqs
@@ -541,7 +600,9 @@ def _eval_polynomial_from_coeffs(
         f_max = coords_raw.max()
         scale = torch.clamp(f_max - f_min, min=1e-8)
         coords = (coords_raw - f_min) / scale
-        design = torch.stack([coords**i for i in range(coeffs.shape[0])], dim=1)
+        design = _poly_design_from_unit_coords(coords, coeffs.shape[0] - 1, basis=basis).to(
+            dtype=coeffs.dtype
+        )
     poly = torch.tensordot(design, coeffs, dims=([1], [0]))  # (F, spatial...)
     poly = poly.movedim(0, freq_axis)
     return poly
@@ -669,6 +730,7 @@ def optimize_components(
     poly_weight: float = 1.0,
     poly_degree: int = 3,
     poly_sigma: Optional[Union[Tensor, float]] = DEFAULT_POLY_SIGMA,
+    poly_basis: str = "power",
     poly_x_mode: str = "lin",
     poly_model: str = "add",
     poly_resid_enabled: bool = True,
@@ -1156,6 +1218,7 @@ def optimize_components(
         freq_axis=freq_axis,
         init_mode=init_mode,
         poly_degree=int(poly_degree) if "poly_reparam" in active_term_set else None,
+        poly_basis=poly_basis,
         poly_x_mode=poly_x_mode,
         poly_model=poly_model,
         freqs=freqs_tensor,
@@ -1201,6 +1264,7 @@ def optimize_components(
                 degree=poly_degree,
                 freqs=freqs_tensor,
                 x_mode=poly_x_mode,
+                basis=poly_basis,
             )
             fitted_log = torch.clamp(fitted_log, min=-20.0, max=20.0)
             fitted = torch.exp(fitted_log)
@@ -1211,6 +1275,7 @@ def optimize_components(
                 degree=poly_degree,
                 freqs=freqs_tensor,
                 x_mode=poly_x_mode,
+                basis=poly_basis,
             )
         poly_coeffs_param = torch.nn.Parameter(coeffs_init.clone())
         if poly_resid_enabled_val:
@@ -1368,6 +1433,7 @@ def optimize_components(
                 y_tensor.shape,
                 freqs=freqs_tensor,
                 x_mode=poly_x_mode,
+                basis=poly_basis,
             )
             if poly_model_norm in {"exp", "exp_mul"}:
                 poly_component = torch.clamp(poly_component, min=-20.0, max=20.0)
@@ -1586,6 +1652,7 @@ def optimize_components(
             y_tensor.shape,
             freqs=freqs_tensor,
             x_mode=poly_x_mode,
+            basis=poly_basis,
         )
         if poly_model_norm in {"exp", "exp_mul"}:
             poly_component = torch.clamp(poly_component, min=-20.0, max=20.0)
@@ -3328,6 +3395,7 @@ def _optimize_from_fits(
         poly_weight=config.poly_weight,
         poly_degree=config.poly_degree,
         poly_sigma=config.poly_sigma,
+        poly_basis=config.poly_basis,
         poly_x_mode=config.poly_x_mode,
         poly_model=config.poly_model,
         poly_resid_enabled=config.poly_resid_enabled,

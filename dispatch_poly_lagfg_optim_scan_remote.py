@@ -91,6 +91,12 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--fg-smooth-modes", type=str, default="diff2_l2")
     p.add_argument("--poly-degrees", type=str, default="2,3,4,5")
+    p.add_argument(
+        "--poly-bases",
+        type=str,
+        default="power",
+        help="Comma-separated polynomial bases for poly_reparam: power,chebyshev,legendre.",
+    )
     p.add_argument("--poly-x-modes", type=str, default="lin,log")
     p.add_argument("--poly-models", type=str, default="exp", help="Comma-separated poly_model choices: add,exp.")
     p.add_argument(
