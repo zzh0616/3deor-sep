@@ -126,6 +126,7 @@ def _warn_weight_defaults(config: OptimizationConfig) -> None:
     _warn_if_weight_not_one("eor_iso_weight", config.eor_iso_weight)
     _warn_if_weight_not_one("eor_mean_weight", config.eor_mean_weight)
     _warn_if_weight_not_one("eor_hf_weight", config.eor_hf_weight)
+    _warn_if_weight_not_one("eor_orth_weight", config.eor_orth_weight)
     _warn_if_weight_not_one("poly_weight", config.poly_weight)
 
 
@@ -154,6 +155,7 @@ class LossComponents:
     eor_iso: float
     eor_mean: float
     eor_hf: float
+    eor_orth: float
     poly: float
 
 
@@ -174,10 +176,14 @@ class OptimizationConfig:
     eor_iso_weight: float = 1.0
     eor_mean_weight: float = 1.0
     eor_hf_weight: float = 1.0
+    eor_orth_weight: float = 1.0
     extra_loss_start_iter: int = 500
     extra_loss_ramp_iters: int = 0
     poly_weight: float = 1.0
     poly_degree: int = 3
+    # Optional override for number of polynomial coefficients (basis size).
+    # Only supported for poly_basis in {"dct","bspline"}. When set, the effective degree becomes (poly_ncoeffs-1).
+    poly_ncoeffs: Optional[int] = None
     poly_sigma: float = DEFAULT_POLY_SIGMA
     # Polynomial basis used by poly_reparam / poly_residual init:
     # - "power": monomials x^i (legacy)
@@ -222,6 +228,19 @@ class OptimizationConfig:
     alt_update_mode: str = "none"  # "none" or "fg_then_eor"
     alt_fg_steps: int = 5
     alt_eor_steps: int = 1
+    # Foreground update mode:
+    # - "grad": optimize FG parameters via gradients (default)
+    # - "closed_form_l2": for L2 smoothness modes (diff2_l2/diff3_l2) and psf=None,
+    #   update FG by solving the quadratic subproblem in closed form (block coordinate descent).
+    fg_update_mode: str = "grad"
+    # How often to apply the closed-form FG update when fg_update_mode=closed_form_l2.
+    fg_closed_form_every: int = 1
+    # Extra-loss balancing:
+    # - "none": use raw term magnitudes
+    # - "value_ema": normalize each extra term by its EMA magnitude before applying its weight.
+    extra_loss_balance_mode: str = "none"
+    extra_loss_balance_ema_decay: float = 0.99
+    extra_loss_balance_eps: float = 1e-8
     power_config: Optional[str] = None
     power_output_dir: Optional[str] = None
     freq_axis: int = 0
@@ -350,6 +369,12 @@ class OptimizationConfig:
     eor_iso_eps: float = 1e-12
     eor_hf_percent: float = 0.7
     eor_hf_r_max: float = 0.85
+    # EoR smooth-subspace orthogonality prior (extra term: eor_orth).
+    eor_orth_degree: int = 2
+    eor_orth_x_mode: str = "log"  # "lin" or "log"
+    eor_orth_spatial_pool: int = 4
+    eor_orth_r_max: float = 0.85
+    eor_orth_eps: float = 1e-12
     enable_corr_check: bool = False
     corr_check_every: int = 500
     freq_start_mhz: Optional[float] = None
@@ -798,8 +823,10 @@ def optimize_components(
     eor_iso_weight: float = 1.0,
     eor_mean_weight: float = 1.0,
     eor_hf_weight: float = 1.0,
+    eor_orth_weight: float = 1.0,
     poly_weight: float = 1.0,
     poly_degree: int = 3,
+    poly_ncoeffs: Optional[int] = None,
     poly_sigma: Optional[Union[Tensor, float]] = DEFAULT_POLY_SIGMA,
     poly_basis: str = "power",
     poly_x_mode: str = "lin",
@@ -837,6 +864,11 @@ def optimize_components(
     eor_iso_eps: float = 1e-12,
     eor_hf_percent: float = 0.7,
     eor_hf_r_max: float = 0.85,
+    eor_orth_degree: int = 2,
+    eor_orth_x_mode: str = "log",
+    eor_orth_spatial_pool: int = 4,
+    eor_orth_r_max: float = 0.85,
+    eor_orth_eps: float = 1e-12,
     freq_start_mhz: Optional[float] = None,
     freq_delta_mhz: Optional[float] = None,
     optimizer_name: str = "adam",
@@ -852,6 +884,11 @@ def optimize_components(
     alt_update_mode: str = "none",
     alt_fg_steps: int = 5,
     alt_eor_steps: int = 1,
+    fg_update_mode: str = "grad",
+    fg_closed_form_every: int = 1,
+    extra_loss_balance_mode: str = "none",
+    extra_loss_balance_ema_decay: float = 0.99,
+    extra_loss_balance_eps: float = 1e-8,
     eor_true_tensor: Optional[Tensor] = None,
     corr_check_every: int = 0,
 ) -> Tuple[Tensor, Tensor, List[LossComponents]]:
@@ -953,6 +990,39 @@ def optimize_components(
         raise ValueError("alt_update_mode must be 'none' when eor_as_residual=True.")
     alt_fg_steps_val = max(1, int(alt_fg_steps))
     alt_eor_steps_val = max(1, int(alt_eor_steps))
+
+    fg_update_mode_norm = str(fg_update_mode).strip().lower()
+    if fg_update_mode_norm not in {"grad", "closed_form_l2"}:
+        raise ValueError("fg_update_mode must be one of: grad, closed_form_l2.")
+    fg_closed_form_every_val = max(1, int(fg_closed_form_every))
+    if fg_update_mode_norm == "closed_form_l2":
+        if psf is not None:
+            raise ValueError("fg_update_mode=closed_form_l2 requires psf=None (pure-sky stage).")
+        if bool(eor_as_residual):
+            raise ValueError("eor_as_residual must be False when fg_update_mode=closed_form_l2.")
+        if alt_update_mode_norm != "none":
+            raise ValueError("alt_update_mode must be 'none' when fg_update_mode=closed_form_l2.")
+        if "poly_reparam" in active_term_set:
+            raise ValueError("fg_update_mode=closed_form_l2 is not compatible with poly_reparam (for now).")
+        if fg_smooth_mode_norm not in {"diff2_l2", "diff3_l2"}:
+            raise ValueError("fg_update_mode=closed_form_l2 requires fg_smooth_mode in {diff2_l2,diff3_l2}.")
+        forbidden = {"corr", "lagcorr", "rfft", "fg_logcurv", "fg_lowrank"}
+        forbidden_active = forbidden.intersection(active_term_set)
+        if forbidden_active:
+            raise ValueError(
+                "fg_update_mode=closed_form_l2 currently only supports EoR-only extra terms "
+                f"(got forbidden extra terms: {sorted(forbidden_active)})."
+            )
+
+    balance_mode_norm = str(extra_loss_balance_mode).strip().lower()
+    if balance_mode_norm not in {"none", "value_ema"}:
+        raise ValueError("extra_loss_balance_mode must be one of: none, value_ema.")
+    ema_decay_val = float(extra_loss_balance_ema_decay)
+    if not math.isfinite(ema_decay_val) or not (0.0 < ema_decay_val < 1.0):
+        raise ValueError("extra_loss_balance_ema_decay must be a finite value in (0, 1).")
+    balance_eps_val = float(extra_loss_balance_eps)
+    if not math.isfinite(balance_eps_val) or balance_eps_val <= 0.0:
+        raise ValueError("extra_loss_balance_eps must be a finite positive value.")
 
     aligned_eor_true: Optional[Tensor] = None
     if eor_true_tensor is not None:
@@ -1284,11 +1354,22 @@ def optimize_components(
             + freq_delta_mhz * torch.arange(nfreq, device=y_tensor.device, dtype=y_tensor.dtype)
         )
 
+    poly_basis_norm = str(poly_basis).strip().lower()
+    poly_degree_val = int(poly_degree)
+    poly_degree_eff = poly_degree_val
+    if poly_ncoeffs is not None:
+        ncoeffs_val = int(poly_ncoeffs)
+        if ncoeffs_val <= 0:
+            raise ValueError("poly_ncoeffs must be a positive integer when provided.")
+        if poly_basis_norm not in {"dct", "bspline"}:
+            raise ValueError("poly_ncoeffs is only supported for poly_basis in {'dct','bspline'}.")
+        poly_degree_eff = ncoeffs_val - 1
+
     fg_init, eor_init = initialize_components_v2(
         y_tensor,
         freq_axis=freq_axis,
         init_mode=init_mode,
-        poly_degree=int(poly_degree) if "poly_reparam" in active_term_set else None,
+        poly_degree=int(poly_degree_eff) if "poly_reparam" in active_term_set else None,
         poly_basis=poly_basis,
         poly_x_mode=poly_x_mode,
         poly_model=poly_model,
@@ -1299,6 +1380,7 @@ def optimize_components(
     poly_coeffs_param: Optional[torch.nn.Parameter] = None
     fg_resid_param: Optional[torch.nn.Parameter] = None
     fg_param: Optional[torch.nn.Parameter] = None
+    fg_state_tensor: Optional[Tensor] = None
 
     poly_model_norm = str(poly_model).strip().lower()
     if poly_model_norm not in {"add", "exp", "exp_mul"}:
@@ -1332,7 +1414,7 @@ def optimize_components(
             coeffs_init, fitted_log = _fit_polynomial_coeffs(
                 fg_log,
                 freq_axis=freq_axis,
-                degree=poly_degree,
+                degree=poly_degree_eff,
                 freqs=freqs_tensor,
                 x_mode=poly_x_mode,
                 basis=poly_basis,
@@ -1343,7 +1425,7 @@ def optimize_components(
             coeffs_init, fitted = _fit_polynomial_coeffs(
                 fg_init,
                 freq_axis=freq_axis,
-                degree=poly_degree,
+                degree=poly_degree_eff,
                 freqs=freqs_tensor,
                 x_mode=poly_x_mode,
                 basis=poly_basis,
@@ -1358,7 +1440,11 @@ def optimize_components(
                 resid_init = fg_init - fitted
             fg_resid_param = torch.nn.Parameter(resid_init.clone())
     else:
-        fg_param = torch.nn.Parameter(fg_init.clone())
+        if fg_update_mode_norm == "closed_form_l2":
+            # FG is updated by a closed-form solver (no FG parameters in the optimizer).
+            fg_state_tensor = fg_init.clone()
+        else:
+            fg_param = torch.nn.Parameter(fg_init.clone())
 
     eor: Optional[torch.nn.Parameter] = None
     if not bool(eor_as_residual):
@@ -1367,21 +1453,27 @@ def optimize_components(
     # Build param groups so FG/EoR can use different learning rates and (optionally)
     # support alternating block updates.
     fg_params: List[torch.nn.Parameter] = []
-    if fg_param is not None:
-        fg_params.append(fg_param)
-    if fg_resid_param is not None:
-        fg_params.append(fg_resid_param)
-    if poly_coeffs_param is not None:
-        fg_params.append(poly_coeffs_param)
-    if not fg_params:
-        raise ValueError("Internal error: no foreground parameters to optimize.")
     param_groups: List[Dict[str, object]] = []
-    if eor is not None:
+    if fg_update_mode_norm == "closed_form_l2":
+        if eor is None:
+            raise ValueError("Internal error: fg_update_mode=closed_form_l2 requires an EoR parameter.")
+        # Only optimize EoR parameters; FG is updated by the closed-form solver.
         param_groups.append({"params": [eor], "lr": float(lr)})
-        param_groups.append({"params": fg_params, "lr": float(lr) * lr_fg_factor_val})
     else:
-        # Keep semantics: lr is the base LR; lr_fg_factor still applies to FG.
-        param_groups.append({"params": fg_params, "lr": float(lr) * lr_fg_factor_val})
+        if fg_param is not None:
+            fg_params.append(fg_param)
+        if fg_resid_param is not None:
+            fg_params.append(fg_resid_param)
+        if poly_coeffs_param is not None:
+            fg_params.append(poly_coeffs_param)
+        if not fg_params:
+            raise ValueError("Internal error: no foreground parameters to optimize.")
+        if eor is not None:
+            param_groups.append({"params": [eor], "lr": float(lr)})
+            param_groups.append({"params": fg_params, "lr": float(lr) * lr_fg_factor_val})
+        else:
+            # Keep semantics: lr is the base LR; lr_fg_factor still applies to FG.
+            param_groups.append({"params": fg_params, "lr": float(lr) * lr_fg_factor_val})
     optimizer_name_norm = str(optimizer_name).strip().lower()
     if optimizer_name_norm == "sgd":
         optimizer = torch.optim.SGD(param_groups, lr=lr, momentum=momentum)
@@ -1433,6 +1525,108 @@ def optimize_components(
                         reset_iters.add(int(lagcorr_eor_floor_start_iter_val))
                     if lagcorr_eor_rebound_start_iter_val > 1:
                         reset_iters.add(int(lagcorr_eor_rebound_start_iter_val))
+
+    # Precompute polynomial design for fast poly_reparam evaluation (avoid rebuilding it every iteration).
+    poly_eval_design: Optional[Tensor] = None
+    poly_eval_spatial_shape: Optional[Tuple[int, ...]] = None
+    if "poly_reparam" in active_term_set:
+        assert poly_coeffs_param is not None
+        y_front = y_tensor.movedim(freq_axis, 0)
+        f = int(y_front.shape[0])
+        poly_eval_spatial_shape = tuple(y_front.shape[1:])
+        safe_dtype = torch.float32 if y_tensor.dtype not in (torch.float32, torch.float64) else y_tensor.dtype
+        if freqs_tensor is None:
+            coords = torch.linspace(0.0, 1.0, f, device=y_tensor.device, dtype=safe_dtype)
+        else:
+            freqs_safe = freqs_tensor.to(device=y_tensor.device, dtype=safe_dtype)
+            x_mode_norm = str(poly_x_mode).strip().lower()
+            if x_mode_norm == "lin":
+                coords_raw = freqs_safe
+            elif x_mode_norm == "log":
+                coords_raw = torch.log(torch.clamp(freqs_safe, min=1e-6))
+            else:
+                raise ValueError("poly_x_mode must be 'lin' or 'log'.")
+            cmin = coords_raw.min()
+            cmax = coords_raw.max()
+            scale = torch.clamp(cmax - cmin, min=1e-8)
+            coords = (coords_raw - cmin) / scale
+        poly_eval_design = _poly_design_from_unit_coords(coords, poly_degree_eff, basis=poly_basis).to(
+            dtype=y_tensor.dtype
+        )
+        if int(poly_eval_design.shape[1]) != int(poly_coeffs_param.shape[0]):
+            raise ValueError(
+                f"poly design shape mismatch: design has {int(poly_eval_design.shape[1])} coeffs "
+                f"but poly_coeffs has {int(poly_coeffs_param.shape[0])}."
+            )
+
+    # Precompute the closed-form FG solver (pure-sky, L2 smoothness only).
+    fg_solver_chol: Optional[Tensor] = None
+    fg_solver_rhs_bias: Optional[Tensor] = None
+    fg_solver_c0: Optional[float] = None
+    if fg_update_mode_norm == "closed_form_l2":
+        if fg_state_tensor is None:
+            raise ValueError("Internal error: fg_state_tensor is missing for closed_form_l2 mode.")
+        diff_order = _fg_smooth_diff_order(fg_smooth_mode_norm)
+        if diff_order not in (2, 3):
+            raise ValueError("closed_form_l2 supports only diff2_l2/diff3_l2 smoothness modes.")
+        f = int(y_tensor.shape[freq_axis])
+        if f <= diff_order:
+            raise ValueError("Not enough frequency channels for closed_form_l2 FG update.")
+        if data_error_tensor.numel() != 1 or fg_sigma_tensor.numel() != 1 or fg_mean_tensor.numel() != 1:
+            raise ValueError("closed_form_l2 currently requires scalar data_error and fg_smooth_mean/sigma.")
+        sigma_data = float(data_error_tensor.item())
+        sigma_fg = float(fg_sigma_tensor.item())
+        mean_fg = float(fg_mean_tensor.item())
+        if not math.isfinite(sigma_data) or sigma_data <= 0.0:
+            raise ValueError("data_error must be finite and > 0 for closed_form_l2.")
+        if not math.isfinite(sigma_fg) or sigma_fg <= 0.0:
+            raise ValueError("fg_smooth_sigma must be finite and > 0 for closed_form_l2.")
+        if not math.isfinite(mean_fg):
+            raise ValueError("fg_smooth_mean must be finite for closed_form_l2.")
+
+        # Match loss_function scaling: data_loss is mean over F*XY, smooth_loss is mean over (F-d)*XY.
+        c0 = float(alpha) / (float(f) * (sigma_data**2))
+        c1 = float(beta) / (float(f - diff_order) * (sigma_fg**2))
+        if c0 <= 0.0 or not math.isfinite(c0):
+            raise ValueError("Invalid closed_form_l2 coefficient derived from alpha/data_error.")
+        if c1 < 0.0 or not math.isfinite(c1):
+            raise ValueError("Invalid closed_form_l2 coefficient derived from beta/fg_smooth_sigma.")
+
+        # Build finite-difference operator D (F-d, F) for the chosen order.
+        if diff_order == 2:
+            coeffs = torch.tensor([1.0, -2.0, 1.0], device=y_tensor.device, dtype=y_tensor.dtype)
+        else:
+            coeffs = torch.tensor([1.0, -3.0, 3.0, -1.0], device=y_tensor.device, dtype=y_tensor.dtype)
+        rows = f - diff_order
+        D = torch.zeros((rows, f), device=y_tensor.device, dtype=y_tensor.dtype)
+        width = diff_order + 1
+        for i in range(rows):
+            D[i, i : i + width] = coeffs
+        DtD = D.T @ D
+        A = DtD * float(c1) + torch.eye(f, device=y_tensor.device, dtype=y_tensor.dtype) * float(c0)
+        fg_solver_chol = torch.linalg.cholesky(A)
+        fg_solver_c0 = float(c0)
+        if abs(mean_fg) > 0.0:
+            m = torch.full((rows,), float(mean_fg), device=y_tensor.device, dtype=y_tensor.dtype)
+            fg_solver_rhs_bias = (D.T @ m) * float(c1)  # (F,)
+        else:
+            fg_solver_rhs_bias = torch.zeros((f,), device=y_tensor.device, dtype=y_tensor.dtype)
+
+    # Optional extra-term normalization state (value EMA).
+    extra_term_ema: Dict[str, float] = {}
+    term_to_component = {
+        "corr": "corr",
+        "lagcorr": "lagcorr",
+        "rfft": "fft_highfreq",
+        "poly_reparam": "poly",
+        "fg_logcurv": "fg_logcurv",
+        "fg_lowrank": "fg_lowrank",
+        "eor_lagshape": "eor_lagshape",
+        "eor_iso": "eor_iso",
+        "eor_mean": "eor_mean",
+        "eor_hf": "eor_hf",
+        "eor_orth": "eor_orth",
+    }
     history: List[LossComponents] = []
 
     for it in range(1, num_iters + 1):
@@ -1496,16 +1690,35 @@ def optimize_components(
                 )
             else:
                 lagcorr_rebound_scale = 1.0
+
+        if fg_update_mode_norm == "closed_form_l2" and (it == 1 or it % fg_closed_form_every_val == 0):
+            # Update FG by solving the quadratic subproblem (no backprop through this step).
+            assert fg_solver_chol is not None and fg_solver_rhs_bias is not None and fg_solver_c0 is not None
+            assert fg_state_tensor is not None and eor is not None
+            y_minus_eor = y_tensor - eor.detach()
+            moved = y_minus_eor.movedim(freq_axis, 0)  # (F, Y, X)
+            f = int(moved.shape[0])
+            rhs = moved.reshape(f, -1) * float(fg_solver_c0)
+            rhs = rhs + fg_solver_rhs_bias.reshape(f, 1)
+            solved = torch.cholesky_solve(rhs, fg_solver_chol)
+            fg_state_tensor = solved.reshape(f, *moved.shape[1:]).movedim(0, freq_axis)
+
         if "poly_reparam" in active_term_set:
             assert poly_coeffs_param is not None
-            poly_component = _eval_polynomial_from_coeffs(
-                poly_coeffs_param,
-                freq_axis,
-                y_tensor.shape,
-                freqs=freqs_tensor,
-                x_mode=poly_x_mode,
-                basis=poly_basis,
-            )
+            if poly_eval_design is None or poly_eval_spatial_shape is None:
+                poly_component = _eval_polynomial_from_coeffs(
+                    poly_coeffs_param,
+                    freq_axis,
+                    y_tensor.shape,
+                    freqs=freqs_tensor,
+                    x_mode=poly_x_mode,
+                    basis=poly_basis,
+                )
+            else:
+                coeffs_flat = poly_coeffs_param.reshape(poly_coeffs_param.shape[0], -1)
+                poly_flat = poly_eval_design @ coeffs_flat  # (F, Npix)
+                poly_front = poly_flat.reshape(poly_eval_design.shape[0], *poly_eval_spatial_shape)
+                poly_component = poly_front.movedim(0, freq_axis)
             if poly_model_norm in {"exp", "exp_mul"}:
                 poly_component = torch.clamp(poly_component, min=-20.0, max=20.0)
                 if poly_model_norm == "exp_mul" and fg_resid_param is not None:
@@ -1529,31 +1742,71 @@ def optimize_components(
                     fg_current = poly_component
                     poly_residual = None
         else:
-            assert fg_param is not None
-            fg_current = fg_param
+            if fg_update_mode_norm == "closed_form_l2":
+                assert fg_state_tensor is not None
+                fg_current = fg_state_tensor
+            else:
+                assert fg_param is not None
+                fg_current = fg_param
             poly_residual = None
 
         # If eor_as_residual, remove the fg/eor degeneracy by setting eor = y - fg.
         eor_current = (y_tensor - fg_current) if eor is None else eor
+
+        corr_weight_eff = float(corr_weight)
+        lagcorr_weight_eff = float(lagcorr_weight)
+        fft_weight_eff = float(fft_weight)
+        poly_weight_eff = float(poly_weight)
+        fg_logcurv_weight_eff = float(fg_logcurv_weight)
+        fg_lowrank_weight_eff = float(fg_lowrank_weight)
+        eor_lagshape_weight_eff = float(eor_lagshape_weight)
+        eor_iso_weight_eff = float(eor_iso_weight)
+        eor_mean_weight_eff = float(eor_mean_weight)
+        eor_hf_weight_eff = float(eor_hf_weight)
+        eor_orth_weight_eff = float(eor_orth_weight)
+
+        if balance_mode_norm == "value_ema" and extra_scale > 0.0:
+            def _bal(term: str, w: float) -> float:
+                if term not in active_term_set:
+                    return float(w)
+                prev = extra_term_ema.get(term)
+                if prev is None:
+                    return float(w)
+                denom = max(balance_eps_val, float(prev))
+                return float(w) / denom
+
+            corr_weight_eff = _bal("corr", corr_weight_eff)
+            lagcorr_weight_eff = _bal("lagcorr", lagcorr_weight_eff)
+            fft_weight_eff = _bal("rfft", fft_weight_eff)
+            poly_weight_eff = _bal("poly_reparam", poly_weight_eff)
+            fg_logcurv_weight_eff = _bal("fg_logcurv", fg_logcurv_weight_eff)
+            fg_lowrank_weight_eff = _bal("fg_lowrank", fg_lowrank_weight_eff)
+            eor_lagshape_weight_eff = _bal("eor_lagshape", eor_lagshape_weight_eff)
+            eor_iso_weight_eff = _bal("eor_iso", eor_iso_weight_eff)
+            eor_mean_weight_eff = _bal("eor_mean", eor_mean_weight_eff)
+            eor_hf_weight_eff = _bal("eor_hf", eor_hf_weight_eff)
+            eor_orth_weight_eff = _bal("eor_orth", eor_orth_weight_eff)
 
         total_loss, components = loss_function(
             fg_current,
             eor_current,
             y_tensor,
             psf=psf,
+            freqs=freqs_tensor,
             alpha=alpha,
             beta=beta,
             gamma=gamma,
-            corr_weight=corr_weight,
-            fft_weight=fft_weight,
-            fg_logcurv_weight=fg_logcurv_weight,
-            fg_lowrank_weight=fg_lowrank_weight,
-            eor_lagshape_weight=eor_lagshape_weight,
-            eor_iso_weight=eor_iso_weight,
-            eor_mean_weight=eor_mean_weight,
-            eor_hf_weight=eor_hf_weight,
-            poly_weight=poly_weight,
-            lagcorr_weight=lagcorr_weight,
+            corr_weight=corr_weight_eff,
+            fft_weight=fft_weight_eff,
+            fg_logcurv_weight=fg_logcurv_weight_eff,
+            fg_lowrank_weight=fg_lowrank_weight_eff,
+            eor_lagshape_weight=eor_lagshape_weight_eff,
+            eor_iso_weight=eor_iso_weight_eff,
+            eor_mean_weight=eor_mean_weight_eff,
+            eor_hf_weight=eor_hf_weight_eff,
+            eor_orth_weight=eor_orth_weight_eff,
+            poly_weight=poly_weight_eff,
+            lagcorr_weight=lagcorr_weight_eff,
             lagcorr_fg_component_weight=lagcorr_fg_component_weight_val,
             lagcorr_eor_component_weight=lagcorr_eor_component_weight_val,
             lagcorr_gap_weight=lagcorr_gap_weight_val,
@@ -1641,10 +1894,29 @@ def optimize_components(
             eor_iso_eps=eor_iso_eps,
             eor_hf_percent=eor_hf_percent,
             eor_hf_r_max=eor_hf_r_max,
+            eor_orth_degree=eor_orth_degree,
+            eor_orth_x_mode=eor_orth_x_mode,
+            eor_orth_spatial_pool=eor_orth_spatial_pool,
+            eor_orth_r_max=eor_orth_r_max,
+            eor_orth_eps=eor_orth_eps,
             poly_degree=poly_degree,
             poly_sigma=poly_sigma_tensor,
             poly_residual=poly_residual,
         )
+
+        if balance_mode_norm == "value_ema" and extra_scale > 0.0:
+            for term in active_term_set:
+                key = term_to_component.get(term)
+                if not key:
+                    continue
+                val = float(components[key].detach().item())
+                if not math.isfinite(val) or val < 0.0:
+                    continue
+                prev = extra_term_ema.get(term)
+                if prev is None:
+                    extra_term_ema[term] = val
+                else:
+                    extra_term_ema[term] = ema_decay_val * float(prev) + (1.0 - ema_decay_val) * val
         total_loss.backward()
 
         if alt_update_mode_norm != "none":
@@ -1697,6 +1969,7 @@ def optimize_components(
             eor_iso=float(components["eor_iso"].item()),
             eor_mean=float(components["eor_mean"].item()),
             eor_hf=float(components["eor_hf"].item()),
+            eor_orth=float(components["eor_orth"].item()),
             poly=float(components["poly"].item()),
         )
         history.append(entry)
@@ -1711,20 +1984,26 @@ def optimize_components(
                 f"corr_coeff={entry.corr_coeff:.3f} fft={entry.fft_highfreq:.4e} "
                 f"logcurv={entry.fg_logcurv:.4e} lowrank={entry.fg_lowrank:.4e} "
                 f"lagshape={entry.eor_lagshape:.4e} iso={entry.eor_iso:.4e} "
-                f"eor_mean={entry.eor_mean:.4e} eor_hf={entry.eor_hf:.4e} "
+                f"eor_mean={entry.eor_mean:.4e} eor_hf={entry.eor_hf:.4e} eor_orth={entry.eor_orth:.4e} "
                 f"poly={entry.poly:.4e} lr={current_lr:.6g} lr_fg={lr_fg:.6g}"
             )
 
     if "poly_reparam" in active_term_set:
         assert poly_coeffs_param is not None
-        poly_component = _eval_polynomial_from_coeffs(
-            poly_coeffs_param,
-            freq_axis,
-            y_tensor.shape,
-            freqs=freqs_tensor,
-            x_mode=poly_x_mode,
-            basis=poly_basis,
-        )
+        if poly_eval_design is None or poly_eval_spatial_shape is None:
+            poly_component = _eval_polynomial_from_coeffs(
+                poly_coeffs_param,
+                freq_axis,
+                y_tensor.shape,
+                freqs=freqs_tensor,
+                x_mode=poly_x_mode,
+                basis=poly_basis,
+            )
+        else:
+            coeffs_flat = poly_coeffs_param.reshape(poly_coeffs_param.shape[0], -1)
+            poly_flat = poly_eval_design @ coeffs_flat  # (F, Npix)
+            poly_front = poly_flat.reshape(poly_eval_design.shape[0], *poly_eval_spatial_shape)
+            poly_component = poly_front.movedim(0, freq_axis)
         if poly_model_norm in {"exp", "exp_mul"}:
             poly_component = torch.clamp(poly_component, min=-20.0, max=20.0)
             if poly_model_norm == "exp_mul" and fg_resid_param is not None:
@@ -1737,8 +2016,12 @@ def optimize_components(
         else:
             fg_final = poly_component + fg_resid_param if fg_resid_param is not None else poly_component
     else:
-        assert fg_param is not None
-        fg_final = fg_param
+        if fg_update_mode_norm == "closed_form_l2":
+            assert fg_state_tensor is not None
+            fg_final = fg_state_tensor
+        else:
+            assert fg_param is not None
+            fg_final = fg_param
 
     if eor is not None:
         eor_final = eor
@@ -3463,8 +3746,10 @@ def _optimize_from_fits(
         eor_iso_weight=config.eor_iso_weight,
         eor_mean_weight=config.eor_mean_weight,
         eor_hf_weight=config.eor_hf_weight,
+        eor_orth_weight=config.eor_orth_weight,
         poly_weight=config.poly_weight,
         poly_degree=config.poly_degree,
+        poly_ncoeffs=config.poly_ncoeffs,
         poly_sigma=config.poly_sigma,
         poly_basis=config.poly_basis,
         poly_x_mode=config.poly_x_mode,
@@ -3502,6 +3787,11 @@ def _optimize_from_fits(
         eor_iso_eps=config.eor_iso_eps,
         eor_hf_percent=config.eor_hf_percent,
         eor_hf_r_max=config.eor_hf_r_max,
+        eor_orth_degree=config.eor_orth_degree,
+        eor_orth_x_mode=config.eor_orth_x_mode,
+        eor_orth_spatial_pool=config.eor_orth_spatial_pool,
+        eor_orth_r_max=config.eor_orth_r_max,
+        eor_orth_eps=config.eor_orth_eps,
         optimizer_name=config.optimizer_name,
         momentum=config.momentum,
         lr_scheduler=config.lr_scheduler,
@@ -3515,6 +3805,11 @@ def _optimize_from_fits(
         alt_update_mode=config.alt_update_mode,
         alt_fg_steps=config.alt_fg_steps,
         alt_eor_steps=config.alt_eor_steps,
+        fg_update_mode=config.fg_update_mode,
+        fg_closed_form_every=config.fg_closed_form_every,
+        extra_loss_balance_mode=config.extra_loss_balance_mode,
+        extra_loss_balance_ema_decay=config.extra_loss_balance_ema_decay,
+        extra_loss_balance_eps=config.extra_loss_balance_eps,
         freq_start_mhz=config.freq_start_mhz,
         freq_delta_mhz=config.freq_delta_mhz,
         eor_true_tensor=eor_true if config.enable_corr_check else None,
@@ -3536,7 +3831,7 @@ def _optimize_from_fits(
             f"fft={final.fft_highfreq:.4e}, logcurv={final.fg_logcurv:.4e}, "
             f"lowrank={final.fg_lowrank:.4e}, lagshape={final.eor_lagshape:.4e}, "
             f"iso={final.eor_iso:.4e}, eor_mean={final.eor_mean:.4e}, "
-            f"eor_hf={final.eor_hf:.4e}, poly={final.poly:.4e}"
+            f"eor_hf={final.eor_hf:.4e}, eor_orth={final.eor_orth:.4e}, poly={final.poly:.4e}"
         )
     print(f"Saved foreground estimate to {fg_output}")
     print(f"Saved EoR estimate to {eor_output}")
@@ -3717,8 +4012,10 @@ def run_synthetic_demo(config: OptimizationConfig) -> None:
         fft_weight=config.fft_weight,
         eor_mean_weight=config.eor_mean_weight,
         eor_hf_weight=config.eor_hf_weight,
+        eor_orth_weight=config.eor_orth_weight,
         poly_weight=config.poly_weight,
         poly_degree=config.poly_degree,
+        poly_ncoeffs=config.poly_ncoeffs,
         poly_sigma=config.poly_sigma,
         loss_mode=config.loss_mode,
         extra_loss_terms=active_extra_terms,
@@ -3729,6 +4026,11 @@ def run_synthetic_demo(config: OptimizationConfig) -> None:
         fft_z_clip=config.fft_z_clip,
         eor_hf_percent=config.eor_hf_percent,
         eor_hf_r_max=config.eor_hf_r_max,
+        eor_orth_degree=config.eor_orth_degree,
+        eor_orth_x_mode=config.eor_orth_x_mode,
+        eor_orth_spatial_pool=config.eor_orth_spatial_pool,
+        eor_orth_r_max=config.eor_orth_r_max,
+        eor_orth_eps=config.eor_orth_eps,
         optimizer_name=config.optimizer_name,
         momentum=config.momentum,
         lr_scheduler=config.lr_scheduler,
@@ -3742,6 +4044,11 @@ def run_synthetic_demo(config: OptimizationConfig) -> None:
         alt_update_mode=config.alt_update_mode,
         alt_fg_steps=config.alt_fg_steps,
         alt_eor_steps=config.alt_eor_steps,
+        fg_update_mode=config.fg_update_mode,
+        fg_closed_form_every=config.fg_closed_form_every,
+        extra_loss_balance_mode=config.extra_loss_balance_mode,
+        extra_loss_balance_ema_decay=config.extra_loss_balance_ema_decay,
+        extra_loss_balance_eps=config.extra_loss_balance_eps,
         freq_start_mhz=config.freq_start_mhz,
         freq_delta_mhz=config.freq_delta_mhz,
         eor_true_tensor=eor_true if config.enable_corr_check else None,

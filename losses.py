@@ -26,6 +26,7 @@ VALID_EXTRA_LOSS_TERMS: Tuple[str, ...] = (
     "eor_iso",
     "eor_mean",
     "eor_hf",
+    "eor_orth",
 )
 VALID_FG_SMOOTH_MODES: Tuple[str, ...] = (
     "diff3_l2",
@@ -82,6 +83,102 @@ def forward_model(fg: Tensor, eor: Tensor, psf: Optional[callable] = None) -> Te
     if callable(psf):
         return psf(combined)
     raise TypeError("psf must be None or a callable that maps a tensor to a tensor.")
+
+
+def eor_smooth_subspace_orthogonality_loss(
+    eor: Tensor,
+    *,
+    freq_axis: int,
+    freqs: Optional[Tensor] = None,
+    degree: int = 2,
+    x_mode: str = "log",
+    spatial_pool: int = 4,
+    r_max: float = 0.85,
+    eps: float = 1e-12,
+) -> Tensor:
+    """
+    Penalize EoR energy that lies in a low-order *spectrally smooth* subspace.
+
+    This is a weak, physics-motivated prior: the EoR signal is expected to be less
+    spectrally smooth than foregrounds, so its projection onto a low-order smooth
+    basis should not dominate its total energy.
+
+    We use a simple power (monomial) basis B=[1, x, x^2, ...] over a normalized
+    coordinate x in [0,1]. When freqs are provided and x_mode='log', x is based on
+    log(freq) (better aligned with power-law-like smooth spectra).
+
+    Loss:
+      r(p) = ||Proj_B(e_p)||^2 / (||e_p||^2 + eps)
+      L = mean_p ReLU(r(p) - r_max)^2
+
+    Notes:
+    - scale-invariant (ratio), so it does not by itself prevent EoR amplitude collapse;
+      use together with a separate EoR amplitude prior.
+    - uses spatial pooling to keep compute bounded.
+    """
+    pool_int = int(spatial_pool)
+    if pool_int < 1:
+        raise ValueError("eor_orth_spatial_pool must be >= 1.")
+    cube = eor
+    if pool_int > 1:
+        cube = _maybe_avg_pool_spatial(cube, freq_axis=freq_axis, pool=pool_int)
+
+    moved = cube.movedim(freq_axis, 0)  # (F, Y, X)
+    f = int(moved.shape[0])
+    if f < 2:
+        return torch.zeros((), device=eor.device, dtype=eor.dtype)
+
+    deg = int(degree)
+    if deg < 0:
+        raise ValueError("eor_orth_degree must be >= 0.")
+    k = deg + 1
+    if k > f:
+        raise ValueError("eor_orth_degree too large for available frequency channels.")
+
+    r_max_val = float(r_max)
+    if not math.isfinite(r_max_val) or r_max_val < 0.0:
+        raise ValueError("eor_orth_r_max must be finite and >= 0.")
+    eps_val = float(eps)
+    if not math.isfinite(eps_val) or eps_val <= 0.0:
+        raise ValueError("eor_orth_eps must be finite and > 0.")
+
+    safe_dtype = torch.float32 if moved.dtype not in (torch.float32, torch.float64) else moved.dtype
+    device = moved.device
+    if freqs is None:
+        coords = torch.linspace(0.0, 1.0, f, device=device, dtype=safe_dtype)
+    else:
+        if freqs.numel() != f:
+            raise ValueError("eor_orth freqs length does not match cube frequency dimension.")
+        freqs_t = freqs.to(device=device, dtype=safe_dtype)
+        mode = str(x_mode).strip().lower()
+        if mode == "lin":
+            coords_raw = freqs_t
+        elif mode == "log":
+            coords_raw = torch.log(torch.clamp(freqs_t, min=1e-6))
+        else:
+            raise ValueError("eor_orth_x_mode must be 'lin' or 'log'.")
+        cmin = coords_raw.min()
+        cmax = coords_raw.max()
+        scale = torch.clamp(cmax - cmin, min=1e-8)
+        coords = (coords_raw - cmin) / scale
+
+    # Power basis B (F, K).
+    B = torch.stack([coords**i for i in range(k)], dim=1)  # (F, K)
+    B = B.to(dtype=safe_dtype)
+
+    flat = moved.reshape(f, -1).to(dtype=safe_dtype)  # (F, Npix)
+    # Projection onto span(B): proj = B (B^T B)^-1 B^T e
+    BtB = B.T @ B
+    BtB = BtB + torch.eye(k, device=device, dtype=safe_dtype) * eps_val
+    pinv = torch.linalg.solve(BtB, B.T)  # (K, F)
+    coeffs = pinv @ flat  # (K, Npix)
+    proj = B @ coeffs  # (F, Npix)
+
+    num = torch.sum(proj**2, dim=0)
+    den = torch.sum(flat**2, dim=0) + eps_val
+    ratio = num / den
+    resid = torch.clamp(ratio - r_max_val, min=0.0) ** 2
+    return resid.mean().to(dtype=eor.dtype)
 
 
 def foreground_smoothness_loss(
@@ -1189,6 +1286,7 @@ def loss_function(
     y: Tensor,
     *,
     psf: Optional[callable] = None,
+    freqs: Optional[Tensor] = None,
     alpha: float = 1.0,
     beta: float = 1.0,
     gamma: float = 0.0,
@@ -1202,6 +1300,7 @@ def loss_function(
     eor_iso_weight: float = 1.0,
     eor_mean_weight: float = 1.0,
     eor_hf_weight: float = 1.0,
+    eor_orth_weight: float = 1.0,
     lagcorr_weight: float = 1.0,
     lagcorr_fg_component_weight: float = 0.5,
     lagcorr_eor_component_weight: float = 0.5,
@@ -1261,6 +1360,11 @@ def loss_function(
     fft_z_clip: Optional[float] = None,
     eor_hf_percent: float = 0.7,
     eor_hf_r_max: float = 0.85,
+    eor_orth_degree: int = 2,
+    eor_orth_x_mode: str = "log",
+    eor_orth_spatial_pool: int = 4,
+    eor_orth_r_max: float = 0.85,
+    eor_orth_eps: float = 1e-12,
     poly_degree: int = 3,
     poly_sigma: Optional[Union[Tensor, float]] = None,
     poly_residual: Optional[Tensor] = None,
@@ -1752,6 +1856,18 @@ def loss_function(
         )
         resid = torch.clamp(ratio - r_max, min=0.0) ** 2
         eor_hf_loss = torch.mean(resid)
+    eor_orth_loss = torch.zeros_like(data_loss)
+    if "eor_orth" in active_term_set and extra_scale > 0.0:
+        eor_orth_loss = eor_smooth_subspace_orthogonality_loss(
+            eor,
+            freq_axis=freq_axis,
+            freqs=freqs,
+            degree=int(eor_orth_degree),
+            x_mode=str(eor_orth_x_mode),
+            spatial_pool=int(eor_orth_spatial_pool),
+            r_max=float(eor_orth_r_max),
+            eps=float(eor_orth_eps),
+        )
     poly_loss = torch.zeros_like(data_loss)
     if "poly_reparam" in active_term_set and extra_scale > 0.0:
         if poly_residual is None:
@@ -1884,6 +2000,7 @@ def loss_function(
         + float(eor_iso_weight) * eor_iso_loss
         + float(eor_mean_weight) * eor_mean_loss
         + float(eor_hf_weight) * eor_hf_loss
+        + float(eor_orth_weight) * eor_orth_loss
     )
     total_loss = alpha * data_loss + beta * smooth_loss + gamma * eor_reg + extra_scale * extra_terms
     return total_loss, {
@@ -1901,5 +2018,6 @@ def loss_function(
         "eor_iso": eor_iso_loss,
         "eor_mean": eor_mean_loss,
         "eor_hf": eor_hf_loss,
+        "eor_orth": eor_orth_loss,
         "poly": poly_loss,
     }

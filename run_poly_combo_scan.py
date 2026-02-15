@@ -178,6 +178,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional comma-separated poly weights to generate multiple poly-only candidates (overrides --poly-weight).",
     )
     p.add_argument("--poly-degree", type=int, default=3)
+    p.add_argument(
+        "--poly-ncoeffs",
+        type=int,
+        default=0,
+        help="Optional number of poly coefficients (only for poly_basis=dct/bspline). 0 disables.",
+    )
     p.add_argument("--poly-sigma", type=float, default=0.05)
     p.add_argument(
         "--poly-sigma-list",
@@ -190,6 +196,15 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="",
         help="Optional comma-separated poly degrees to generate multiple poly-only candidates (overrides --poly-degree).",
+    )
+    p.add_argument(
+        "--poly-ncoeffs-list",
+        type=str,
+        default="",
+        help=(
+            "Optional comma-separated poly coefficient counts to generate multiple poly-only candidates "
+            "(only for poly_basis=dct/bspline; overrides --poly-ncoeffs). Example: 6,12,20"
+        ),
     )
     p.add_argument(
         "--poly-basis",
@@ -251,6 +266,38 @@ def parse_args() -> argparse.Namespace:
         help="Set EoR = y - FG (optimize FG only) to reduce FG/EoR degeneracy.",
     )
     p.add_argument(
+        "--fg-update-mode",
+        type=str,
+        default="grad",
+        choices=["grad", "closed_form_l2"],
+        help="Foreground update mode (default grad). closed_form_l2 is pure-sky L2 baseline only.",
+    )
+    p.add_argument(
+        "--fg-closed-form-every",
+        type=int,
+        default=1,
+        help="Apply closed-form FG update every N iterations when fg_update_mode=closed_form_l2.",
+    )
+    p.add_argument(
+        "--extra-loss-balance-mode",
+        type=str,
+        default="none",
+        choices=["none", "value_ema"],
+        help="Optional extra-term normalization mode (default none).",
+    )
+    p.add_argument(
+        "--extra-loss-balance-ema-decay",
+        type=float,
+        default=0.99,
+        help="EMA decay used by extra_loss_balance_mode=value_ema.",
+    )
+    p.add_argument(
+        "--extra-loss-balance-eps",
+        type=float,
+        default=1e-8,
+        help="Small epsilon used by extra_loss_balance_mode=value_ema.",
+    )
+    p.add_argument(
         "--init-mode",
         type=str,
         default="smooth_residual",
@@ -275,6 +322,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--include-eor-hf", action="store_true")
     p.add_argument("--include-eor-lagshape", action="store_true")
     p.add_argument("--include-eor-iso", action="store_true")
+    p.add_argument("--include-eor-orth", action="store_true", help="Include EoR smooth-subspace orthogonality term.")
     p.add_argument("--include-combos", action="store_true", help="Include a few hand-picked 2-term combos on top of poly.")
 
     # Corr config (weak by default).
@@ -361,6 +409,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--eor-hf-weight-list", type=str, default="0.1,0.3")
     p.add_argument("--eor-hf-percent", type=float, default=0.7)
     p.add_argument("--eor-hf-rmax-list", type=str, default="0.7,0.85")
+
+    # EoR smooth-subspace orthogonality (projection energy ratio hinge).
+    p.add_argument("--eor-orth-weight-list", type=str, default="0.03,0.1,0.3,1.0")
+    p.add_argument("--eor-orth-degree", type=int, default=2)
+    p.add_argument("--eor-orth-x-mode", type=str, default="log", choices=["lin", "log"])
+    p.add_argument("--eor-orth-spatial-pool-list", type=str, default="4,8")
+    p.add_argument("--eor-orth-rmax-list", type=str, default="0.5,0.7,0.85")
+    p.add_argument("--eor-orth-eps", type=float, default=1e-12)
+    p.add_argument(
+        "--eor-orth-start-iter-list",
+        type=str,
+        default="",
+        help="Optional comma-separated start_iter overrides for eor_orth candidates.",
+    )
 
     # EoR lagshape envelope (A3).
     p.add_argument("--eor-lagshape-weight-list", type=str, default="0.1,0.3")
@@ -682,10 +744,16 @@ def _build_config(
             "lr_plateau_min_delta": float(args.lr_plateau_min_delta),
             "lr_plateau_cooldown": int(args.lr_plateau_cooldown),
             "lr_min": float(args.lr_min),
+            "fg_update_mode": str(args.fg_update_mode),
+            "fg_closed_form_every": int(args.fg_closed_form_every),
+            "extra_loss_balance_mode": str(args.extra_loss_balance_mode),
+            "extra_loss_balance_ema_decay": float(args.extra_loss_balance_ema_decay),
+            "extra_loss_balance_eps": float(args.extra_loss_balance_eps),
             "freq_start_mhz": float(dataset.freq_start_mhz),
             "freq_delta_mhz": float(args.freq_delta_mhz),
             # poly baseline (in optim namespace)
             "poly_degree": int(args.poly_degree),
+            "poly_ncoeffs": None if int(args.poly_ncoeffs) <= 0 else int(args.poly_ncoeffs),
             "poly_sigma": float(args.poly_sigma),
             "poly_basis": str(args.poly_basis),
             "poly_x_mode": str(args.poly_x_mode),
@@ -718,6 +786,7 @@ def _build_config(
             "eor_iso_weight": 0.0,
             "eor_mean_weight": 0.0,
             "eor_hf_weight": 0.0,
+            "eor_orth_weight": 0.0,
         },
         "priors": {
             "data_error": float(args.data_error),
@@ -731,6 +800,11 @@ def _build_config(
             "fg_smooth_mean": float(args.base_fg_smooth_mean),
             "fg_smooth_sigma": float(args.base_fg_smooth_sigma),
             "fg_smooth_huber_delta": float(args.base_fg_smooth_huber_delta),
+            "eor_orth_degree": int(args.eor_orth_degree),
+            "eor_orth_x_mode": str(args.eor_orth_x_mode),
+            "eor_orth_spatial_pool": 4,
+            "eor_orth_r_max": 0.85,
+            "eor_orth_eps": float(args.eor_orth_eps),
             # Power config is per-run (for convenience).
         },
         "power": {
@@ -854,6 +928,9 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
         _parse_float_list(args.poly_sigma_list) if str(args.poly_sigma_list).strip() else [float(args.poly_sigma)]
     )
     poly_degrees = _parse_int_list(args.poly_degree_list) if str(args.poly_degree_list).strip() else [int(args.poly_degree)]
+    poly_ncoeffs_list = _parse_int_list(args.poly_ncoeffs_list) if str(args.poly_ncoeffs_list).strip() else []
+    poly_ncoeffs_scalar = int(args.poly_ncoeffs)
+    use_ncoeffs = bool(poly_ncoeffs_list) or poly_ncoeffs_scalar > 0
     poly_bases = _parse_csv_tokens(args.poly_basis_list) if str(args.poly_basis_list).strip() else [str(args.poly_basis)]
     poly_x_modes = _parse_csv_tokens(args.poly_x_mode_list) if str(args.poly_x_mode_list).strip() else [str(args.poly_x_mode)]
     poly_models = _parse_csv_tokens(args.poly_model_list) if str(args.poly_model_list).strip() else [str(args.poly_model)]
@@ -875,31 +952,49 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
     poly_model_allowed = {"add", "exp", "exp_mul"}
     poly_x_allowed = {"lin", "log"}
 
-    poly_variants: List[Tuple[float, int, float, str, str, str, bool]] = []
+    poly_variants: List[Tuple[float, int, float, str, str, str, bool, Optional[int]]] = []
     seen: set = set()
     for w in poly_weights:
-        for d in poly_degrees:
-            for sig in poly_sigmas:
-                for b in poly_bases:
-                    b_norm = str(b).strip().lower()
-                    if b_norm not in poly_basis_allowed:
-                        raise ValueError(f"Invalid poly_basis '{b_norm}'. Expected one of: {sorted(poly_basis_allowed)}")
-                    for x in poly_x_modes:
-                        x_norm = str(x).strip().lower()
-                        if x_norm not in poly_x_allowed:
-                            raise ValueError(f"Invalid poly_x_mode '{x_norm}'. Expected lin or log.")
-                        for m in poly_models:
-                            m_norm = str(m).strip().lower()
-                            if m_norm not in poly_model_allowed:
-                                raise ValueError(
-                                    f"Invalid poly_model '{m_norm}'. Expected one of: {sorted(poly_model_allowed)}"
-                                )
-                            for r in resid_list:
-                                key = (float(w), int(d), float(sig), b_norm, x_norm, m_norm, bool(r))
-                                if key in seen:
-                                    continue
-                                seen.add(key)
-                                poly_variants.append(key)
+        for sig in poly_sigmas:
+            for b in poly_bases:
+                b_norm = str(b).strip().lower()
+                if b_norm not in poly_basis_allowed:
+                    raise ValueError(f"Invalid poly_basis '{b_norm}'. Expected one of: {sorted(poly_basis_allowed)}")
+                for x in poly_x_modes:
+                    x_norm = str(x).strip().lower()
+                    if x_norm not in poly_x_allowed:
+                        raise ValueError(f"Invalid poly_x_mode '{x_norm}'. Expected lin or log.")
+                    for m in poly_models:
+                        m_norm = str(m).strip().lower()
+                        if m_norm not in poly_model_allowed:
+                            raise ValueError(
+                                f"Invalid poly_model '{m_norm}'. Expected one of: {sorted(poly_model_allowed)}"
+                            )
+                        for r in resid_list:
+                            if use_ncoeffs:
+                                if b_norm not in {"dct", "bspline"}:
+                                    raise ValueError(
+                                        "poly_ncoeffs is only supported for poly_basis in {dct,bspline}. "
+                                        "Run separate scans if you want to include power/cheb/leg controls."
+                                    )
+                                n_list = poly_ncoeffs_list if poly_ncoeffs_list else [poly_ncoeffs_scalar]
+                                for ncoeffs in n_list:
+                                    n_val = int(ncoeffs)
+                                    if n_val <= 0:
+                                        raise ValueError("poly_ncoeffs values must be positive integers.")
+                                    d_eff = n_val - 1
+                                    key = (float(w), int(d_eff), float(sig), b_norm, x_norm, m_norm, bool(r), int(n_val))
+                                    if key in seen:
+                                        continue
+                                    seen.add(key)
+                                    poly_variants.append(key)
+                            else:
+                                for d in poly_degrees:
+                                    key = (float(w), int(d), float(sig), b_norm, x_norm, m_norm, bool(r), None)
+                                    if key in seen:
+                                        continue
+                                    seen.add(key)
+                                    poly_variants.append(key)
 
     # Avoid accidental combinatorial explosions: only allow other extra-term scans when a single poly baseline is selected.
     if len(poly_variants) > 1 and any(
@@ -914,6 +1009,7 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
             "include_eor_hf",
             "include_eor_lagshape",
             "include_eor_iso",
+            "include_eor_orth",
             "include_combos",
         )
     ):
@@ -926,6 +1022,8 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
     legacy_single = (
         len(poly_variants) == 1
         and (not str(args.poly_degree_list).strip())
+        and (not str(args.poly_ncoeffs_list).strip())
+        and int(args.poly_ncoeffs) <= 0
         and (not str(args.poly_weight_list).strip())
         and (not str(args.poly_sigma_list).strip())
         and (not str(args.poly_basis_list).strip())
@@ -933,7 +1031,18 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
         and (not str(args.poly_model_list).strip())
         and (not str(args.poly_resid_enabled_list).strip())
     )
-    for w, d, sig, b, x, m, r in poly_variants:
+    for w, d, sig, b, x, m, r, ncoeffs in poly_variants:
+        n_tag = "" if ncoeffs is None else f"_n{int(ncoeffs)}"
+        optim_overrides = {
+            "poly_degree": int(d),
+            "poly_sigma": float(sig),
+            "poly_basis": str(b),
+            "poly_x_mode": str(x),
+            "poly_model": str(m),
+            "poly_resid_enabled": bool(r),
+        }
+        if ncoeffs is not None:
+            optim_overrides["poly_ncoeffs"] = int(ncoeffs)
         out.append(
             CandidateSpec(
                 name=(
@@ -942,18 +1051,11 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
                     else (
                         f"poly_{basis_tag.get(b,b)}_{x}_{m}_r{1 if r else 0}"
                         f"_w{_fmt_float_token(float(w))}"
-                        f"_d{int(d)}_s{_fmt_float_token(float(sig))}"
+                        f"_d{int(d)}{n_tag}_s{_fmt_float_token(float(sig))}"
                     )
                 ),
                 extra_loss_terms=("poly_reparam",),
-                optim_overrides={
-                    "poly_degree": int(d),
-                    "poly_sigma": float(sig),
-                    "poly_basis": str(b),
-                    "poly_x_mode": str(x),
-                    "poly_model": str(m),
-                    "poly_resid_enabled": bool(r),
-                },
+                optim_overrides=optim_overrides,
                 weight_overrides={"poly_weight": float(w)},
                 prior_overrides={},
             )
@@ -1159,6 +1261,40 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
                         },
                     )
                 )
+
+    if bool(args.include_eor_orth):
+        spatial_pools = _parse_int_list(args.eor_orth_spatial_pool_list)
+        start_iters: List[Optional[int]] = [None]
+        if str(args.eor_orth_start_iter_list).strip():
+            start_iters = [int(v) for v in _parse_int_list(args.eor_orth_start_iter_list)]
+        for w in _parse_float_list(args.eor_orth_weight_list):
+            for pool in spatial_pools:
+                for rmax in _parse_float_list(args.eor_orth_rmax_list):
+                    for start_iter in start_iters:
+                        start_tag = "" if start_iter is None else f"_si{int(start_iter)}"
+                        name = (
+                            f"poly+eororth_w{_fmt_float_token(w)}"
+                            f"_d{int(args.eor_orth_degree)}"
+                            f"_x{str(args.eor_orth_x_mode)}"
+                            f"_p{int(pool)}"
+                            f"_r{_fmt_float_token(rmax)}{start_tag}"
+                        )
+                        optim_overrides = {} if start_iter is None else {"extra_loss_start_iter": int(start_iter)}
+                        out.append(
+                            CandidateSpec(
+                                name=name,
+                                extra_loss_terms=("poly_reparam", "eor_orth"),
+                                optim_overrides=optim_overrides,
+                                weight_overrides={"eor_orth_weight": float(w)},
+                                prior_overrides={
+                                    "eor_orth_degree": int(args.eor_orth_degree),
+                                    "eor_orth_x_mode": str(args.eor_orth_x_mode),
+                                    "eor_orth_spatial_pool": int(pool),
+                                    "eor_orth_r_max": float(rmax),
+                                    "eor_orth_eps": float(args.eor_orth_eps),
+                                },
+                            )
+                        )
 
     if bool(args.include_eor_lagshape):
         for w in _parse_float_list(args.eor_lagshape_weight_list):
@@ -1483,6 +1619,7 @@ def main() -> int:
             "include_fg_lowrank",
             "include_eor_mean",
             "include_eor_hf",
+            "include_eor_orth",
             "include_eor_lagshape",
             "include_eor_iso",
             "include_combos",
