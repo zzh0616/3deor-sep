@@ -173,6 +173,51 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--poly-weight", type=float, default=1.0)
     p.add_argument("--poly-degree", type=int, default=3)
     p.add_argument("--poly-sigma", type=float, default=0.05)
+    p.add_argument(
+        "--poly-basis",
+        type=str,
+        default="power",
+        choices=["power", "chebyshev", "legendre"],
+        help="Polynomial basis used by poly_reparam: power (legacy), chebyshev, legendre.",
+    )
+    p.add_argument(
+        "--poly-x-mode",
+        type=str,
+        default="log",
+        choices=["lin", "log"],
+        help="Polynomial coordinate for poly_reparam (default log).",
+    )
+    p.add_argument(
+        "--poly-model",
+        type=str,
+        default="exp_mul",
+        choices=["add", "exp", "exp_mul"],
+        help="Polynomial foreground model for poly_reparam (default exp_mul).",
+    )
+    p.add_argument(
+        "--poly-enable-resid",
+        dest="poly_resid_enabled",
+        action="store_true",
+        help="Enable explicit per-voxel residual when poly_reparam is active (default disabled).",
+    )
+    p.add_argument(
+        "--eor-as-residual",
+        action="store_true",
+        help="Set EoR = y - FG (optimize FG only) to reduce FG/EoR degeneracy.",
+    )
+    p.add_argument(
+        "--init-mode",
+        type=str,
+        default="smooth_residual",
+        choices=["smooth_zero", "smooth_residual", "poly_residual"],
+        help="Initialization policy (default smooth_residual).",
+    )
+    p.add_argument(
+        "--lr-fg-factor",
+        type=float,
+        default=0.5,
+        help="Learning-rate multiplier for FG params (lr_fg = lr * lr_fg_factor).",
+    )
 
     # What to include.
     p.add_argument("--include-control", action="store_true", help="Include base-only control candidate.")
@@ -429,7 +474,8 @@ def _parse_convergence_from_log(log_path: Path) -> Dict[str, object]:
 
 def _command_for_config(args: argparse.Namespace, code_dir: Path, config_path: Path) -> List[str]:
     cli_path = code_dir / "separation_cli.py"
-    return [str(args.python_bin), str(cli_path), "--config", str(config_path)]
+    # Use unbuffered mode so run logs update continuously when redirected to files on remote hosts.
+    return [str(args.python_bin), "-u", str(cli_path), "--config", str(config_path)]
 
 
 def _avg_pool_xy(cube: np.ndarray, pool: int) -> np.ndarray:
@@ -550,6 +596,7 @@ def _build_config(
         "optim": {
             "num_iters": int(args.num_iters),
             "lr": float(args.lr),
+            "lr_fg_factor": float(args.lr_fg_factor),
             "freq_axis": 0,
             "print_every": int(args.print_every),
             "device": f"cuda:{int(gpu_index)}",
@@ -571,6 +618,12 @@ def _build_config(
             # poly baseline (in optim namespace)
             "poly_degree": int(args.poly_degree),
             "poly_sigma": float(args.poly_sigma),
+            "poly_basis": str(args.poly_basis),
+            "poly_x_mode": str(args.poly_x_mode),
+            "poly_model": str(args.poly_model),
+            "poly_resid_enabled": bool(args.poly_resid_enabled),
+            "eor_as_residual": bool(args.eor_as_residual),
+            "init_mode": str(args.init_mode),
         },
         "cut_xy": {
             "enabled": True,
