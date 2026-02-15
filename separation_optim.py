@@ -269,6 +269,14 @@ class OptimizationConfig:
     # domain and the data term compares A(fg+eor) to y.
     psf_cube: Optional[str] = None
     psf_scale: float = 1.0
+    # Optional zero-padding size for PSF convolution before cropping back.
+    # This can better match WSClean's padded inversion (e.g. 2460 for a 2048 image).
+    psf_pad_to: Optional[Union[int, List[int]]] = None
+    # Optional primary beam (or other multiplicative gain) applied before the PSF operator.
+    # This should be in the *model* (sky) domain and is typically 2D (H,W) or 3D with a
+    # broadcastable frequency axis.
+    beam_cube: Optional[str] = None
+    beam_scale: float = 1.0
     data_error: float = DEFAULT_DATA_ERROR
     eor_prior_mean: float = 0.0
     eor_prior_sigma: float = DEFAULT_EOR_SIGMA
@@ -3555,8 +3563,32 @@ def _optimize_from_fits(
         from instrument_ops import make_psf_convolution_operator
 
         psf_op = make_psf_convolution_operator(
-            psf_cube, freq_axis=config.freq_axis, scale=config.psf_scale
+            psf_cube,
+            freq_axis=config.freq_axis,
+            scale=config.psf_scale,
+            pad_to=config.psf_pad_to,
         )
+
+    beam_op: Optional[ForwardOperator] = None
+    if config.beam_cube:
+        beam_path = Path(config.beam_cube)
+        if not beam_path.exists():
+            raise FileNotFoundError(f"Beam cube '{beam_path}' not found.")
+        print(f"Loading beam cube from {beam_path} ...")
+        beam_arr = read_fits_array(beam_path, cut_indices=cut_indices)
+        target_dtype = dtype if dtype is not None else y_cube.dtype
+        beam_arr = beam_arr.to(device=device, dtype=target_dtype)
+        from instrument_ops import compose_operators, make_multiplicative_operator
+
+        beam_op = make_multiplicative_operator(
+            beam_arr, freq_axis=config.freq_axis, scale=config.beam_scale
+        )
+
+        if psf_op is not None:
+            # Apply the beam (model domain) before PSF convolution (instrument domain).
+            psf_op = compose_operators(beam_op, psf_op)
+        else:
+            psf_op = beam_op
 
     eor_true: Optional[Tensor] = None
     if config.true_eor_cube:

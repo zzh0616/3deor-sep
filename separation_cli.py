@@ -45,6 +45,27 @@ def parse_cli_args() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
         type=float,
         help="Optional scalar multiplier applied after the PSF operator (default 1.0).",
     )
+    parser.add_argument(
+        "--psf-pad-to",
+        type=int,
+        help=(
+            "Optional zero-padding size used for PSF convolution before cropping back. "
+            "This can better match WSClean's padded inversion (e.g. 2460 for a 2048 image)."
+        ),
+    )
+    parser.add_argument(
+        "--beam-cube",
+        type=str,
+        help=(
+            "Optional FITS beam/gain (2D or 3D) multiplied in the *model* domain before the PSF operator. "
+            "This is intended for primary-beam style instrument effects."
+        ),
+    )
+    parser.add_argument(
+        "--beam-scale",
+        type=float,
+        help="Optional scalar multiplier applied to the beam operator (default 1.0).",
+    )
     parser.add_argument("--fg-output", type=str, help="Output FITS path for foreground estimate.")
     parser.add_argument("--eor-output", type=str, help="Output FITS path for EoR estimate.")
     parser.add_argument("--num-iters", type=int, help="Number of optimization iterations.")
@@ -743,6 +764,9 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "mask_cube",
         "psf_cube",
         "psf_scale",
+        "psf_pad_to",
+        "beam_cube",
+        "beam_scale",
         "enable_corr_check",
         "corr_check_every",
         "optimizer_name",
