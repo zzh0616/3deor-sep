@@ -1526,6 +1526,7 @@ def main() -> int:
     prior_src = str(args.lagcorr_fg_prior_source).strip().lower()
     need_fg_oracle = False
     feat_pool_needed: set = set()
+    default_lagcorr_feats = _parse_csv_tokens(args.lagcorr_feature_list) or ["raw"]
     for cand in candidates:
         extras = set(str(x).strip().lower() for x in cand.extra_loss_terms)
         if "lagcorr" not in extras:
@@ -1534,7 +1535,7 @@ def main() -> int:
         if fg_w <= 0.0:
             continue
         need_fg_oracle = True
-        feat = str(cand.prior_overrides.get("lagcorr_feature", args.lagcorr_feature)).strip().lower()
+        feat = str(cand.prior_overrides.get("lagcorr_feature", default_lagcorr_feats[0])).strip().lower()
         pool = int(cand.prior_overrides.get("lagcorr_spatial_pool", args.lagcorr_spatial_pool))
         feat_pool_needed.add((feat, pool))
     if need_fg_oracle and prior_src == "truth":
