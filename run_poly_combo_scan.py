@@ -272,17 +272,41 @@ def parse_args() -> argparse.Namespace:
     # FG logcurv.
     p.add_argument("--fg-logcurv-weight-list", type=str, default="0.1,0.3,1.0")
     p.add_argument("--fg-logcurv-sigma", type=float, default=1.0)
+    p.add_argument(
+        "--fg-logcurv-sigma-list",
+        type=str,
+        default="",
+        help="Optional comma-separated sigma list. If empty, uses --fg-logcurv-sigma.",
+    )
     p.add_argument("--fg-logcurv-eps", type=float, default=1e-6)
     p.add_argument("--fg-logcurv-softplus-scale", type=float, default=1.0)
 
     # FG lowrank.
     p.add_argument("--fg-lowrank-weight-list", type=str, default="0.3,1.0")
     p.add_argument("--fg-lowrank-rank", type=int, default=3)
+    p.add_argument(
+        "--fg-lowrank-rank-list",
+        type=str,
+        default="",
+        help="Optional comma-separated rank list. If empty, uses --fg-lowrank-rank.",
+    )
     p.add_argument("--fg-lowrank-num-samples", type=int, default=4096)
     p.add_argument("--fg-lowrank-spatial-pool", type=int, default=8)
     p.add_argument("--fg-lowrank-normalize", type=str, default="rms", choices=["none", "rms"])
     p.add_argument("--fg-lowrank-tail-max", type=float, default=0.0)
+    p.add_argument(
+        "--fg-lowrank-tail-max-list",
+        type=str,
+        default="",
+        help="Optional comma-separated tail_max list. If empty, uses --fg-lowrank-tail-max.",
+    )
     p.add_argument("--fg-lowrank-sigma", type=float, default=0.2)
+    p.add_argument(
+        "--fg-lowrank-sigma-list",
+        type=str,
+        default="",
+        help="Optional comma-separated sigma list. If empty, uses --fg-lowrank-sigma.",
+    )
     p.add_argument("--fg-lowrank-sample-mode", type=str, default="stride", choices=["stride", "random"])
     p.add_argument("--fg-lowrank-random-seed", type=int, default=0)
     p.add_argument("--fg-lowrank-eps", type=float, default=1e-12)
@@ -893,45 +917,72 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
                     )
 
     if bool(args.include_fg_logcurv):
+        sigmas = (
+            _parse_float_list(args.fg_logcurv_sigma_list)
+            if str(args.fg_logcurv_sigma_list).strip()
+            else [float(args.fg_logcurv_sigma)]
+        )
         for w in _parse_float_list(args.fg_logcurv_weight_list):
-            name = f"poly+logcurv_w{_fmt_float_token(w)}"
-            out.append(
-                CandidateSpec(
-                    name=name,
-                    extra_loss_terms=("poly_reparam", "fg_logcurv"),
-                    optim_overrides={},
-                    weight_overrides={"fg_logcurv_weight": float(w)},
-                    prior_overrides={
-                        "fg_logcurv_mean": 0.0,
-                        "fg_logcurv_sigma": float(args.fg_logcurv_sigma),
-                        "fg_logcurv_eps": float(args.fg_logcurv_eps),
-                        "fg_logcurv_softplus_scale": float(args.fg_logcurv_softplus_scale),
-                    },
+            for sig in sigmas:
+                name = f"poly+logcurv_w{_fmt_float_token(w)}_s{_fmt_float_token(sig)}"
+                out.append(
+                    CandidateSpec(
+                        name=name,
+                        extra_loss_terms=("poly_reparam", "fg_logcurv"),
+                        optim_overrides={},
+                        weight_overrides={"fg_logcurv_weight": float(w)},
+                        prior_overrides={
+                            "fg_logcurv_mean": 0.0,
+                            "fg_logcurv_sigma": float(sig),
+                            "fg_logcurv_eps": float(args.fg_logcurv_eps),
+                            "fg_logcurv_softplus_scale": float(args.fg_logcurv_softplus_scale),
+                        },
+                    )
                 )
-            )
 
     if bool(args.include_fg_lowrank):
+        ranks = (
+            _parse_int_list(args.fg_lowrank_rank_list)
+            if str(args.fg_lowrank_rank_list).strip()
+            else [int(args.fg_lowrank_rank)]
+        )
+        tail_max_list = (
+            _parse_float_list(args.fg_lowrank_tail_max_list)
+            if str(args.fg_lowrank_tail_max_list).strip()
+            else [float(args.fg_lowrank_tail_max)]
+        )
+        sigmas = (
+            _parse_float_list(args.fg_lowrank_sigma_list)
+            if str(args.fg_lowrank_sigma_list).strip()
+            else [float(args.fg_lowrank_sigma)]
+        )
         for w in _parse_float_list(args.fg_lowrank_weight_list):
-            name = f"poly+lowrank_w{_fmt_float_token(w)}"
-            out.append(
-                CandidateSpec(
-                    name=name,
-                    extra_loss_terms=("poly_reparam", "fg_lowrank"),
-                    optim_overrides={},
-                    weight_overrides={"fg_lowrank_weight": float(w)},
-                    prior_overrides={
-                        "fg_lowrank_rank": int(args.fg_lowrank_rank),
-                        "fg_lowrank_num_samples": int(args.fg_lowrank_num_samples),
-                        "fg_lowrank_spatial_pool": int(args.fg_lowrank_spatial_pool),
-                        "fg_lowrank_normalize": str(args.fg_lowrank_normalize),
-                        "fg_lowrank_tail_max": float(args.fg_lowrank_tail_max),
-                        "fg_lowrank_sigma": float(args.fg_lowrank_sigma),
-                        "fg_lowrank_sample_mode": str(args.fg_lowrank_sample_mode),
-                        "fg_lowrank_random_seed": int(args.fg_lowrank_random_seed),
-                        "fg_lowrank_eps": float(args.fg_lowrank_eps),
-                    },
-                )
-            )
+            for r in ranks:
+                for tail_max in tail_max_list:
+                    for sig in sigmas:
+                        name = (
+                            f"poly+lowrank_w{_fmt_float_token(w)}_r{int(r)}"
+                            f"_t{_fmt_float_token(tail_max)}_s{_fmt_float_token(sig)}"
+                        )
+                        out.append(
+                            CandidateSpec(
+                                name=name,
+                                extra_loss_terms=("poly_reparam", "fg_lowrank"),
+                                optim_overrides={},
+                                weight_overrides={"fg_lowrank_weight": float(w)},
+                                prior_overrides={
+                                    "fg_lowrank_rank": int(r),
+                                    "fg_lowrank_num_samples": int(args.fg_lowrank_num_samples),
+                                    "fg_lowrank_spatial_pool": int(args.fg_lowrank_spatial_pool),
+                                    "fg_lowrank_normalize": str(args.fg_lowrank_normalize),
+                                    "fg_lowrank_tail_max": float(tail_max),
+                                    "fg_lowrank_sigma": float(sig),
+                                    "fg_lowrank_sample_mode": str(args.fg_lowrank_sample_mode),
+                                    "fg_lowrank_random_seed": int(args.fg_lowrank_random_seed),
+                                    "fg_lowrank_eps": float(args.fg_lowrank_eps),
+                                },
+                            )
+                        )
 
     if bool(args.include_eor_mean):
         for w in _parse_float_list(args.eor_mean_weight_list):
@@ -1037,6 +1088,142 @@ def generate_candidates(args: argparse.Namespace) -> List[CandidateSpec]:
                         },
                     )
                 )
+
+        # A few physics-motivated multi-term combos with FG-only priors.
+        # These are intended as "stack non-poly priors" long-run re-tests.
+        logcurv_sigmas = (
+            _parse_float_list(args.fg_logcurv_sigma_list)
+            if str(args.fg_logcurv_sigma_list).strip()
+            else [float(args.fg_logcurv_sigma)]
+        )
+        lowrank_ranks = (
+            _parse_int_list(args.fg_lowrank_rank_list)
+            if str(args.fg_lowrank_rank_list).strip()
+            else [int(args.fg_lowrank_rank)]
+        )
+        lowrank_tail_max_list = (
+            _parse_float_list(args.fg_lowrank_tail_max_list)
+            if str(args.fg_lowrank_tail_max_list).strip()
+            else [float(args.fg_lowrank_tail_max)]
+        )
+        lowrank_sigmas = (
+            _parse_float_list(args.fg_lowrank_sigma_list)
+            if str(args.fg_lowrank_sigma_list).strip()
+            else [float(args.fg_lowrank_sigma)]
+        )
+
+        # Pick a single representative setting from each list (the first element) to keep combos small.
+        logcurv_sig = float(logcurv_sigmas[0])
+        lowrank_rank = int(lowrank_ranks[0])
+        lowrank_tail = float(lowrank_tail_max_list[0])
+        lowrank_sig = float(lowrank_sigmas[0])
+
+        lag_w = 0.1
+        logcurv_w = 0.3
+        lowrank_w = 0.3
+        for feat in ["diff1"]:
+            feat_norm = str(feat).strip().lower()
+            # poly + lagFG + logcurv
+            name = f"poly+lagfg_w{_fmt_float_token(lag_w)}+logcurv_w{_fmt_float_token(logcurv_w)}"
+            out.append(
+                CandidateSpec(
+                    name=name,
+                    extra_loss_terms=("poly_reparam", "lagcorr", "fg_logcurv"),
+                    optim_overrides={},
+                    weight_overrides={
+                        "lagcorr_weight": float(lag_w),
+                        "lagcorr_fg_component_weight": 1.0,
+                        "lagcorr_eor_component_weight": 0.0,
+                        "lagcorr_gap_weight": 0.0,
+                        "fg_logcurv_weight": float(logcurv_w),
+                    },
+                    prior_overrides={
+                        "lagcorr_unit": str(args.lagcorr_unit),
+                        "lagcorr_feature": feat_norm,
+                        "lagcorr_spatial_pool": int(args.lagcorr_spatial_pool),
+                        "lagcorr_max_pairs": None if int(args.lagcorr_max_pairs) <= 0 else int(args.lagcorr_max_pairs),
+                        "lagcorr_pair_sampling": str(args.lagcorr_pair_sampling),
+                        "lagcorr_random_seed": int(args.lagcorr_random_seed),
+                        "lagcorr_rms_min": float(args.lagcorr_rms_min),
+                        "lagcorr_intervals": list(LAG_INTERVALS_MHZ),
+                        "lagcorr_lag_weights": 1.0,
+                        "lagcorr_eor_start_iter": int(args.lagcorr_eor_start_iter),
+                        "lagcorr_eor_ramp_iters": int(args.lagcorr_eor_ramp_iters),
+                        "fg_logcurv_mean": 0.0,
+                        "fg_logcurv_sigma": float(logcurv_sig),
+                        "fg_logcurv_eps": float(args.fg_logcurv_eps),
+                        "fg_logcurv_softplus_scale": float(args.fg_logcurv_softplus_scale),
+                    },
+                )
+            )
+
+            # poly + lagFG + lowrank
+            name = f"poly+lagfg_w{_fmt_float_token(lag_w)}+lowrank_w{_fmt_float_token(lowrank_w)}"
+            out.append(
+                CandidateSpec(
+                    name=name,
+                    extra_loss_terms=("poly_reparam", "lagcorr", "fg_lowrank"),
+                    optim_overrides={},
+                    weight_overrides={
+                        "lagcorr_weight": float(lag_w),
+                        "lagcorr_fg_component_weight": 1.0,
+                        "lagcorr_eor_component_weight": 0.0,
+                        "lagcorr_gap_weight": 0.0,
+                        "fg_lowrank_weight": float(lowrank_w),
+                    },
+                    prior_overrides={
+                        "lagcorr_unit": str(args.lagcorr_unit),
+                        "lagcorr_feature": feat_norm,
+                        "lagcorr_spatial_pool": int(args.lagcorr_spatial_pool),
+                        "lagcorr_max_pairs": None if int(args.lagcorr_max_pairs) <= 0 else int(args.lagcorr_max_pairs),
+                        "lagcorr_pair_sampling": str(args.lagcorr_pair_sampling),
+                        "lagcorr_random_seed": int(args.lagcorr_random_seed),
+                        "lagcorr_rms_min": float(args.lagcorr_rms_min),
+                        "lagcorr_intervals": list(LAG_INTERVALS_MHZ),
+                        "lagcorr_lag_weights": 1.0,
+                        "lagcorr_eor_start_iter": int(args.lagcorr_eor_start_iter),
+                        "lagcorr_eor_ramp_iters": int(args.lagcorr_eor_ramp_iters),
+                        "fg_lowrank_rank": int(lowrank_rank),
+                        "fg_lowrank_num_samples": int(args.fg_lowrank_num_samples),
+                        "fg_lowrank_spatial_pool": int(args.fg_lowrank_spatial_pool),
+                        "fg_lowrank_normalize": str(args.fg_lowrank_normalize),
+                        "fg_lowrank_tail_max": float(lowrank_tail),
+                        "fg_lowrank_sigma": float(lowrank_sig),
+                        "fg_lowrank_sample_mode": str(args.fg_lowrank_sample_mode),
+                        "fg_lowrank_random_seed": int(args.fg_lowrank_random_seed),
+                        "fg_lowrank_eps": float(args.fg_lowrank_eps),
+                    },
+                )
+            )
+
+        # poly + logcurv + lowrank (no lagcorr)
+        name = f"poly+logcurv_w{_fmt_float_token(logcurv_w)}+lowrank_w{_fmt_float_token(lowrank_w)}"
+        out.append(
+            CandidateSpec(
+                name=name,
+                extra_loss_terms=("poly_reparam", "fg_logcurv", "fg_lowrank"),
+                optim_overrides={},
+                weight_overrides={
+                    "fg_logcurv_weight": float(logcurv_w),
+                    "fg_lowrank_weight": float(lowrank_w),
+                },
+                prior_overrides={
+                    "fg_logcurv_mean": 0.0,
+                    "fg_logcurv_sigma": float(logcurv_sig),
+                    "fg_logcurv_eps": float(args.fg_logcurv_eps),
+                    "fg_logcurv_softplus_scale": float(args.fg_logcurv_softplus_scale),
+                    "fg_lowrank_rank": int(lowrank_rank),
+                    "fg_lowrank_num_samples": int(args.fg_lowrank_num_samples),
+                    "fg_lowrank_spatial_pool": int(args.fg_lowrank_spatial_pool),
+                    "fg_lowrank_normalize": str(args.fg_lowrank_normalize),
+                    "fg_lowrank_tail_max": float(lowrank_tail),
+                    "fg_lowrank_sigma": float(lowrank_sig),
+                    "fg_lowrank_sample_mode": str(args.fg_lowrank_sample_mode),
+                    "fg_lowrank_random_seed": int(args.fg_lowrank_random_seed),
+                    "fg_lowrank_eps": float(args.fg_lowrank_eps),
+                },
+            )
+        )
 
     # De-dup by name.
     seen = set()
