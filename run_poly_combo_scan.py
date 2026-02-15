@@ -1520,8 +1520,24 @@ def main() -> int:
         }
 
     # Optional cache for oracle FG lagcorr priors (per dataset/feature/pool).
+    # NOTE: include_combos can introduce FG-only lagcorr candidates even when --include-lagcorr-fg is not set,
+    # so we decide whether to build this cache based on the generated candidate list (not on a single flag).
     fg_lagcorr_cache: Dict[Tuple[str, str, int], Tuple[List[float], List[float]]] = {}
-    if bool(args.include_lagcorr_fg) and str(args.lagcorr_fg_prior_source).strip().lower() == "truth":
+    prior_src = str(args.lagcorr_fg_prior_source).strip().lower()
+    need_fg_oracle = False
+    feat_pool_needed: set = set()
+    for cand in candidates:
+        extras = set(str(x).strip().lower() for x in cand.extra_loss_terms)
+        if "lagcorr" not in extras:
+            continue
+        fg_w = float(cand.weight_overrides.get("lagcorr_fg_component_weight", 0.0))
+        if fg_w <= 0.0:
+            continue
+        need_fg_oracle = True
+        feat = str(cand.prior_overrides.get("lagcorr_feature", args.lagcorr_feature)).strip().lower()
+        pool = int(cand.prior_overrides.get("lagcorr_spatial_pool", args.lagcorr_spatial_pool))
+        feat_pool_needed.add((feat, pool))
+    if need_fg_oracle and prior_src == "truth":
         lag_channels: List[int] = []
         if str(args.lagcorr_unit).strip().lower() == "chan":
             lag_channels = [int(round(float(x))) for x in LAG_INTERVALS_MHZ]
@@ -1532,17 +1548,15 @@ def main() -> int:
             cache = ds_cache[ds.name]
             true_fg = cache["true_fg"]
             assert isinstance(true_fg, np.ndarray)
-            for feat in _parse_csv_tokens(args.lagcorr_feature_list):
-                feat_norm = str(feat).strip().lower()
-                pool = int(args.lagcorr_spatial_pool)
-                key = (ds.name, feat_norm, pool)
+            for feat_norm, pool in sorted(feat_pool_needed):
+                key = (ds.name, feat_norm, int(pool))
                 if key in fg_lagcorr_cache:
                     continue
                 mu, sig = _lagcorr_oracle_from_true_fg(
                     true_fg,
                     lag_channels=lag_channels,
-                    feature=feat_norm,
-                    spatial_pool=pool,
+                    feature=str(feat_norm),
+                    spatial_pool=int(pool),
                     max_pairs=None if int(args.lagcorr_max_pairs) <= 0 else int(args.lagcorr_max_pairs),
                     pair_sampling=str(args.lagcorr_pair_sampling),
                     seed=int(args.lagcorr_random_seed),
