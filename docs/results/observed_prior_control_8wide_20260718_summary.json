@@ -1,0 +1,28 @@
+{
+  "decision": "stop_before_32_frequency_promotion",
+  "format_version": 1,
+  "matched_catalog_diffuse_ablation": {
+    "elapsed_seconds": 403.5096325725317,
+    "foreground_power_ratio": 2925.3507772626594,
+    "posterior_max_abs_sigma": 2.886650789656801,
+    "pure_eor_power_ratio": 1.1496072960613921,
+    "pure_eor_relative_l2": 0.2334804301400279,
+    "quick_pass_count": 0,
+    "result_json_sha256": "0269fb081a96f6f18e81eebdd2b4215773c8402b56bd8a8e1499adf9b950211c",
+    "target_band_count": 32,
+    "total_relative_l2": 5363.843997071887
+  },
+  "realistic_catalog_pairing": {
+    "elapsed_seconds": 1789.1577319130301,
+    "foreground_power_ratio": 1364405.7716012455,
+    "posterior_max_abs_sigma": 12.57486357892698,
+    "posterior_over_3sigma_count": 24,
+    "pure_eor_power_ratio": 0.98558758573206,
+    "pure_eor_relative_l2": 0.0236172856146257,
+    "quick_pass_count": 0,
+    "result_json_sha256": "4cfffc0f5c139480e0a5ab12ca4a72ec68606c5fd5a008546ef1c13797e905d6",
+    "target_band_count": 32,
+    "total_relative_l2": 1590629.4921480757
+  },
+  "scope": "8-frequency noiseless same-sky observation-prior screen"
+}

@@ -1,0 +1,56 @@
+{
+  "dx": 32.0,
+  "dy": 32.0,
+  "df": 0.4,
+  "unit_x": "arcsec",
+  "unit_y": "arcsec",
+  "unit_f": "mhz",
+  "ref_freq_mhz": 119.3,
+  "freq_grid_start_mhz": 117.9,
+  "rest_freq_mhz": 1420.40575,
+  "H0": 67.8,
+  "Om0": 0.308,
+  "Ode0": 0.692,
+  "freq_axis": 0,
+  "nbins_1d": 50,
+  "nbins_kperp": 32,
+  "nbins_kpar": 4,
+  "output_dir": "powerspec",
+  "stat_mode": "mean",
+  "log_bins_2d": false,
+  "log_power_2d": true,
+  "demean_mode": "global",
+  "eor_window_enabled": true,
+  "eor_window_kpar_min": 0.1356,
+  "eor_window_wedge_slope": 0.23941630957955987,
+  "eor_window_wedge_intercept": 0.0678,
+  "eor_window_kperp_min": 0.01915393632618446,
+  "eor_window_kperp_max": 1.596161360515372,
+  "eor_window_kpar_max": null,
+  "eor_window_exclude_dc": false,
+  "eor_window_bin_policy": "all_modes",
+  "eor_window_eps": 1e-20,
+  "eor_window_profiles": {
+    "legacy_rect_0p2h": {
+      "wedge_slope": 0.0,
+      "wedge_intercept": 0.0,
+      "kperp_min": null,
+      "kperp_max": null
+    },
+    "patch_no_buffer": {
+      "wedge_slope": 0.23941630957955987,
+      "wedge_intercept": 0.0,
+      "kperp_min": null,
+      "kperp_max": null
+    },
+    "horizon_buffer": {
+      "wedge_slope": 4.26483558833161,
+      "wedge_intercept": 0.0678,
+      "kperp_min": null,
+      "kperp_max": null
+    }
+  },
+  "eor_window_ranking_profile": "default",
+  "eor_window_soft_enabled": true,
+  "eor_window_soft_transition": 0.08
+}

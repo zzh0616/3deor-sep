@@ -1,0 +1,58 @@
+{
+  "schema": "ps2d_v2_mode_first_config",
+  "schema_version": 2,
+  "frozen_analysis_contract_sha256": "ce60b514464478c8d5543850805cc5f417f2bcae43f192e42adec06381bd8e64",
+  "frequencies_mhz": [
+    117.9,
+    118.3,
+    118.7,
+    119.1,
+    119.5,
+    119.9,
+    120.3,
+    120.7
+  ],
+  "reference_frequency_mhz": 119.3,
+  "rest_frequency_mhz": 1420.40575,
+  "cosmology": {
+    "H0_km_s_mpc": 67.8,
+    "Om0": 0.308
+  },
+  "image_geometry": {
+    "eval_crop_size": 256,
+    "source_image_size": 512,
+    "spatial_pixel_arcsec": 32.0
+  },
+  "instrument_support": {
+    "min_uv_lambda": 30.0,
+    "max_uv_lambda": 2500.0
+  },
+  "analysis": {
+    "demean_mode": "global",
+    "radial_taper": "hann",
+    "spatial_taper": "hann",
+    "radial_nyquist_policy": "exclude",
+    "full_kperp_bins": 32,
+    "window_kperp_bins": 32
+  },
+  "estimator_partitions": {
+    "control_kpar_indices": [0],
+    "guard_kpar_indices": [1]
+  },
+  "calibration_source": {
+    "transverse_support": "full_fft_square",
+    "kperp_bins": 32,
+    "radial_nyquist_policy": "include"
+  },
+  "eor_window": {
+    "profile": "finite_source_patch_corner",
+    "kpar_floor_h_mpc": 0.2,
+    "suprahorizon_buffer_h_mpc": 0.1,
+    "exclude_exact_dc": true
+  },
+  "legacy_reproduction": {
+    "implementation": "powerspec.py",
+    "config": "configs/power_eor_window_8wide_isobeam_patch.json",
+    "status": "compatibility_only"
+  }
+}
