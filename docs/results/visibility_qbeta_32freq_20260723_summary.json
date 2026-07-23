@@ -1,0 +1,148 @@
+{
+  "schema": "visibility_qbeta_32freq_noiseless_summary",
+  "schema_version": 1,
+  "date": "2026-07-23",
+  "analysis_contract_sha256": "37a984ec43857510c821de560331670d494077cea25331df3e2ba7b17176a99d",
+  "visibility_bank_sha256": "f09644cda5e22dfb5adf572ef54f1df3dd68688f8ad8f5ecfdc36772bc53a1d7",
+  "sky_cache_sha256": "5b1dcea83d334b5834e89ffdbc67be2a6e2a3540b9267c63ea527478d616a29a",
+  "estimator": {
+    "frequency_count": 32,
+    "frequency_min_mhz": 117.9,
+    "frequency_max_mhz": 121.0,
+    "source_scope": "all_in_range_with_nyquist",
+    "source_band_count": 544,
+    "reporting_source_band_count": 40,
+    "output_band_count": 112,
+    "selected_window_count": 20,
+    "minimum_relative_qbeta_response": 0.1,
+    "minimum_target_window_fraction": 0.8,
+    "row_scope": "reporting_kperp",
+    "row_partitions": 4,
+    "rows_per_kperp_bin_per_partition": 96,
+    "combined_rows_per_kperp_bin": 384,
+    "selected_row_count": 3840,
+    "selected_visibility_count": 122880,
+    "calibration_repeats": 2,
+    "validation_repeats": 1,
+    "heldout_mixture_repeats": 2,
+    "thermal_noise": false,
+    "primary_beam": false,
+    "uv_gridding": false
+  },
+  "selected_window_geometry": {
+    "kperp_indices": [6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    "kperp_edge_min_mpc_inv": 0.314935646605651,
+    "kperp_edge_max_mpc_inv": 0.8078957525092998,
+    "kpar_indices": [13, 14],
+    "kpar_values_mpc_inv": [1.320497928197488, 1.422074691904987],
+    "target_window_fraction_minimum": 0.8598685139208698,
+    "target_window_fraction_median": 0.9707582235047547,
+    "target_window_fraction_maximum": 0.9868455281225138,
+    "median_window_effective_width_source_bands": 3.851161005654588
+  },
+  "operator_and_response": {
+    "exact_visibility_relative_l2": 3.8132270329614455e-06,
+    "response_shape": [112, 544],
+    "response_rank": 112,
+    "retained_condition_number": 148.01672481318917,
+    "calibration_validation_response_relative_l2": 0.05278316725403298,
+    "validation_projected_response_relative_l2": 2.4297450288860556e-15
+  },
+  "windowed_results": {
+    "restricted_eor": {
+      "relative_l2": 0.07681067103159407,
+      "integrated_power_ratio": 0.9445948428614037,
+      "maximum_relative_window_error": 0.15713418688318578,
+      "passing_window_count": 20
+    },
+    "full_eor": {
+      "relative_l2": 0.07633956796818846,
+      "integrated_power_ratio": 0.9450277225764232,
+      "maximum_relative_window_error": 0.156887551538976,
+      "passing_window_count": 20
+    },
+    "total_foreground_plus_eor": {
+      "relative_l2": 0.07633741112216336,
+      "integrated_power_ratio": 0.9450395170987564,
+      "maximum_relative_window_error": 0.15688861098789833,
+      "passing_window_count": 20
+    },
+    "heldout_eor_like_mixtures": [
+      {
+        "relative_l2": 0.05278136389749011,
+        "integrated_power_ratio": 1.0015326927436763,
+        "maximum_relative_window_error": 0.11718488515479054,
+        "passing_window_count": 20
+      },
+      {
+        "relative_l2": 0.054958766085899835,
+        "integrated_power_ratio": 1.0141864463917076,
+        "maximum_relative_window_error": 0.2013228657509532,
+        "passing_window_count": 19
+      }
+    ],
+    "foreground_to_target_integrated_absolute_ratio": 2.0738241064831467e-06
+  },
+  "source_context_progression": [
+    {
+      "source_band_count": 40,
+      "radial_nyquist_included": false,
+      "combined_rows_per_kperp_bin": 192,
+      "selected_window_count": 52,
+      "full_eor_relative_l2": 1.10290,
+      "full_eor_integrated_power_ratio": 1.40418,
+      "passing_window_count": 24
+    },
+    {
+      "source_band_count": 512,
+      "radial_nyquist_included": false,
+      "combined_rows_per_kperp_bin": 192,
+      "selected_window_count": 30,
+      "full_eor_relative_l2": 0.12398490516549299,
+      "full_eor_integrated_power_ratio": 1.0213613112031912,
+      "passing_window_count": 23
+    },
+    {
+      "source_band_count": 544,
+      "radial_nyquist_included": true,
+      "combined_rows_per_kperp_bin": 192,
+      "selected_window_count": 20,
+      "full_eor_relative_l2": 0.09181919599116194,
+      "full_eor_integrated_power_ratio": 0.9420720050548518,
+      "passing_window_count": 19
+    },
+    {
+      "source_band_count": 544,
+      "radial_nyquist_included": true,
+      "combined_rows_per_kperp_bin": 384,
+      "selected_window_count": 20,
+      "full_eor_relative_l2": 0.07633956796818846,
+      "full_eor_integrated_power_ratio": 0.9450277225764232,
+      "passing_window_count": 20
+    }
+  ],
+  "artifacts": {
+    "final_remote_root": "/data1/zhenghao/fg_rmw/runs/visibility_qbeta_all544nyq_targetrows384_20260724",
+    "final_result_json_sha256": "b9f3282a27c477a96560e7f545ffa4c49bb6f5839ff97277f1b522006ad7e044",
+    "final_result_npz_sha256": "9b29806658a5d4afeec43ff729c5da9b3508be39ee9855db588815c96d2380d5",
+    "all512_remote_root": "/data1/zhenghao/fg_rmw/runs/visibility_qbeta_all512_rowpart6_20260724",
+    "all512_result_json_sha256": "de9f37e68d2d7e37dcfc131d1542667287fff669059323b04ca97ebbbc36878b",
+    "all544_uniform_remote_root": "/data1/zhenghao/fg_rmw/runs/visibility_qbeta_all544nyq_rowpart6_20260724",
+    "all544_uniform_result_json_sha256": "bb32c6a8bd68946535f0b834f4575a031047a884e5b9a35719803c08ee816b5e"
+  },
+  "decision": {
+    "noiseless_main_gate": "pass for full EoR and foreground plus EoR in all 20 response-selected windows",
+    "heldout_phase_gate": "one of two mixtures passes 20 of 20; the second is marginal at 19 of 20 with 20.132 percent maximum error",
+    "scientific_output": "operator-calibrated windowed sky bandpower, not a fully deconvolved 544-bin spectrum",
+    "next_step": "freeze the 544-source and 20-window contract before adding independent noise/time splits and a cross quadratic estimator"
+  },
+  "limitations": [
+    "no thermal noise",
+    "single exact foreground and EoR bank realization",
+    "heldout phase mixtures reuse the injected EoR bandpower shape for validation only",
+    "no station primary beam",
+    "fixed baseline-time rows and no uv gridding",
+    "out-of-kperp-range sky modes remain outside the calibrated response",
+    "the 112 by 544 response is underdetermined and only row-normalized windowed powers are interpreted"
+  ]
+}
