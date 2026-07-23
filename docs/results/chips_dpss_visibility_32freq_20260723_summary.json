@@ -1,0 +1,138 @@
+{
+  "schema": "chips_dpss_visibility_32freq_summary",
+  "schema_version": 1,
+  "date": "2026-07-23",
+  "analysis_contract_sha256": "37a984ec43857510c821de560331670d494077cea25331df3e2ba7b17176a99d",
+  "visibility_bank": {
+    "remote_root": "/data1/zhenghao/fg_rmw/runs/chips_visibility_32freq_grid512_20260723",
+    "sha256": "f09644cda5e22dfb5adf572ef54f1df3dd68688f8ad8f5ecfdc36772bc53a1d7",
+    "size_bytes": 118160280,
+    "frequency_count": 32,
+    "frequency_min_mhz": 117.9,
+    "frequency_max_mhz": 121.0,
+    "frequency_spacing_mhz": 0.1,
+    "grid_size": 512,
+    "uv_min_lambda": 30.0,
+    "uv_max_lambda": 2500.0,
+    "actual_uv_cell_lambda": 9.765625,
+    "natural_fourier_uv_cell_lambda": 12.589404678167503,
+    "actual_over_natural_uv_cell": 0.7757018897752576,
+    "gridding_resolution_gate_pass": true,
+    "complete_grid_cell_count": 28884,
+    "complete_grid_cell_fraction": 0.220367431640625,
+    "row_sample_count": 23377,
+    "shard_elapsed_seconds": {
+      "minimum": 129.708,
+      "median": 146.198,
+      "maximum": 170.786
+    },
+    "wall_runtime_minutes_approx": 28.0,
+    "gpu_workers": 3
+  },
+  "coarse_grid_control": {
+    "grid_size": 128,
+    "actual_uv_cell_lambda": 39.0625,
+    "actual_over_natural_uv_cell": 3.1028,
+    "gridding_resolution_gate_pass": false,
+    "decision": "engineering control only"
+  },
+  "support_contract": {
+    "geometric_window_uses_upper_kperp_edge": true,
+    "minimum_samples_per_bin": 8,
+    "minimum_relative_sensitivity": 0.0001,
+    "minimum_window_self_fraction": 0.1,
+    "foreground_leakage_tolerance": 0.1,
+    "total_relative_error_tolerance": 0.2,
+    "dpss_eigenvalue_threshold": 1e-12
+  },
+  "dpss_results": {
+    "uvgrid_cross_raw_none": {
+      "supported_bins": 410,
+      "foreground_to_eor_absolute_l1": 17499828.368291788,
+      "total_minus_eor_relative_l2": 15843523.297672888,
+      "passing_bins": 0
+    },
+    "uvgrid_cross_patch_cov_1e12": {
+      "supported_bins": 340,
+      "foreground_to_eor_absolute_l1": 292484.85294354334,
+      "foreground_to_eor_l2": 558343.0436757326,
+      "total_minus_eor_relative_l2": 558355.5693350233,
+      "passing_bins": 0
+    },
+    "uvgrid_cross_patch_hard": {
+      "supported_bins": 337,
+      "support_fraction_of_geometric_window": 0.8219512195121951,
+      "foreground_to_eor_absolute_l1": 284530.98103557556,
+      "foreground_to_eor_l2": 563705.0141516787,
+      "total_minus_eor_relative_l2": 563716.8038967599,
+      "passing_bins": 0,
+      "pure_eor_vs_raw_integrated_ratio": 0.8961511876415942,
+      "pure_eor_vs_raw_relative_l2": 0.46533151758099334,
+      "pure_eor_delay_window_integrated_ratio": 0.8096028291446714,
+      "pure_eor_delay_window_relative_l2": 0.4559240884267588
+    },
+    "uvgrid_auto_patch_hard": {
+      "supported_bins": 337,
+      "foreground_to_eor_absolute_l1": 285274.75859886425,
+      "total_minus_eor_relative_l2": 564191.5502755218,
+      "passing_bins": 0
+    },
+    "row_auto_patch_cov_1e12": {
+      "supported_bins": 340,
+      "foreground_to_eor_absolute_l1": 0.009381938649650706,
+      "foreground_to_eor_l2": 0.07283949338986652,
+      "total_minus_eor_relative_l2": 0.07589714078144755,
+      "signed_integrated_total_over_eor": 1.0098467940750568,
+      "passing_bins": 339
+    },
+    "row_auto_patch_hard": {
+      "supported_bins": 337,
+      "support_fraction_of_geometric_window": 0.8219512195121951,
+      "foreground_to_eor_absolute_l1": 0.0007491948938961786,
+      "foreground_to_eor_l2": 0.0031841767772213107,
+      "total_minus_eor_relative_l2": 0.003639709119819717,
+      "signed_integrated_total_over_eor": 1.000774363240039,
+      "passing_bins": 337,
+      "pure_eor_vs_raw_integrated_ratio": 0.8034639483771531,
+      "pure_eor_vs_raw_relative_l2": 0.5653574389660578,
+      "pure_eor_delay_window_integrated_ratio": 0.5839501937325322,
+      "pure_eor_delay_window_relative_l2": 0.5997895273069929
+    }
+  },
+  "crossfit_full_frequency_covariance": {
+    "angular_folds": 4,
+    "diagonal_shrinkage": 0.0,
+    "best_diagnostic_eigen_floor_fraction": 1e-6,
+    "observed_total": {
+      "supported_bins": 302,
+      "support_fraction_of_geometric_window": 0.7365853658536585,
+      "foreground_to_eor_absolute_l1": 50442.01284903364,
+      "foreground_to_eor_l2": 44267.16625604103,
+      "total_minus_eor_relative_l2": 44276.02143784838,
+      "passing_bins": 0
+    },
+    "oracle_foreground": {
+      "supported_bins": 302,
+      "support_fraction_of_geometric_window": 0.7365853658536585,
+      "foreground_to_eor_absolute_l1": 50421.79661736247,
+      "foreground_to_eor_l2": 44245.964964611805,
+      "total_minus_eor_relative_l2": 44254.836891100225,
+      "passing_bins": 0
+    }
+  },
+  "decisions": {
+    "fixed_baseline_dpss": "retained as a foreground-filtering or avoidance front end",
+    "bilinear_uvgrid_dpss": "rejected for sky-PS2D recovery",
+    "per_kperp_frequency_covariance": "rejected; it does not generalize across uv-angle folds even with true-foreground covariance",
+    "scientific_interpretation": "the row result recovers a filtered visibility observable, not the unfiltered sky PS2D",
+    "next_required_step": "propagate the exact visibility filter, chromatic baseline migration, and gridding through sky-bandpower response matrices Q_beta"
+  },
+  "limitations": [
+    "no thermal noise",
+    "single foreground and EoR realization",
+    "isotropic station beam",
+    "bilinear uv gridding without beam or w-projection kernel",
+    "no absolute sky-PS2D normalization",
+    "covariance-strength and eigen-floor scans are diagnostics rather than deployable truth-independent selectors"
+  ]
+}
