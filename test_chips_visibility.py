@@ -5,7 +5,9 @@ from __future__ import annotations
 import numpy as np
 
 from chips_visibility import (
+    build_chebyshev_quadratic_response,
     build_quadratic_response,
+    chebyshev_foreground_basis,
     cross_quadratic_bandpowers,
     dpss_foreground_basis,
     fold_absolute_delay,
@@ -71,6 +73,58 @@ def test_dpss_rank_increases_with_geometric_delay() -> None:
         np.eye(long.rank),
         rtol=1e-10,
         atol=1e-10,
+    )
+
+
+def test_chebyshev_basis_is_orthonormal_and_annihilated() -> None:
+    frequencies = _frequencies()
+    nuisance = chebyshev_foreground_basis(frequencies, degree=3)
+    np.testing.assert_allclose(
+        nuisance.T @ nuisance,
+        np.eye(4),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    response = build_chebyshev_quadratic_response(
+        frequencies,
+        degree=3,
+        suppression_strength=np.inf,
+        taper="none",
+    )
+    np.testing.assert_allclose(
+        response.analysis_matrix @ nuisance,
+        np.zeros((frequencies.size, nuisance.shape[1])),
+        rtol=0.0,
+        atol=2e-14,
+    )
+    assert response.foreground_basis == "chebyshev"
+    assert response.foreground_rank == 4
+    assert response.polynomial_degree == 3
+
+
+def test_chebyshev_response_matches_monte_carlo_window() -> None:
+    rng = np.random.default_rng(2407)
+    frequencies = _frequencies(16)
+    basis, _ = frequency_fourier_basis(frequencies)
+    response = build_chebyshev_quadratic_response(
+        frequencies,
+        degree=3,
+        suppression_strength=np.inf,
+        taper="hann",
+    )
+    true_power = np.linspace(0.5, 2.0, frequencies.size)
+    coefficients = (
+        rng.normal(size=(40000, frequencies.size))
+        + 1j * rng.normal(size=(40000, frequencies.size))
+    ) * np.sqrt(true_power[None, :] / 2.0)
+    samples = coefficients @ basis.T
+    estimate, _ = cross_quadratic_bandpowers(samples, samples, response)
+    expected = response.window @ true_power
+    np.testing.assert_allclose(
+        estimate[response.supported],
+        expected[response.supported],
+        rtol=0.035,
+        atol=0.035,
     )
 
 

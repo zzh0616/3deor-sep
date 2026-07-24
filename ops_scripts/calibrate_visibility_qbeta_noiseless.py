@@ -28,7 +28,9 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 from chips_visibility import (  # noqa: E402
+    build_chebyshev_quadratic_response,
     build_quadratic_response,
+    dpss_foreground_basis,
     fold_absolute_delay,
     fold_window_absolute_delay,
 )
@@ -87,7 +89,25 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--integration-time-s", type=float, default=10.0)
     parser.add_argument("--phase-ra-deg", type=float, default=0.0)
     parser.add_argument("--phase-dec-deg", type=float, default=-27.0)
+    parser.add_argument(
+        "--foreground-filter",
+        choices=(
+            "none",
+            "dpss_hard",
+            "dpss_soft",
+            "chebyshev",
+            "chebyshev_rank_matched",
+        ),
+        default="dpss_hard",
+    )
+    parser.add_argument("--suppression-strength", type=float, default=1e4)
+    parser.add_argument("--polynomial-degree", type=int, default=3)
     parser.add_argument("--dpss-eigenvalue-threshold", type=float, default=1e-12)
+    parser.add_argument(
+        "--spectral-taper",
+        choices=("none", "hann", "blackman_harris"),
+        default="hann",
+    )
     parser.add_argument("--minimum-window-self-fraction", type=float, default=0.1)
     parser.add_argument("--minimum-relative-sensitivity", type=float, default=1e-4)
     parser.add_argument("--response-rcond", type=float, default=1e-4)
@@ -463,7 +483,11 @@ def _visibility_bandpowers(
     kperp_edges: np.ndarray,
     maximum_delays_s: np.ndarray,
     dpss_eigenvalue_threshold: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    foreground_filter: str,
+    suppression_strength: float,
+    polynomial_degree: int,
+    spectral_taper: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     values = np.asarray(visibilities)
     if values.ndim == 2:
         values = values[None, ...]
@@ -478,6 +502,7 @@ def _visibility_bandpowers(
     window_self: np.ndarray | None = None
     relative_sensitivity: np.ndarray | None = None
     counts = np.zeros(n_kperp, dtype=np.int64)
+    foreground_ranks = np.zeros(n_kperp, dtype=np.int64)
     for transverse_index in range(n_kperp):
         members = np.flatnonzero(
             (row_kperp >= kperp_edges[transverse_index])
@@ -492,19 +517,58 @@ def _visibility_bandpowers(
             )
         )
         counts[transverse_index] = int(members.size)
-        response = build_quadratic_response(
-            frequencies_hz,
-            max_delay_s=float(maximum_delays_s[transverse_index]),
-            suppression_strength=math.inf,
-            dpss_eigenvalue_threshold=float(dpss_eigenvalue_threshold),
-            taper="hann",
+        maximum_delay = float(maximum_delays_s[transverse_index])
+        filter_name = str(foreground_filter)
+        if filter_name == "none":
+            response = build_quadratic_response(
+                frequencies_hz,
+                max_delay_s=maximum_delay,
+                suppression_strength=0.0,
+                dpss_eigenvalue_threshold=float(dpss_eigenvalue_threshold),
+                taper=spectral_taper,
+            )
+        elif filter_name in {"dpss_hard", "dpss_soft"}:
+            response = build_quadratic_response(
+                frequencies_hz,
+                max_delay_s=maximum_delay,
+                suppression_strength=(
+                    math.inf
+                    if filter_name == "dpss_hard"
+                    else float(suppression_strength)
+                ),
+                dpss_eigenvalue_threshold=float(dpss_eigenvalue_threshold),
+                taper=spectral_taper,
+            )
+        elif filter_name == "chebyshev":
+            response = build_chebyshev_quadratic_response(
+                frequencies_hz,
+                degree=int(polynomial_degree),
+                suppression_strength=math.inf,
+                taper=spectral_taper,
+            )
+        elif filter_name == "chebyshev_rank_matched":
+            dpss_basis = dpss_foreground_basis(
+                frequencies_hz,
+                maximum_delay,
+                eigenvalue_threshold=float(dpss_eigenvalue_threshold),
+            )
+            response = build_chebyshev_quadratic_response(
+                frequencies_hz,
+                degree=dpss_basis.rank - 1,
+                suppression_strength=math.inf,
+                taper=spectral_taper,
+            )
+        else:
+            raise ValueError(f"Unsupported foreground filter: {filter_name}")
+        foreground_ranks[transverse_index] = (
+            0 if filter_name == "none" else int(response.foreground_rank)
         )
         raw = build_quadratic_response(
             frequencies_hz,
-            max_delay_s=float(maximum_delays_s[transverse_index]),
+            max_delay_s=maximum_delay,
             suppression_strength=0.0,
             dpss_eigenvalue_threshold=float(dpss_eigenvalue_threshold),
-            taper="hann",
+            taper=spectral_taper,
         )
         selected = np.transpose(values[:, :, members], (0, 2, 1))
         transformed = selected @ response.analysis_matrix.T
@@ -547,6 +611,7 @@ def _visibility_bandpowers(
         counts,
         window_self,
         relative_sensitivity,
+        foreground_ranks,
     )
 
 
@@ -600,7 +665,7 @@ def _generate_probe_outputs(
             ).real
             sky_jy = sky_k * k2jy[None, :, None, None]
             vis = _apply_operator(torch=torch, operator=operator, sky_jy=sky_jy)
-            bandpowers, _, _, _ = _visibility_bandpowers(
+            bandpowers, _, _, _, _ = _visibility_bandpowers(
                 visibilities=vis,
                 **bandpower_kwargs,
             )
@@ -643,7 +708,8 @@ def _generate_mixture_outputs(
     repeats: int,
     seed: int,
     bandpower_kwargs: dict[str, Any],
-) -> np.ndarray:
+    additive_visibilities: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray | None]:
     device = operator.device
     real_dtype = (
         torch.float32 if operator.dtype == torch.complex64 else torch.float64
@@ -683,11 +749,22 @@ def _generate_mixture_outputs(
     )
     sky_jy = sky_k * k2jy[None, :, None, None]
     vis = _apply_operator(torch=torch, operator=operator, sky_jy=sky_jy)
-    bandpowers, _, _, _ = _visibility_bandpowers(
+    bandpowers, _, _, _, _ = _visibility_bandpowers(
         visibilities=vis,
         **bandpower_kwargs,
     )
-    return bandpowers
+    if additive_visibilities is None:
+        return bandpowers, None
+    additive = np.asarray(additive_visibilities, dtype=np.complex128)
+    if additive.shape != vis.shape[1:]:
+        raise ValueError(
+            "Additive mixture visibilities must have shape [frequency,row]"
+        )
+    total_bandpowers, _, _, _, _ = _visibility_bandpowers(
+        visibilities=vis + additive[None, ...],
+        **bandpower_kwargs,
+    )
+    return bandpowers, total_bandpowers
 
 
 def _relative_l2(first: np.ndarray, second: np.ndarray) -> float:
@@ -964,6 +1041,10 @@ def main(argv: Iterable[str] | None = None) -> None:
         "kperp_edges": kperp_edges,
         "maximum_delays_s": maximum_delays,
         "dpss_eigenvalue_threshold": float(args.dpss_eigenvalue_threshold),
+        "foreground_filter": str(args.foreground_filter),
+        "suppression_strength": float(args.suppression_strength),
+        "polynomial_degree": int(args.polynomial_degree),
+        "spectral_taper": str(args.spectral_taper),
     }
     calibration_samples = _generate_probe_outputs(
         torch=torch,
@@ -987,7 +1068,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         seed=int(args.probe_seed) + 1000003,
         bandpower_kwargs=bandpower_kwargs,
     )
-    _, sample_counts, window_self, relative_sensitivity = (
+    _, sample_counts, window_self, relative_sensitivity, foreground_ranks = (
         _visibility_bandpowers(
             visibilities=predicted_eor_vis,
             **bandpower_kwargs,
@@ -1049,7 +1130,7 @@ def main(argv: Iterable[str] | None = None) -> None:
     restricted_vis = _apply_operator(
         torch=torch, operator=operator, sky_jy=restricted_jy
     )
-    restricted_q, _, _, _ = _visibility_bandpowers(
+    restricted_q, _, _, _, _ = _visibility_bandpowers(
         visibilities=restricted_vis,
         **bandpower_kwargs,
     )
@@ -1060,7 +1141,7 @@ def main(argv: Iterable[str] | None = None) -> None:
     integrated_truth = float(
         np.sum(source_weights * restricted_source_power)
     )
-    mixture_q = _generate_mixture_outputs(
+    mixture_q_all, mixture_total_q_all = _generate_mixture_outputs(
         torch=torch,
         operator=operator,
         layout=source_layout,
@@ -1070,18 +1151,28 @@ def main(argv: Iterable[str] | None = None) -> None:
         repeats=int(args.mixture_repeats),
         seed=int(args.probe_seed) + 2000003,
         bandpower_kwargs=bandpower_kwargs,
-    ).reshape(int(args.mixture_repeats), -1)[:, output_band_ids]
-    bank_fg_q, _, _, _ = _visibility_bandpowers(
+        additive_visibilities=np.asarray(
+            bank["sample_fg"][:, selected_rows], dtype=np.complex128
+        ),
+    )
+    mixture_q = mixture_q_all.reshape(
+        int(args.mixture_repeats), -1
+    )[:, output_band_ids]
+    assert mixture_total_q_all is not None
+    mixture_total_q = mixture_total_q_all.reshape(
+        int(args.mixture_repeats), -1
+    )[:, output_band_ids]
+    bank_fg_q, _, _, _, _ = _visibility_bandpowers(
         visibilities=np.asarray(
             bank["sample_fg"][:, selected_rows], dtype=np.complex128
         ),
         **bandpower_kwargs,
     )
-    bank_eor_q, _, _, _ = _visibility_bandpowers(
+    bank_eor_q, _, _, _, _ = _visibility_bandpowers(
         visibilities=target_eor_vis,
         **bandpower_kwargs,
     )
-    bank_total_q, _, _, _ = _visibility_bandpowers(
+    bank_total_q, _, _, _, _ = _visibility_bandpowers(
         visibilities=(
             np.asarray(
                 bank["sample_fg"][:, selected_rows], dtype=np.complex128
@@ -1108,6 +1199,14 @@ def main(argv: Iterable[str] | None = None) -> None:
     mixture_windowed = _windowed_metrics(
         response=calibration_response,
         observed_q=mixture_q,
+        source_power=restricted_source_power,
+        minimum_relative_response=minimum_qbeta_response,
+        target_source_positions=reporting_source_positions,
+        minimum_target_window_fraction=minimum_target_window_fraction,
+    )
+    mixture_total_windowed = _windowed_metrics(
+        response=calibration_response,
+        observed_q=mixture_total_q,
         source_power=restricted_source_power,
         minimum_relative_response=minimum_qbeta_response,
         target_source_positions=reporting_source_positions,
@@ -1178,6 +1277,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         "output_band_ids": output_band_ids,
         "support": support.astype(np.int8),
         "sample_counts": sample_counts,
+        "foreground_ranks": foreground_ranks,
         "window_self": window_self,
         "relative_sensitivity": relative_sensitivity,
         "calibration_samples": calibration_samples,
@@ -1191,6 +1291,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         "restricted_eor_q_prediction": restricted_prediction,
         "restricted_eor_recovery": restricted_recovery,
         "heldout_mixture_q": mixture_q,
+        "heldout_total_mixture_q": mixture_total_q,
         "bank_foreground_q": bank_fg_q,
         "bank_eor_q": bank_eor_q,
         "bank_total_q": bank_total_q,
@@ -1204,6 +1305,9 @@ def main(argv: Iterable[str] | None = None) -> None:
             "estimated_windowed_power"
         ],
         "heldout_mixture_windowed_power": mixture_windowed[
+            "estimated_windowed_power"
+        ],
+        "heldout_total_mixture_windowed_power": mixture_total_windowed[
             "estimated_windowed_power"
         ],
         "full_eor_windowed_power": full_eor_windowed[
@@ -1237,6 +1341,22 @@ def main(argv: Iterable[str] | None = None) -> None:
             "integration_time_s": float(args.integration_time_s),
             "phase_ra_deg": float(args.phase_ra_deg),
             "phase_dec_deg": float(args.phase_dec_deg),
+            "foreground_filter": str(args.foreground_filter),
+            "suppression_strength": float(args.suppression_strength),
+            "effective_suppression": (
+                "none"
+                if args.foreground_filter == "none"
+                else (
+                    f"finite:{float(args.suppression_strength):.12g}"
+                    if args.foreground_filter == "dpss_soft"
+                    else "hard"
+                )
+            ),
+            "polynomial_degree": int(args.polynomial_degree),
+            "dpss_eigenvalue_threshold": float(
+                args.dpss_eigenvalue_threshold
+            ),
+            "spectral_taper": str(args.spectral_taper),
             "response_rcond": float(args.response_rcond),
         },
         "operator_closure": operator_closure,
@@ -1308,6 +1428,9 @@ def main(argv: Iterable[str] | None = None) -> None:
             ),
             "restricted_eor": restricted_windowed["realizations"][0],
             "heldout_eor_like_mixtures": mixture_windowed["realizations"],
+            "heldout_fg_plus_eor_like_mixtures": mixture_total_windowed[
+                "realizations"
+            ],
             "full_eor_including_context": full_eor_windowed["realizations"][0],
             "foreground_to_target_integrated_absolute_ratio": (
                 foreground_to_target

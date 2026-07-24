@@ -42,6 +42,8 @@ class QuadraticResponse:
     max_delay_s: float
     suppression_strength: float
     taper: np.ndarray
+    foreground_basis: str = "dpss"
+    polynomial_degree: Optional[int] = None
 
     @property
     def supported(self) -> np.ndarray:
@@ -175,6 +177,29 @@ def dpss_foreground_basis(
     )
 
 
+def chebyshev_foreground_basis(
+    frequencies_hz: np.ndarray,
+    degree: int,
+) -> np.ndarray:
+    """Return an orthonormal Chebyshev nuisance basis through ``degree``."""
+    frequencies = np.asarray(frequencies_hz, dtype=np.float64).reshape(-1)
+    _, _ = frequency_fourier_basis(frequencies)
+    polynomial_degree = int(degree)
+    if polynomial_degree < 0:
+        raise ValueError("Chebyshev degree must be non-negative")
+    if polynomial_degree >= frequencies.size:
+        raise ValueError("Chebyshev degree must be smaller than the channel count")
+    span = float(frequencies[-1] - frequencies[0])
+    if span <= 0.0:
+        raise ValueError("Chebyshev frequencies must span a positive bandwidth")
+    coordinate = 2.0 * (frequencies - frequencies[0]) / span - 1.0
+    vandermonde = np.polynomial.chebyshev.chebvander(
+        coordinate, polynomial_degree
+    )
+    vectors, _ = np.linalg.qr(vandermonde, mode="reduced")
+    return np.asarray(vectors, dtype=np.float64)
+
+
 def inverse_covariance_suppression(
     basis: np.ndarray,
     strength: float,
@@ -219,26 +244,24 @@ def inverse_covariance_suppression(
     return 0.5 * (result + result.conj().T)
 
 
-def build_quadratic_response(
+def _build_quadratic_response_from_basis(
     frequencies_hz: np.ndarray,
     *,
+    foreground_vectors: np.ndarray,
+    foreground_eigenvalues: Optional[np.ndarray],
+    foreground_basis: str,
     max_delay_s: float,
+    polynomial_degree: Optional[int],
     suppression_strength: float,
-    dpss_eigenvalue_threshold: float = 1e-6,
     taper: str = "hann",
 ) -> QuadraticResponse:
-    """Build the inverse-covariance weighted delay-bandpower response."""
+    """Build a delay-bandpower response from an explicit nuisance basis."""
     frequencies = np.asarray(frequencies_hz, dtype=np.float64).reshape(-1)
     fourier, delays = frequency_fourier_basis(frequencies)
-    foreground = dpss_foreground_basis(
-        frequencies,
-        max_delay_s,
-        eigenvalue_threshold=dpss_eigenvalue_threshold,
-    )
     inverse = inverse_covariance_suppression(
-        foreground.vectors,
+        foreground_vectors,
         float(suppression_strength),
-        eigenvalues=foreground.eigenvalues,
+        eigenvalues=foreground_eigenvalues,
     )
     taper_name = str(taper).strip().lower()
     if taper_name == "none":
@@ -269,11 +292,66 @@ def build_quadratic_response(
         fisher=np.asarray(fisher, dtype=np.float64),
         window=window,
         row_normalization=np.asarray(row_normalization, dtype=np.float64),
-        foreground_rank=foreground.rank,
-        dpss_eigenvalues=np.asarray(foreground.eigenvalues, dtype=np.float64),
+        foreground_rank=int(foreground_vectors.shape[1]),
+        dpss_eigenvalues=(
+            np.asarray(foreground_eigenvalues, dtype=np.float64)
+            if foreground_eigenvalues is not None
+            else np.empty(0, dtype=np.float64)
+        ),
         max_delay_s=float(max_delay_s),
         suppression_strength=float(suppression_strength),
         taper=np.asarray(taper_values, dtype=np.float64),
+        foreground_basis=str(foreground_basis),
+        polynomial_degree=polynomial_degree,
+    )
+
+
+def build_quadratic_response(
+    frequencies_hz: np.ndarray,
+    *,
+    max_delay_s: float,
+    suppression_strength: float,
+    dpss_eigenvalue_threshold: float = 1e-6,
+    taper: str = "hann",
+) -> QuadraticResponse:
+    """Build a DPSS inverse-covariance weighted delay-bandpower response."""
+    frequencies = np.asarray(frequencies_hz, dtype=np.float64).reshape(-1)
+    foreground = dpss_foreground_basis(
+        frequencies,
+        max_delay_s,
+        eigenvalue_threshold=dpss_eigenvalue_threshold,
+    )
+    return _build_quadratic_response_from_basis(
+        frequencies,
+        foreground_vectors=foreground.vectors,
+        foreground_eigenvalues=foreground.eigenvalues,
+        foreground_basis="dpss",
+        max_delay_s=float(max_delay_s),
+        polynomial_degree=None,
+        suppression_strength=float(suppression_strength),
+        taper=taper,
+    )
+
+
+def build_chebyshev_quadratic_response(
+    frequencies_hz: np.ndarray,
+    *,
+    degree: int,
+    suppression_strength: float,
+    taper: str = "hann",
+) -> QuadraticResponse:
+    """Build a Chebyshev-nuisance weighted delay-bandpower response."""
+    frequencies = np.asarray(frequencies_hz, dtype=np.float64).reshape(-1)
+    foreground = chebyshev_foreground_basis(frequencies, int(degree))
+    return _build_quadratic_response_from_basis(
+        frequencies,
+        foreground_vectors=foreground,
+        foreground_eigenvalues=None,
+        foreground_basis="chebyshev",
+        max_delay_s=math.nan,
+        polynomial_degree=int(degree),
+        suppression_strength=float(suppression_strength),
+        taper=taper,
     )
 
 

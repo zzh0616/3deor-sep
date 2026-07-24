@@ -315,6 +315,8 @@ def main(argv: Iterable[str] | None = None) -> None:
         "output_band_ids",
         "support",
     )
+    if all("foreground_ranks" in archive for archive in archives):
+        invariant_arrays += ("foreground_ranks",)
     if all("selected_row_kperp_indices" in archive for archive in archives):
         invariant_arrays += ("selected_row_kperp_indices",)
     for meta, archive in zip(metadata[1:], archives[1:]):
@@ -334,8 +336,13 @@ def main(argv: Iterable[str] | None = None) -> None:
             "mixture_repeats",
             "probe_seed",
             "rows_per_kperp_bin",
+            "foreground_filter",
+            "suppression_strength",
+            "polynomial_degree",
+            "dpss_eigenvalue_threshold",
+            "spectral_taper",
         ):
-            if meta["settings"][key] != reference_meta["settings"][key]:
+            if meta["settings"].get(key) != reference_meta["settings"].get(key):
                 raise ValueError(f"Partition settings differ in {key}")
         for key, default in (
             ("source_scope", "reporting"),
@@ -384,6 +391,16 @@ def main(argv: Iterable[str] | None = None) -> None:
         np.stack([archive["heldout_mixture_q"] for archive in archives]),
         axis=0,
     )
+    heldout_total_mixture_q = (
+        np.mean(
+            np.stack(
+                [archive["heldout_total_mixture_q"] for archive in archives]
+            ),
+            axis=0,
+        )
+        if all("heldout_total_mixture_q" in archive for archive in archives)
+        else None
+    )
     bank_foreground_q = np.mean(
         np.stack([archive["bank_foreground_q"] for archive in archives]),
         axis=0,
@@ -422,6 +439,18 @@ def main(argv: Iterable[str] | None = None) -> None:
         minimum_relative_response=minimum_qbeta_response,
         target_source_positions=reporting_source_positions,
         minimum_target_window_fraction=minimum_target_window_fraction,
+    )
+    mixture_total_windowed = (
+        _windowed_metrics(
+            response=calibration_response,
+            observed_q=heldout_total_mixture_q,
+            source_power=restricted_power,
+            minimum_relative_response=minimum_qbeta_response,
+            target_source_positions=reporting_source_positions,
+            minimum_target_window_fraction=minimum_target_window_fraction,
+        )
+        if heldout_total_mixture_q is not None
+        else None
     )
     full_eor_windowed = _windowed_metrics(
         response=calibration_response,
@@ -516,6 +545,14 @@ def main(argv: Iterable[str] | None = None) -> None:
         ],
         "total_windowed_power": total_windowed["estimated_windowed_power"],
     }
+    if (
+        heldout_total_mixture_q is not None
+        and mixture_total_windowed is not None
+    ):
+        products["heldout_total_mixture_q"] = heldout_total_mixture_q
+        products["heldout_total_mixture_windowed_power"] = (
+            mixture_total_windowed["estimated_windowed_power"]
+        )
     result = {
         "schema": "visibility_qbeta_row_partition_combination",
         "schema_version": 1,
@@ -535,6 +572,36 @@ def main(argv: Iterable[str] | None = None) -> None:
         "operator_closure": _operator_closure(predicted_vis, target_vis),
         "qbeta": {
             "source_scope": source_scope,
+            "foreground_filter": reference_meta["settings"].get(
+                "foreground_filter", "dpss_hard"
+            ),
+            "suppression_strength": reference_meta["settings"].get(
+                "suppression_strength", math.inf
+            ),
+            "effective_suppression": reference_meta["settings"].get(
+                "effective_suppression",
+                (
+                    "hard"
+                    if reference_meta["settings"].get(
+                        "foreground_filter", "dpss_hard"
+                    )
+                    in {
+                        "dpss_hard",
+                        "chebyshev",
+                        "chebyshev_rank_matched",
+                    }
+                    else "unknown"
+                ),
+            ),
+            "polynomial_degree": reference_meta["settings"].get(
+                "polynomial_degree", 3
+            ),
+            "dpss_eigenvalue_threshold": reference_meta["settings"].get(
+                "dpss_eigenvalue_threshold", 1e-12
+            ),
+            "spectral_taper": reference_meta["settings"].get(
+                "spectral_taper", "hann"
+            ),
             "source_band_count": source_count,
             "supported_output_band_count": int(output_ids.size),
             "calibration_validation_response_relative_l2": _relative_l2(
@@ -593,6 +660,11 @@ def main(argv: Iterable[str] | None = None) -> None:
             ),
             "restricted_eor": restricted_windowed["realizations"][0],
             "heldout_eor_like_mixtures": mixture_windowed["realizations"],
+            "heldout_fg_plus_eor_like_mixtures": (
+                mixture_total_windowed["realizations"]
+                if mixture_total_windowed is not None
+                else []
+            ),
             "full_eor_including_context": full_eor_windowed["realizations"][0],
             "foreground_to_target_integrated_absolute_ratio": (
                 foreground_to_target

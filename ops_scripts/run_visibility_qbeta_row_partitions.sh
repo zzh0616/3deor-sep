@@ -19,6 +19,11 @@ CALIBRATION_REPEATS="${CALIBRATION_REPEATS:-8}"
 VALIDATION_REPEATS="${VALIDATION_REPEATS:-8}"
 MIXTURE_REPEATS="${MIXTURE_REPEATS:-4}"
 SOURCE_SCOPE="${SOURCE_SCOPE:-reporting}"
+FOREGROUND_FILTER="${FOREGROUND_FILTER:-dpss_hard}"
+SUPPRESSION_STRENGTH="${SUPPRESSION_STRENGTH:-1e4}"
+POLYNOMIAL_DEGREE="${POLYNOMIAL_DEGREE:-3}"
+DPSS_EIGENVALUE_THRESHOLD="${DPSS_EIGENVALUE_THRESHOLD:-1e-12}"
+SPECTRAL_TAPER="${SPECTRAL_TAPER:-hann}"
 GPU_MEMORY_LIMIT_MIB="${GPU_MEMORY_LIMIT_MIB:-1024}"
 GPU_UTIL_LIMIT_PERCENT="${GPU_UTIL_LIMIT_PERCENT:-20}"
 
@@ -63,6 +68,11 @@ run_partition() {
     --validation-repeats "${VALIDATION_REPEATS}" \
     --mixture-repeats "${MIXTURE_REPEATS}" \
     --source-scope "${SOURCE_SCOPE}" \
+    --foreground-filter "${FOREGROUND_FILTER}" \
+    --suppression-strength "${SUPPRESSION_STRENGTH}" \
+    --polynomial-degree "${POLYNOMIAL_DEGREE}" \
+    --dpss-eigenvalue-threshold "${DPSS_EIGENVALUE_THRESHOLD}" \
+    --spectral-taper "${SPECTRAL_TAPER}" \
     --probe-batch-size 8 \
     --operator-dtype complex64 \
     --source-chunk 8192 \
