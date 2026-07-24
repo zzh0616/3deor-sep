@@ -131,14 +131,34 @@ response weight inside geometric EoR window >= 0.95.
 后重归一化。修正前后窄带和宽带的 `window_self>=0.1` support mask 均完全
 相同，因此本轮 10 格增益不依赖该诊断修正。
 
-## 6. 后续
+## 6. 完整 EoR window 后续审计
 
-当前最合理的下一步不是继续扩大无噪声声明，而是冻结 122 格候选 support，
-加入独立 time/noise splits 和 cross quadratic estimator。之后再测试 flags
-和 station beam。宽带 `1e-10` cutoff 可以作为次级无噪声 coverage
-消融，但不应优先于噪声交叉功率验证。
+随后已把 rows 从原 reporting `k_perp` 区间扩到全部 32 个横向 bins，并
+强制计算 408/408 个几何 EoR-window 输出。240 rows/bin、16 个独立相位下：
 
-## 7. 可复现入口
+- 389/408 个输出满足 relative response `>=0.1` 且至少 95% 响应留在
+  几何窗口；
+- 每个随机相位有 387--389/389 格通过，积分比为 `0.985--1.032`；
+- 原始物理 EoR realization 只有 337/389 格通过，积分比/L2 为
+  `0.798/0.323`；
+- 同时要求局域性、物理 EoR 和全部相位通过时为
+  `333/408=81.62%`；
+- 最坏前景影响仅 `0.658%`，没有 foreground-leakage failure。
+
+所以原 122 格结论在预声明中等 `k_perp` 区间内成立，但不能直接外推成完整
+窗口恢复。完整窗口的主问题是物理 EoR 单次 realization 的非对角
+mode-coupling，以及 wedge 边缘的响应越界，不是 DPSS 前景压制不足。详见
+`docs/visibility_qbeta_full_window_20260725_zh.md`。
+
+## 7. 后续
+
+在加入噪声前，应先合并低 `k_perp` 和 wedge 邻近 bins，或显式建模完整
+window covariance/非对角 mode coupling，使物理 EoR realization 在较粗
+bandpower 上闭合。之后再冻结 support，加入独立 time/noise splits 和 cross
+quadratic estimator。宽带 `1e-10` cutoff 只适合作次级无噪声 coverage
+消融，不能替代上述闭合。
+
+## 8. 可复现入口
 
 - 64 频 visibility bank：
   `ops_scripts/run_chips_visibility_64freq_noiseless.sh`

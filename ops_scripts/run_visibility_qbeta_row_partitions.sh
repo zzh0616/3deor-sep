@@ -6,6 +6,7 @@ CODE_ROOT="${CODE_ROOT:-${PROJECT_ROOT}/code/3dnet}"
 BANK_DIR="${BANK_DIR:-${PROJECT_ROOT}/runs/chips_visibility_32freq_grid512_20260723}"
 SOURCE_ROOT="${SOURCE_ROOT:-${PROJECT_ROOT}/runs/cube2_fullsky_isobeam_512_32freq_20260617}"
 BASE_RUN="${BASE_RUN:-${PROJECT_ROOT}/runs/visibility_qbeta_32freq_20260724}"
+SKY_CACHE="${SKY_CACHE:-${BASE_RUN}/cache/eor_intrinsic_sky.npz}"
 OUT_DIR="${OUT_DIR:-${PROJECT_ROOT}/runs/visibility_qbeta_rowpart6_20260724}"
 PYTHON="${PYTHON:-/home/zhenghao/miniconda3/envs/torch/bin/python}"
 EVALUATOR="${EVALUATOR:-${CODE_ROOT}/ops_scripts/calibrate_visibility_qbeta_noiseless.py}"
@@ -16,6 +17,7 @@ PARTITION_COUNT="${PARTITION_COUNT:-6}"
 PARTITION_FIRST="${PARTITION_FIRST:-0}"
 ROWS_PER_BIN="${ROWS_PER_BIN:-32}"
 ROW_SCOPE="${ROW_SCOPE:-all}"
+ROW_SEED="${ROW_SEED:-20260724}"
 CALIBRATION_REPEATS="${CALIBRATION_REPEATS:-8}"
 VALIDATION_REPEATS="${VALIDATION_REPEATS:-8}"
 MIXTURE_REPEATS="${MIXTURE_REPEATS:-4}"
@@ -26,6 +28,8 @@ POLYNOMIAL_DEGREE="${POLYNOMIAL_DEGREE:-3}"
 DPSS_EIGENVALUE_THRESHOLD="${DPSS_EIGENVALUE_THRESHOLD:-1e-12}"
 SPECTRAL_TAPER="${SPECTRAL_TAPER:-hann}"
 FILTER_BANDWIDTH_SCOPE="${FILTER_BANDWIDTH_SCOPE:-analysis_subband}"
+MINIMUM_WINDOW_SELF_FRACTION="${MINIMUM_WINDOW_SELF_FRACTION:-0.1}"
+MINIMUM_RELATIVE_SENSITIVITY="${MINIMUM_RELATIVE_SENSITIVITY:-1e-4}"
 GPU_MEMORY_LIMIT_MIB="${GPU_MEMORY_LIMIT_MIB:-1024}"
 GPU_UTIL_LIMIT_PERCENT="${GPU_UTIL_LIMIT_PERCENT:-20}"
 
@@ -58,17 +62,20 @@ run_partition() {
     frequency_args=(--frequency-config "${FREQUENCY_CONFIG}")
   fi
   mkdir -p "${partition_dir}/evaluate"
+  if [[ -s "${partition_dir}/evaluate/result.npz" && -s "${partition_dir}/evaluate/result.json" ]]; then
+    return
+  fi
   CUDA_VISIBLE_DEVICES="${gpu}" "${PYTHON}" "${EVALUATOR}" \
     --config "${CONFIG}" \
     "${frequency_args[@]}" \
     --bank-dir "${BANK_DIR}" \
     --osm-pattern "${SOURCE_ROOT}/osm/eor_{freq:.2f}.osm" \
-    --sky-cache "${BASE_RUN}/cache/eor_intrinsic_sky.npz" \
+    --sky-cache "${SKY_CACHE}" \
     --out-dir "${partition_dir}/evaluate" \
     --device cuda:0 \
     --rows-per-kperp-bin "${ROWS_PER_BIN}" \
     --row-scope "${ROW_SCOPE}" \
-    --row-seed 20260724 \
+    --row-seed "${ROW_SEED}" \
     --row-partition-index "${partition}" \
     --row-partition-count "${PARTITION_COUNT}" \
     --calibration-repeats "${CALIBRATION_REPEATS}" \
@@ -81,6 +88,8 @@ run_partition() {
     --dpss-eigenvalue-threshold "${DPSS_EIGENVALUE_THRESHOLD}" \
     --spectral-taper "${SPECTRAL_TAPER}" \
     --filter-bandwidth-scope "${FILTER_BANDWIDTH_SCOPE}" \
+    --minimum-window-self-fraction "${MINIMUM_WINDOW_SELF_FRACTION}" \
+    --minimum-relative-sensitivity "${MINIMUM_RELATIVE_SENSITIVITY}" \
     --probe-batch-size 8 \
     --operator-dtype complex64 \
     --source-chunk 8192 \

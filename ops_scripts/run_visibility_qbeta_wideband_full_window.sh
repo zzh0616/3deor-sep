@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_ROOT="${PROJECT_ROOT:-/data1/zhenghao/fg_rmw}"
+CODE_ROOT="${CODE_ROOT:-${PROJECT_ROOT}/code/3dnet}"
+PROFILE="${PROFILE:-screen}"
+RUNNER="${RUNNER:-${CODE_ROOT}/ops_scripts/run_visibility_qbeta_row_partitions.sh}"
+
+if [[ "${PROFILE}" == "screen" ]]; then
+  OUT_DIR="${OUT_DIR:-${PROJECT_ROOT}/runs/visibility_qbeta_wideband_fullwindow_screen_20260725}"
+  PARTITION_COUNT="${PARTITION_COUNT:-4}"
+  ROWS_PER_BIN="${ROWS_PER_BIN:-12}"
+  CALIBRATION_REPEATS="${CALIBRATION_REPEATS:-1}"
+  VALIDATION_REPEATS="${VALIDATION_REPEATS:-1}"
+  MIXTURE_REPEATS="${MIXTURE_REPEATS:-8}"
+  MINIMUM_WINDOW_SELF_FRACTION="${MINIMUM_WINDOW_SELF_FRACTION:-0.1}"
+  MINIMUM_RELATIVE_SENSITIVITY="${MINIMUM_RELATIVE_SENSITIVITY:-1e-4}"
+elif [[ "${PROFILE}" == "forced_screen" ]]; then
+  OUT_DIR="${OUT_DIR:-${PROJECT_ROOT}/runs/visibility_qbeta_wideband_fullwindow_forced_screen_20260725}"
+  PARTITION_COUNT="${PARTITION_COUNT:-4}"
+  ROWS_PER_BIN="${ROWS_PER_BIN:-12}"
+  CALIBRATION_REPEATS="${CALIBRATION_REPEATS:-1}"
+  VALIDATION_REPEATS="${VALIDATION_REPEATS:-1}"
+  MIXTURE_REPEATS="${MIXTURE_REPEATS:-8}"
+  MINIMUM_WINDOW_SELF_FRACTION="${MINIMUM_WINDOW_SELF_FRACTION:-0}"
+  MINIMUM_RELATIVE_SENSITIVITY="${MINIMUM_RELATIVE_SENSITIVITY:-0}"
+elif [[ "${PROFILE}" == "promotion" ]]; then
+  OUT_DIR="${OUT_DIR:-${PROJECT_ROOT}/runs/visibility_qbeta_wideband_fullwindow_promotion_20260725}"
+  PARTITION_COUNT="${PARTITION_COUNT:-20}"
+  ROWS_PER_BIN="${ROWS_PER_BIN:-12}"
+  CALIBRATION_REPEATS="${CALIBRATION_REPEATS:-1}"
+  VALIDATION_REPEATS="${VALIDATION_REPEATS:-1}"
+  MIXTURE_REPEATS="${MIXTURE_REPEATS:-16}"
+  MINIMUM_WINDOW_SELF_FRACTION="${MINIMUM_WINDOW_SELF_FRACTION:-0.1}"
+  MINIMUM_RELATIVE_SENSITIVITY="${MINIMUM_RELATIVE_SENSITIVITY:-1e-4}"
+elif [[ "${PROFILE}" == "forced_promotion" ]]; then
+  OUT_DIR="${OUT_DIR:-${PROJECT_ROOT}/runs/visibility_qbeta_wideband_fullwindow_forced_promotion_20260725}"
+  PARTITION_COUNT="${PARTITION_COUNT:-20}"
+  ROWS_PER_BIN="${ROWS_PER_BIN:-12}"
+  CALIBRATION_REPEATS="${CALIBRATION_REPEATS:-1}"
+  VALIDATION_REPEATS="${VALIDATION_REPEATS:-1}"
+  MIXTURE_REPEATS="${MIXTURE_REPEATS:-16}"
+  MINIMUM_WINDOW_SELF_FRACTION="${MINIMUM_WINDOW_SELF_FRACTION:-0}"
+  MINIMUM_RELATIVE_SENSITIVITY="${MINIMUM_RELATIVE_SENSITIVITY:-0}"
+else
+  echo "PROFILE must be screen, forced_screen, promotion, or forced_promotion." >&2
+  exit 2
+fi
+
+export BANK_DIR="${BANK_DIR:-${PROJECT_ROOT}/runs/chips_visibility_64freq_grid512_20260725}"
+export SOURCE_ROOT="${SOURCE_ROOT:-${PROJECT_ROOT}/runs/cube2_fullsky_isobeam_512_64freq_20260714}"
+export SKY_CACHE="${SKY_CACHE:-${PROJECT_ROOT}/runs/visibility_qbeta_wideband_common_20260725/eor_intrinsic_sky_64freq.npz}"
+export CONFIG="${CONFIG:-${CODE_ROOT}/configs/ps2d_v2_32central_isobeam_patch.json}"
+export FREQUENCY_CONFIG="${FREQUENCY_CONFIG:-${CODE_ROOT}/configs/ps2d_v2_64wide_isobeam_patch.json}"
+export OUT_DIR
+export PARTITION_COUNT
+export ROWS_PER_BIN
+export ROW_SCOPE=all
+export ROW_SEED="${ROW_SEED:-20260725}"
+export CALIBRATION_REPEATS
+export VALIDATION_REPEATS
+export MIXTURE_REPEATS
+export SOURCE_SCOPE=all_in_range_with_nyquist
+export FOREGROUND_FILTER=dpss_hard
+export DPSS_EIGENVALUE_THRESHOLD=1e-12
+export SPECTRAL_TAPER=hann
+export FILTER_BANDWIDTH_SCOPE=full_band
+export MINIMUM_WINDOW_SELF_FRACTION
+export MINIMUM_RELATIVE_SENSITIVITY
+
+exec "${RUNNER}"

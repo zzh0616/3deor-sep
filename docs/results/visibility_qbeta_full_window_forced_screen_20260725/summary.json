@@ -1,0 +1,163 @@
+{
+  "analysis_contract_sha256": "2408c72bdc57ac1715b39b292a483564505680f4a67de22c61cb4f38738cf056",
+  "broad_bank_pure_integrated_power_ratio": 0.8015899892080405,
+  "broad_bank_pure_passing_cell_count": 314,
+  "broad_bank_pure_weighted_relative_l2": 0.29300135397963206,
+  "broad_bank_total_integrated_power_ratio": 0.8029061466204693,
+  "broad_bank_total_passing_cell_count": 313,
+  "broad_bank_total_weighted_relative_l2": 0.28929094129561406,
+  "broad_heldout_pure_integrated_power_ratio_per_phase": [
+    1.0565149470235857,
+    1.0375086332631394,
+    1.055500678680599,
+    0.9946101466055335,
+    1.024186398661251,
+    1.056248409595739,
+    0.9813550017317092,
+    1.01675940707581
+  ],
+  "broad_heldout_total_integrated_power_ratio_per_phase": [
+    1.0543661633017583,
+    1.038588173097676,
+    1.055089824701245,
+    0.9971403464993583,
+    1.0248205114195428,
+    1.0566272142605257,
+    0.9813018335543541,
+    1.018180416252359
+  ],
+  "broad_median_worst_total_cell_error": 0.20063286176364784,
+  "broad_minimum_passing_cell_count_over_phases": 348,
+  "broad_pure_passing_cell_count_per_phase": [
+    361,
+    350,
+    359,
+    348,
+    361,
+    359,
+    352,
+    356
+  ],
+  "broad_pure_weighted_relative_l2_per_phase": [
+    0.1375474758898963,
+    0.11894528322740171,
+    0.19892593257873162,
+    0.07255934498242657,
+    0.09379060753311098,
+    0.1707147079274512,
+    0.09677035683537903,
+    0.1282316587169966
+  ],
+  "broad_robust_total_passing_cell_count": 163,
+  "broad_same_cell_response_fraction_percentiles": [
+    0.0005127994663501704,
+    0.12172621649468056,
+    0.17092422065362367,
+    0.2412628426450865,
+    0.4133049546347799
+  ],
+  "broad_total_passing_cell_count_per_phase": [
+    361,
+    350,
+    359,
+    348,
+    361,
+    359,
+    352,
+    356
+  ],
+  "broad_total_weighted_relative_l2_per_phase": [
+    0.13265953944621015,
+    0.12139983446581144,
+    0.19766788302327573,
+    0.07188547504053165,
+    0.09557987882854652,
+    0.17012662251856928,
+    0.09724875058820913,
+    0.13194358947467197
+  ],
+  "broad_window_effective_width_source_bands_percentiles": [
+    2.8446399234754405,
+    6.142858797836597,
+    9.06198926594701,
+    13.037085756467247,
+    21.044761600299356
+  ],
+  "broad_worst_foreground_effect": 0.01937606686591431,
+  "broad_worst_pure_cell_error": 0.4938651698262089,
+  "broad_worst_pure_weighted_relative_l2": 0.19892593257873162,
+  "broad_worst_total_cell_error": 0.4937868262501014,
+  "broad_worst_total_weighted_relative_l2": 0.19766788302327573,
+  "combined_rows_per_kperp_bin": 48,
+  "evaluated_all_phase_pure_passing_cell_count": 202,
+  "evaluated_all_phase_total_passing_cell_count": 202,
+  "evaluated_bank_pure_passing_cell_count": 327,
+  "evaluated_bank_total_passing_cell_count": 326,
+  "evaluated_geometric_window_response_fraction_percentiles": [
+    0.8959544340896948,
+    0.999676329419531,
+    0.9999999610230969,
+    0.9999999991827184,
+    0.9999999999914972
+  ],
+  "evaluated_pure_passing_cell_count_per_phase": [
+    378,
+    369,
+    377,
+    367,
+    375,
+    376,
+    370,
+    372
+  ],
+  "evaluated_robust_total_passing_cell_count": 171,
+  "evaluated_same_cell_response_fraction_percentiles": [
+    0.0005127994663501704,
+    0.1156947285722169,
+    0.16479811491537227,
+    0.23871985574782695,
+    0.4133049546347799
+  ],
+  "evaluated_total_passing_cell_count_per_phase": [
+    378,
+    369,
+    377,
+    367,
+    375,
+    376,
+    370,
+    372
+  ],
+  "evaluated_worst_bank_pure_cell_error": 0.8129321299017693,
+  "evaluated_worst_bank_total_cell_error": 0.8129119153488555,
+  "evaluated_worst_foreground_effect": 0.01937606686591431,
+  "evaluated_worst_pure_cell_error": 0.4938651698262089,
+  "evaluated_worst_total_cell_error": 0.4937868262501014,
+  "exact_broad_candidate_count": 389,
+  "exact_broad_fraction_of_geometric_window": 0.9534313725490197,
+  "frequency_contract_sha256": "6aa156342c26355cf2f09319e9c814d9cb1f9bd8e9713d3339b729220b6ec25e",
+  "geometric_eor_window_cell_count": 408,
+  "heldout_phase_count": 8,
+  "interpretation": "Recoverable cells are response-windowed bandpowers, not independent delta-function sky bins.",
+  "qbeta_evaluated_geometric_cell_count": 408,
+  "recoverable_cell_count": 163,
+  "recoverable_fraction_of_geometric_window": 0.39950980392156865,
+  "schema": "visibility_qbeta_full_window_audit",
+  "schema_version": 1,
+  "spectral_filter_supported_cell_count": 408,
+  "status_counts_within_geometric_window": {
+    "foreground_leakage_failure": 1,
+    "heldout_eor_closure_failure": 150,
+    "physical_eor_closure_failure": 75,
+    "recoverable_windowed_bandpower": 163,
+    "response_leaks_outside_eor": 19
+  },
+  "thresholds": {
+    "maximum_cell_error": 0.2,
+    "minimum_filter_sensitivity": 0.0,
+    "minimum_geometric_window_fraction": 0.95,
+    "minimum_relative_qbeta_response": 0.1,
+    "minimum_window_self_fraction": 0.0
+  },
+  "visibility_bank_sha256": "9b97a62ba2ff495c4ba2d8e414929b6b6596d571dd70578ffcebafe86dd68694"
+}
