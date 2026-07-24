@@ -165,9 +165,7 @@ def build_sky_band_layout(
     transverse_bands[np.isclose(kperp, edges[-1], rtol=1e-12, atol=1e-14)] = (
         edges.size - 2
     )
-    transverse_valid = (transverse_bands >= 0) & (
-        transverse_bands < edges.size - 1
-    )
+    transverse_valid = (transverse_bands >= 0) & (transverse_bands < edges.size - 1)
     nkpar = int(kpar_values.size)
     mode_bands = np.full((nf, ny, nx), -1, dtype=np.int64)
     for frequency_index in range(nf):
@@ -209,11 +207,7 @@ def reporting_band_ids(
         raise ValueError("Invalid mid_kperp_fraction_range")
     nkperp = int(layout.kperp_edges.size - 1)
     available_nkpar = int(layout.kpar_values.size)
-    nkpar = (
-        available_nkpar
-        if radial_band_count is None
-        else int(radial_band_count)
-    )
+    nkpar = available_nkpar if radial_band_count is None else int(radial_band_count)
     if not 1 <= nkpar <= available_nkpar:
         raise ValueError("radial_band_count exceeds the sky layout")
     first_perp = int(math.floor(low_perp * nkperp))
@@ -226,6 +220,144 @@ def reporting_band_ids(
         & (layout.active_kpar_indices < nkpar)
     )
     return np.flatnonzero(mask).astype(np.int64)
+
+
+def band_selection_coverage(
+    *,
+    geometric_window: np.ndarray,
+    selected_output_band_ids: np.ndarray,
+    source_kperp_indices: np.ndarray,
+    source_kpar_indices: np.ndarray,
+    source_mode_counts: np.ndarray,
+    source_bandpower: np.ndarray,
+    output_cell_weights: np.ndarray | None = None,
+    reporting_source_positions: np.ndarray | None = None,
+) -> dict[str, float | int]:
+    """Measure a selected output footprint against a cylindrical EoR window.
+
+    Source bands may contain an extra radial-Nyquist layer. Such bands are
+    excluded from the geometric-window denominator because they are input
+    response context rather than reported output bands.
+    """
+    window = np.asarray(geometric_window, dtype=bool)
+    if window.ndim != 2 or not np.any(window):
+        raise ValueError("geometric_window must be a non-empty 2D mask")
+    selected_ids = np.asarray(selected_output_band_ids, dtype=np.int64).reshape(-1)
+    if (
+        selected_ids.size == 0
+        or np.unique(selected_ids).size != selected_ids.size
+        or np.any(selected_ids < 0)
+        or np.any(selected_ids >= window.size)
+    ):
+        raise ValueError("selected_output_band_ids must be unique in-range IDs")
+    selected_output = np.zeros(window.size, dtype=bool)
+    selected_output[selected_ids] = True
+    selected_output = selected_output.reshape(window.shape)
+    if np.any(selected_output & ~window):
+        raise ValueError("selected output bands must lie inside geometric_window")
+
+    if output_cell_weights is None:
+        cell_weights = np.ones(window.shape, dtype=np.float64)
+    else:
+        cell_weights = np.asarray(output_cell_weights, dtype=np.float64)
+        if (
+            cell_weights.shape != window.shape
+            or np.any(~np.isfinite(cell_weights))
+            or np.any(cell_weights <= 0.0)
+        ):
+            raise ValueError(
+                "output_cell_weights must be finite, positive, and match the window"
+            )
+
+    source_kperp = np.asarray(source_kperp_indices, dtype=np.int64).reshape(-1)
+    source_kpar = np.asarray(source_kpar_indices, dtype=np.int64).reshape(-1)
+    mode_counts = np.asarray(source_mode_counts, dtype=np.float64).reshape(-1)
+    bandpower = np.asarray(source_bandpower, dtype=np.float64).reshape(-1)
+    source_size = source_kperp.size
+    if not (source_kpar.size == mode_counts.size == bandpower.size == source_size):
+        raise ValueError("source-band arrays must have identical lengths")
+    if (
+        np.any(source_kperp < 0)
+        or np.any(source_kperp >= window.shape[0])
+        or np.any(source_kpar < 0)
+        or np.any(~np.isfinite(mode_counts))
+        or np.any(mode_counts <= 0.0)
+        or np.any(~np.isfinite(bandpower))
+        or np.any(bandpower < 0.0)
+    ):
+        raise ValueError("invalid source-band indices, counts, or powers")
+
+    output_radial = source_kpar < window.shape[1]
+    source_in_window = np.zeros(source_size, dtype=bool)
+    source_selected = np.zeros(source_size, dtype=bool)
+    source_in_window[output_radial] = window[
+        source_kperp[output_radial], source_kpar[output_radial]
+    ]
+    source_selected[output_radial] = selected_output[
+        source_kperp[output_radial], source_kpar[output_radial]
+    ]
+    weighted_power = mode_counts * bandpower
+
+    result: dict[str, float | int] = {
+        "geometric_window_band_count": int(np.count_nonzero(window)),
+        "selected_band_count": int(selected_ids.size),
+        "selected_fraction_of_geometric_window_bands": float(
+            selected_ids.size / np.count_nonzero(window)
+        ),
+        "selected_fraction_of_geometric_window_plot_area": float(
+            np.sum(cell_weights[selected_output]) / np.sum(cell_weights[window])
+        ),
+        "geometric_window_fft_mode_count": int(np.sum(mode_counts[source_in_window])),
+        "selected_fft_mode_count": int(np.sum(mode_counts[source_selected])),
+        "selected_fraction_of_geometric_window_fft_modes": float(
+            np.sum(mode_counts[source_selected]) / np.sum(mode_counts[source_in_window])
+        ),
+        "geometric_window_injected_power": float(
+            np.sum(weighted_power[source_in_window])
+        ),
+        "selected_injected_power": float(np.sum(weighted_power[source_selected])),
+        "selected_fraction_of_geometric_window_injected_power": float(
+            np.sum(weighted_power[source_selected])
+            / np.sum(weighted_power[source_in_window])
+        ),
+        "selected_fraction_of_all_response_scope_injected_power": float(
+            np.sum(weighted_power[source_selected]) / np.sum(weighted_power)
+        ),
+    }
+    if reporting_source_positions is not None:
+        reporting_positions = np.asarray(
+            reporting_source_positions, dtype=np.int64
+        ).reshape(-1)
+        if (
+            reporting_positions.size == 0
+            or np.unique(reporting_positions).size != reporting_positions.size
+            or np.any(reporting_positions < 0)
+            or np.any(reporting_positions >= source_size)
+        ):
+            raise ValueError(
+                "reporting_source_positions must be unique in-range positions"
+            )
+        reporting = np.zeros(source_size, dtype=bool)
+        reporting[reporting_positions] = True
+        if np.any(reporting & ~source_in_window):
+            raise ValueError("reporting source bands must lie in geometric_window")
+        result.update(
+            {
+                "reporting_band_count": int(reporting_positions.size),
+                "selected_fraction_of_reporting_bands": float(
+                    np.count_nonzero(source_selected) / reporting_positions.size
+                ),
+                "selected_fraction_of_reporting_fft_modes": float(
+                    np.sum(mode_counts[source_selected])
+                    / np.sum(mode_counts[reporting])
+                ),
+                "selected_fraction_of_reporting_injected_power": float(
+                    np.sum(weighted_power[source_selected])
+                    / np.sum(weighted_power[reporting])
+                ),
+            }
+        )
+    return result
 
 
 def stratified_row_indices(
@@ -267,10 +399,7 @@ def stratified_row_indices(
             (values >= edges[index])
             & (
                 (values < edges[index + 1])
-                | (
-                    index == edges.size - 2
-                    and np.isclose(values, edges[index + 1])
-                )
+                | (index == edges.size - 2 and np.isclose(values, edges[index + 1]))
             )
         )
         required = count * part_count
@@ -295,9 +424,7 @@ def source_bandpowers(
         raise ValueError("Cube and sky-band layout shapes differ")
     spectrum = np.fft.fftn(values, axes=(-3, -2, -1), norm="ortho")
     leading = int(np.prod(values.shape[:-3])) if values.ndim > 3 else 1
-    flat_power = np.square(np.abs(spectrum)).reshape(
-        leading, -1
-    )
+    flat_power = np.square(np.abs(spectrum)).reshape(leading, -1)
     flat_bands = layout.mode_bands.reshape(-1)
     output = np.empty((leading, layout.band_count), dtype=np.float64)
     selected = flat_bands >= 0
@@ -332,9 +459,7 @@ def weighted_response_pseudoinverse(
     inverse = np.zeros_like(singular)
     inverse[keep_singular] = 1.0 / singular[keep_singular]
     scaled_pinv = (right_t.T * inverse[None, :]) @ left.T
-    pseudoinverse = np.zeros(
-        (matrix.shape[1], matrix.shape[0]), dtype=np.float64
-    )
+    pseudoinverse = np.zeros((matrix.shape[1], matrix.shape[0]), dtype=np.float64)
     pseudoinverse[:, keep_rows] = scaled_pinv / row_scale[keep_rows][None, :]
     retained_condition = (
         float(singular[0] / singular[keep_singular][-1])

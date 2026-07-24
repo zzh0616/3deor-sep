@@ -12,6 +12,7 @@ from ops_scripts.combine_visibility_qbeta_row_partitions import (
 from visibility_qbeta import (
     C_M_S,
     OMEGA_EARTH_RAD_S,
+    band_selection_coverage,
     build_sky_band_layout,
     direct_dft_kernel_numpy,
     direction_cosines,
@@ -41,18 +42,14 @@ def test_time_smearing_uvw_algebra_matches_station_expression() -> None:
     baseline_x = np.asarray([120.0, -90.0])
     baseline_y = np.asarray([-45.0, 70.0])
     baseline_z = np.asarray([20.0, 35.0])
-    transverse = baseline_x * math.cos(hour_angle) - baseline_y * math.sin(
-        hour_angle
-    )
+    transverse = baseline_x * math.cos(hour_angle) - baseline_y * math.sin(hour_angle)
     u = baseline_x * math.sin(hour_angle) + baseline_y * math.cos(hour_angle)
     v = baseline_z * math.cos(dec0) - transverse * math.sin(dec0)
     w = baseline_z * math.sin(dec0) + transverse * math.cos(dec0)
     uvw = np.stack((u, v, w), axis=1)
     l_cosine = np.asarray([0.01, -0.02])
     m_cosine = np.asarray([-0.015, 0.005])
-    n_minus_one = (
-        np.sqrt(1.0 - l_cosine * l_cosine - m_cosine * m_cosine) - 1.0
-    )
+    n_minus_one = np.sqrt(1.0 - l_cosine * l_cosine - m_cosine * m_cosine) - 1.0
     frequency = 119.45e6
     interval = 10.0
     actual = oskar_time_smearing_cycles(
@@ -69,13 +66,7 @@ def test_time_smearing_uvw_algebra_matches_station_expression() -> None:
         + u[:, None] * math.sin(dec0) * m_cosine[None, :]
         - u[:, None] * math.cos(dec0) * n_minus_one[None, :]
     )
-    expected = (
-        frequency
-        * interval
-        * OMEGA_EARTH_RAD_S
-        * expected_path
-        / C_M_S
-    )
+    expected = frequency * interval * OMEGA_EARTH_RAD_S * expected_path / C_M_S
     np.testing.assert_allclose(actual, expected, rtol=1e-14, atol=1e-15)
 
 
@@ -104,9 +95,9 @@ def test_sky_band_layout_and_reporting_region() -> None:
     )
     assert layout.band_count == 4 * 4
     assert int(np.sum(layout.counts)) == 7 * 16 * 16
-    mirrored = layout.mode_bands[
-        (-np.arange(8)) % 8,
-    ][:, (-np.arange(16)) % 16][:, :, (-np.arange(16)) % 16]
+    mirrored = layout.mode_bands[(-np.arange(8)) % 8,][:, (-np.arange(16)) % 16][
+        :, :, (-np.arange(16)) % 16
+    ]
     np.testing.assert_array_equal(layout.mode_bands, mirrored)
     selected = reporting_band_ids(
         layout,
@@ -129,9 +120,7 @@ def test_sky_band_layout_and_reporting_region() -> None:
         radial_band_count=4,
     )
     assert selected_with_nyquist.size == selected.size
-    assert np.max(
-        layout_with_nyquist.active_kpar_indices[selected_with_nyquist]
-    ) == 3
+    assert np.max(layout_with_nyquist.active_kpar_indices[selected_with_nyquist]) == 3
 
 
 def test_source_bandpowers_for_unit_phase_band() -> None:
@@ -153,6 +142,49 @@ def test_source_bandpowers_for_unit_phase_band() -> None:
     power = source_bandpowers(cube, layout)
     np.testing.assert_allclose(power[band], 1.0, rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(np.delete(power, band), 0.0, atol=1e-14)
+
+
+def test_band_selection_coverage_excludes_input_nyquist_context() -> None:
+    geometric = np.asarray([[False, True, True], [True, True, True]], dtype=bool)
+    selected_ids = np.asarray([2, 4])
+    source_kperp = np.repeat(np.arange(2), 4)
+    source_kpar = np.tile(np.arange(4), 2)
+    counts = np.arange(1, 9)
+    power = np.linspace(1.0, 2.0, 8)
+    reporting = np.asarray([2, 4, 5])
+    cell_weights = np.asarray([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]])
+    metrics = band_selection_coverage(
+        geometric_window=geometric,
+        selected_output_band_ids=selected_ids,
+        source_kperp_indices=source_kperp,
+        source_kpar_indices=source_kpar,
+        source_mode_counts=counts,
+        source_bandpower=power,
+        output_cell_weights=cell_weights,
+        reporting_source_positions=reporting,
+    )
+    source_selected = np.asarray([False, False, True, False, False, True, False, False])
+    source_geometric = np.asarray([False, True, True, False, True, True, True, False])
+    weighted_power = counts * power
+    assert metrics["geometric_window_band_count"] == 5
+    assert metrics["selected_band_count"] == 2
+    np.testing.assert_allclose(
+        metrics["selected_fraction_of_geometric_window_bands"], 2.0 / 5.0
+    )
+    np.testing.assert_allclose(
+        metrics["selected_fraction_of_geometric_window_plot_area"], 5.0 / 11.0
+    )
+    np.testing.assert_allclose(
+        metrics["selected_fraction_of_geometric_window_fft_modes"],
+        counts[source_selected].sum() / counts[source_geometric].sum(),
+    )
+    np.testing.assert_allclose(
+        metrics["selected_fraction_of_geometric_window_injected_power"],
+        weighted_power[source_selected].sum() / weighted_power[source_geometric].sum(),
+    )
+    np.testing.assert_allclose(
+        metrics["selected_fraction_of_reporting_bands"], 2.0 / 3.0
+    )
 
 
 def test_stratified_rows_and_response_inverse() -> None:
@@ -193,16 +225,10 @@ def test_stratified_rows_and_response_inverse() -> None:
     assert middle_only.size == 2
     assert np.all(middle_only >= 3)
 
-    response = np.asarray(
-        [[2.0, 0.1], [0.2, 3.0], [1.0, -0.5]], dtype=np.float64
-    )
-    inverse, diagnostics = weighted_response_pseudoinverse(
-        response, rcond=1e-12
-    )
+    response = np.asarray([[2.0, 0.1], [0.2, 3.0], [1.0, -0.5]], dtype=np.float64)
+    inverse, diagnostics = weighted_response_pseudoinverse(response, rcond=1e-12)
     assert diagnostics["rank"] == 2
-    np.testing.assert_allclose(
-        inverse @ response, np.eye(2), rtol=1e-12, atol=1e-12
-    )
+    np.testing.assert_allclose(inverse @ response, np.eye(2), rtol=1e-12, atol=1e-12)
 
 
 def test_window_selection_uses_response_target_concentration() -> None:

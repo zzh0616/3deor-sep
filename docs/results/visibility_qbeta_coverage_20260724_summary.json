@@ -1,0 +1,131 @@
+{
+  "analysis_contract_sha256": "37a984ec43857510c821de560331670d494077cea25331df3e2ba7b17176a99d",
+  "coverage": {
+    "dpss_supported_band_count": 337,
+    "geometric_window_band_count": 410,
+    "geometric_window_fft_mode_count": 3033688,
+    "geometric_window_injected_power": 88.20434787965138,
+    "qbeta_evaluated_output_band_count": 112,
+    "reporting_band_count": 40,
+    "selected_band_count": 20,
+    "selected_fft_mode_count": 107632,
+    "selected_fraction_of_all_response_scope_injected_power": 0.006559210514355227,
+    "selected_fraction_of_dpss_supported_bands": 0.05934718100890208,
+    "selected_fraction_of_geometric_window_bands": 0.04878048780487805,
+    "selected_fraction_of_geometric_window_fft_modes": 0.035478928617577024,
+    "selected_fraction_of_geometric_window_injected_power": 0.016453929066705494,
+    "selected_fraction_of_geometric_window_plot_area": 0.04878048780487801,
+    "selected_fraction_of_qbeta_evaluated_output_bands": 0.17857142857142858,
+    "selected_fraction_of_reporting_bands": 0.5,
+    "selected_fraction_of_reporting_fft_modes": 0.5,
+    "selected_fraction_of_reporting_injected_power": 0.4899825571412598,
+    "selected_injected_power": 1.451308083386799
+  },
+  "date": "2026-07-24",
+  "figures": {
+    "context": {
+      "path": "docs/figures/visibility_qbeta_context_progression.png",
+      "sha256": "e272e8ee7f2939c8e650ac459f7fbae26fb6d33d4b0226f534e29d3f1e69570d"
+    },
+    "coverage": {
+      "path": "docs/figures/visibility_qbeta_eor_window_coverage.png",
+      "sha256": "c181a7a51d0467ecc52320db60aea224f230beb41a67f3a6904bf62bbf560639"
+    },
+    "recovery": {
+      "path": "docs/figures/visibility_qbeta_ps2d_recovery.png",
+      "sha256": "1ed9f1e1080825476efe22dac5ebd35e0760c2e38508ef9a8594d537a6757c9b"
+    }
+  },
+  "foreground_to_target_integrated_absolute_ratio": 2.0738241064831467e-06,
+  "full_eor_recovery": {
+    "integrated_power_ratio": 0.9450277225764232,
+    "maximum_relative_window_error": 0.156887551538976,
+    "passing_window_count": 20,
+    "relative_l2": 0.07633956796818846
+  },
+  "interpretation": "The selected outputs are overlapping response-windowed bandpowers. The direct 20-cell footprint is a coverage diagnostic, not a claim that 20 independent delta-function sky bins were deconvolved.",
+  "operator": {
+    "channel_averaging_khz": 100.0,
+    "chromatic_baseline_migration": true,
+    "exact_direct_dft_with_w_term": true,
+    "fixed_baseline_time_rows": true,
+    "primary_beam": false,
+    "time_averaging_s": 10.0,
+    "uv_gridding": false
+  },
+  "result_json_sha256": "b9f3282a27c477a96560e7f545ffa4c49bb6f5839ff97277f1b522006ad7e044",
+  "result_npz_sha256": "9b29806658a5d4afeec43ff729c5da9b3508be39ee9855db588815c96d2380d5",
+  "schema": "visibility_qbeta_eor_window_coverage",
+  "schema_version": 1,
+  "selected_geometry": {
+    "kpar_indices": [
+      13,
+      14
+    ],
+    "kpar_values_mpc_inv": [
+      1.320497928197488,
+      1.422074691904987
+    ],
+    "kperp_edge_range_mpc_inv": [
+      0.314935646605651,
+      0.8078957525092998
+    ],
+    "kperp_indices": [
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "median_window_effective_width_source_bands": 3.851161005654588
+  },
+  "selected_recovered_windowed_power": [
+    1.8325110686573956e-05,
+    1.665563934780489e-05,
+    1.6948293499283394e-05,
+    1.4225563448710004e-05,
+    1.610760780173031e-05,
+    1.4833347678580624e-05,
+    1.614352109996772e-05,
+    1.4446927322054511e-05,
+    1.400172222290911e-05,
+    1.3260944061491227e-05,
+    1.454151314179988e-05,
+    1.2965573176664931e-05,
+    1.3385481625511064e-05,
+    1.1818009237869846e-05,
+    1.0903660180207306e-05,
+    1.0707481744212748e-05,
+    1.182631939914672e-05,
+    1.080684232348422e-05,
+    1.0788398729905068e-05,
+    9.046103686640663e-06
+  ],
+  "selected_target_windowed_power": [
+    1.9859717465322973e-05,
+    1.8033723076932363e-05,
+    1.9063826206071633e-05,
+    1.6872676325295207e-05,
+    1.7495144103073933e-05,
+    1.5870562989099952e-05,
+    1.659887303125465e-05,
+    1.5284650310735723e-05,
+    1.5197505505348869e-05,
+    1.3879080026739054e-05,
+    1.4178470173455757e-05,
+    1.3210483726621242e-05,
+    1.3277653591491013e-05,
+    1.2141389996687755e-05,
+    1.2316646975165279e-05,
+    1.1395475457985756e-05,
+    1.1619397788337936e-05,
+    1.0648030561293852e-05,
+    1.0713788431734336e-05,
+    9.815545694277461e-06
+  ]
+}
