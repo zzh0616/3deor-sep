@@ -44,10 +44,18 @@ class QuadraticResponse:
     taper: np.ndarray
     foreground_basis: str = "dpss"
     polynomial_degree: Optional[int] = None
+    source_delays_s: Optional[np.ndarray] = None
 
     @property
     def supported(self) -> np.ndarray:
         return self.row_normalization > np.finfo(np.float64).eps
+
+    @property
+    def input_delays_s(self) -> np.ndarray:
+        """Return delays defining the input spectral-power basis."""
+        if self.source_delays_s is None:
+            return self.delays_s
+        return self.source_delays_s
 
 
 def frequency_fourier_basis(
@@ -244,6 +252,21 @@ def inverse_covariance_suppression(
     return 0.5 * (result + result.conj().T)
 
 
+def _spectral_taper_values(size: int, taper: str) -> np.ndarray:
+    taper_name = str(taper).strip().lower()
+    if taper_name == "none":
+        values = np.ones(int(size), dtype=np.float64)
+    elif taper_name == "hann":
+        values = np.hanning(int(size))
+    elif taper_name == "blackman_harris":
+        from scipy.signal.windows import blackmanharris
+
+        values = blackmanharris(int(size), sym=True)
+    else:
+        raise ValueError("taper must be one of: none, hann, blackman_harris")
+    return np.asarray(values, dtype=np.float64)
+
+
 def _build_quadratic_response_from_basis(
     frequencies_hz: np.ndarray,
     *,
@@ -263,17 +286,7 @@ def _build_quadratic_response_from_basis(
         float(suppression_strength),
         eigenvalues=foreground_eigenvalues,
     )
-    taper_name = str(taper).strip().lower()
-    if taper_name == "none":
-        taper_values = np.ones(frequencies.size, dtype=np.float64)
-    elif taper_name == "hann":
-        taper_values = np.hanning(frequencies.size)
-    elif taper_name == "blackman_harris":
-        from scipy.signal.windows import blackmanharris
-
-        taper_values = blackmanharris(frequencies.size, sym=True)
-    else:
-        raise ValueError("taper must be one of: none, hann, blackman_harris")
+    taper_values = _spectral_taper_values(frequencies.size, taper)
     taper_matrix = np.diag(taper_values.astype(np.complex128))
 
     # This is the generalized spectral transform inside the quadratic
@@ -303,6 +316,7 @@ def _build_quadratic_response_from_basis(
         taper=np.asarray(taper_values, dtype=np.float64),
         foreground_basis=str(foreground_basis),
         polynomial_degree=polynomial_degree,
+        source_delays_s=np.asarray(delays, dtype=np.float64),
     )
 
 
@@ -353,6 +367,174 @@ def build_chebyshev_quadratic_response(
         suppression_strength=float(suppression_strength),
         taper=taper,
     )
+
+
+def build_dpss_prefiltered_subband_response(
+    frequencies_hz: np.ndarray,
+    *,
+    analysis_frequency_indices: np.ndarray,
+    max_delay_s: float,
+    suppression_strength: float,
+    dpss_eigenvalue_threshold: float = 1e-6,
+    taper: str = "hann",
+) -> QuadraticResponse:
+    """Build a wideband DPSS prefilter followed by a subband delay transform.
+
+    The foreground projector acts on every input channel. The selected
+    analysis channels are then tapered and transformed, so the returned
+    analysis matrix is rectangular when the analysis subband is narrower than
+    the input band.
+    """
+    frequencies = np.asarray(frequencies_hz, dtype=np.float64).reshape(-1)
+    input_fourier, input_delays = frequency_fourier_basis(frequencies)
+    indices = np.asarray(analysis_frequency_indices, dtype=np.int64).reshape(-1)
+    if (
+        indices.size < 2
+        or np.unique(indices).size != indices.size
+        or np.any(indices < 0)
+        or np.any(indices >= frequencies.size)
+        or np.any(np.diff(indices) <= 0)
+    ):
+        raise ValueError(
+            "analysis_frequency_indices must be unique, increasing, and in range"
+        )
+    analysis_frequencies = frequencies[indices]
+    analysis_fourier, analysis_delays = frequency_fourier_basis(
+        analysis_frequencies
+    )
+    foreground = dpss_foreground_basis(
+        frequencies,
+        float(max_delay_s),
+        eigenvalue_threshold=float(dpss_eigenvalue_threshold),
+    )
+    inverse = inverse_covariance_suppression(
+        foreground.vectors,
+        float(suppression_strength),
+        eigenvalues=foreground.eigenvalues,
+    )
+    taper_values = _spectral_taper_values(analysis_frequencies.size, taper)
+    analysis = (
+        analysis_fourier.conj().T
+        @ np.diag(taper_values.astype(np.complex128))
+        @ inverse[indices]
+    )
+    mixing = analysis @ input_fourier
+    fisher = np.square(np.abs(mixing))
+    row_normalization = np.sum(fisher, axis=1)
+    window = np.zeros_like(fisher, dtype=np.float64)
+    supported = row_normalization > np.finfo(np.float64).eps
+    window[supported] = fisher[supported] / row_normalization[supported, None]
+    return QuadraticResponse(
+        frequencies_hz=frequencies,
+        delays_s=np.asarray(analysis_delays, dtype=np.float64),
+        analysis_matrix=np.asarray(analysis, dtype=np.complex128),
+        fisher=np.asarray(fisher, dtype=np.float64),
+        window=window,
+        row_normalization=np.asarray(row_normalization, dtype=np.float64),
+        foreground_rank=foreground.rank,
+        dpss_eigenvalues=np.asarray(foreground.eigenvalues, dtype=np.float64),
+        max_delay_s=float(max_delay_s),
+        suppression_strength=float(suppression_strength),
+        taper=taper_values,
+        foreground_basis="dpss_wideband",
+        polynomial_degree=None,
+        source_delays_s=np.asarray(input_delays, dtype=np.float64),
+    )
+
+
+def fold_rectangular_window_absolute_delay(
+    window: np.ndarray,
+    output_delays_s: np.ndarray,
+    source_delays_s: np.ndarray,
+    *,
+    exclude_output_nyquist: bool = True,
+    exclude_source_nyquist: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Fold a response with independent output and source delay axes."""
+    matrix = np.asarray(window, dtype=np.float64)
+    output_delays = np.asarray(output_delays_s, dtype=np.float64).reshape(-1)
+    source_delays = np.asarray(source_delays_s, dtype=np.float64).reshape(-1)
+    if matrix.shape != (output_delays.size, source_delays.size):
+        raise ValueError("Window shape does not match output/source delays")
+
+    output_absolute = np.abs(output_delays)
+    source_absolute = np.abs(source_delays)
+    unique_output, output_groups = np.unique(
+        output_absolute, return_inverse=True
+    )
+    unique_source, source_groups = np.unique(
+        source_absolute, return_inverse=True
+    )
+    keep_output = np.ones(unique_output.size, dtype=bool)
+    keep_source = np.ones(unique_source.size, dtype=bool)
+    if exclude_output_nyquist and output_delays.size % 2 == 0:
+        keep_output &= ~np.isclose(
+            unique_output,
+            abs(float(output_delays[output_delays.size // 2])),
+            rtol=1e-12,
+            atol=1e-18,
+        )
+    if exclude_source_nyquist and source_delays.size % 2 == 0:
+        keep_source &= ~np.isclose(
+            unique_source,
+            abs(float(source_delays[source_delays.size // 2])),
+            rtol=1e-12,
+            atol=1e-18,
+        )
+
+    kept_output = np.flatnonzero(keep_output)
+    kept_source = np.flatnonzero(keep_source)
+    result = np.zeros(
+        (kept_output.size, kept_source.size), dtype=np.float64
+    )
+    for row_out, row_group in enumerate(kept_output):
+        rows = np.flatnonzero(output_groups == row_group)
+        for col_out, col_group in enumerate(kept_source):
+            cols = np.flatnonzero(source_groups == col_group)
+            # A folded source band assigns the same power to both signed-delay
+            # members, so source columns add while output rows average.
+            result[row_out, col_out] = float(
+                np.mean(np.sum(matrix[np.ix_(rows, cols)], axis=1))
+            )
+    row_sum = np.sum(result, axis=1)
+    valid = row_sum > np.finfo(np.float64).eps
+    result[valid] /= row_sum[valid, None]
+    return result, unique_output[keep_output], unique_source[keep_source]
+
+
+def matched_absolute_delay_window_fraction(
+    window: np.ndarray,
+    output_delays_s: np.ndarray,
+    source_delays_s: np.ndarray,
+    *,
+    exclude_output_nyquist: bool = True,
+    exclude_source_nyquist: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return folded response at the source delay matching each output row."""
+    folded, output_delays, source_delays = (
+        fold_rectangular_window_absolute_delay(
+            window,
+            output_delays_s,
+            source_delays_s,
+            exclude_output_nyquist=exclude_output_nyquist,
+            exclude_source_nyquist=exclude_source_nyquist,
+        )
+    )
+    fractions = np.zeros(output_delays.size, dtype=np.float64)
+    for output_index, delay in enumerate(output_delays):
+        columns = np.flatnonzero(
+            np.isclose(
+                source_delays,
+                delay,
+                rtol=1e-10,
+                atol=max(1e-18, abs(float(delay)) * 1e-10),
+            )
+        )
+        if columns.size:
+            fractions[output_index] = float(
+                np.sum(folded[output_index, columns])
+            )
+    return fractions, output_delays
 
 
 def cross_quadratic_bandpowers(
@@ -436,32 +618,11 @@ def fold_window_absolute_delay(
     exclude_nyquist: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Fold both axes of a signed-delay response window."""
-    matrix = np.asarray(window, dtype=np.float64)
-    delays = np.asarray(delays_s, dtype=np.float64).reshape(-1)
-    if matrix.shape != (delays.size, delays.size):
-        raise ValueError("Window must be square on the delay axis")
-    absolute = np.abs(delays)
-    unique, groups = np.unique(absolute, return_inverse=True)
-    keep = np.ones(unique.size, dtype=bool)
-    if exclude_nyquist and delays.size % 2 == 0:
-        keep &= ~np.isclose(
-            unique,
-            abs(float(delays[delays.size // 2])),
-            rtol=1e-12,
-            atol=1e-18,
-        )
-    kept = np.flatnonzero(keep)
-    result = np.zeros((kept.size, kept.size), dtype=np.float64)
-    for row_out, row_group in enumerate(kept):
-        rows = np.flatnonzero(groups == row_group)
-        for col_out, col_group in enumerate(kept):
-            cols = np.flatnonzero(groups == col_group)
-            # A folded source band assigns the same power to both signed-delay
-            # members, so source columns add while output rows average.
-            result[row_out, col_out] = float(
-                np.mean(np.sum(matrix[np.ix_(rows, cols)], axis=1))
-            )
-    row_sum = np.sum(result, axis=1)
-    valid = row_sum > np.finfo(np.float64).eps
-    result[valid] /= row_sum[valid, None]
-    return result, unique[keep]
+    result, folded_delays, _ = fold_rectangular_window_absolute_delay(
+        window,
+        delays_s,
+        delays_s,
+        exclude_output_nyquist=exclude_nyquist,
+        exclude_source_nyquist=exclude_nyquist,
+    )
+    return result, folded_delays

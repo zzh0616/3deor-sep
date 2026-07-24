@@ -11,6 +11,7 @@ PYTHON="${PYTHON:-/home/zhenghao/miniconda3/envs/torch/bin/python}"
 EVALUATOR="${EVALUATOR:-${CODE_ROOT}/ops_scripts/calibrate_visibility_qbeta_noiseless.py}"
 COMBINER="${COMBINER:-${CODE_ROOT}/ops_scripts/combine_visibility_qbeta_row_partitions.py}"
 CONFIG="${CONFIG:-${CODE_ROOT}/configs/ps2d_v2_32high_isobeam_patch.json}"
+FREQUENCY_CONFIG="${FREQUENCY_CONFIG:-}"
 PARTITION_COUNT="${PARTITION_COUNT:-6}"
 PARTITION_FIRST="${PARTITION_FIRST:-0}"
 ROWS_PER_BIN="${ROWS_PER_BIN:-32}"
@@ -24,6 +25,7 @@ SUPPRESSION_STRENGTH="${SUPPRESSION_STRENGTH:-1e4}"
 POLYNOMIAL_DEGREE="${POLYNOMIAL_DEGREE:-3}"
 DPSS_EIGENVALUE_THRESHOLD="${DPSS_EIGENVALUE_THRESHOLD:-1e-12}"
 SPECTRAL_TAPER="${SPECTRAL_TAPER:-hann}"
+FILTER_BANDWIDTH_SCOPE="${FILTER_BANDWIDTH_SCOPE:-analysis_subband}"
 GPU_MEMORY_LIMIT_MIB="${GPU_MEMORY_LIMIT_MIB:-1024}"
 GPU_UTIL_LIMIT_PERCENT="${GPU_UTIL_LIMIT_PERCENT:-20}"
 
@@ -51,9 +53,14 @@ run_partition() {
   local partition="$1"
   local gpu="$2"
   local partition_dir="${OUT_DIR}/part_${partition}"
+  local frequency_args=()
+  if [[ -n "${FREQUENCY_CONFIG}" ]]; then
+    frequency_args=(--frequency-config "${FREQUENCY_CONFIG}")
+  fi
   mkdir -p "${partition_dir}/evaluate"
   CUDA_VISIBLE_DEVICES="${gpu}" "${PYTHON}" "${EVALUATOR}" \
     --config "${CONFIG}" \
+    "${frequency_args[@]}" \
     --bank-dir "${BANK_DIR}" \
     --osm-pattern "${SOURCE_ROOT}/osm/eor_{freq:.2f}.osm" \
     --sky-cache "${BASE_RUN}/cache/eor_intrinsic_sky.npz" \
@@ -73,6 +80,7 @@ run_partition() {
     --polynomial-degree "${POLYNOMIAL_DEGREE}" \
     --dpss-eigenvalue-threshold "${DPSS_EIGENVALUE_THRESHOLD}" \
     --spectral-taper "${SPECTRAL_TAPER}" \
+    --filter-bandwidth-scope "${FILTER_BANDWIDTH_SCOPE}" \
     --probe-batch-size 8 \
     --operator-dtype complex64 \
     --source-chunk 8192 \

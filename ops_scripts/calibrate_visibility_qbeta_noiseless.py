@@ -29,10 +29,11 @@ if str(PROJECT_DIR) not in sys.path:
 
 from chips_visibility import (  # noqa: E402
     build_chebyshev_quadratic_response,
+    build_dpss_prefiltered_subband_response,
     build_quadratic_response,
     dpss_foreground_basis,
     fold_absolute_delay,
-    fold_window_absolute_delay,
+    matched_absolute_delay_window_fraction,
 )
 from ps2d_v2_config import resolve_mode_first_analysis  # noqa: E402
 from visibility_qbeta import (  # noqa: E402
@@ -40,7 +41,6 @@ from visibility_qbeta import (  # noqa: E402
     OMEGA_EARTH_RAD_S,
     build_sky_band_layout,
     direction_cosines,
-    reporting_band_ids,
     source_bandpowers,
     stratified_row_indices,
     weighted_response_pseudoinverse,
@@ -50,6 +50,14 @@ from visibility_qbeta import (  # noqa: E402
 def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument(
+        "--frequency-config",
+        type=Path,
+        help=(
+            "Optional wider input-frequency config. --config continues to "
+            "define the analysis subband and output geometry."
+        ),
+    )
     parser.add_argument("--bank-dir", type=Path, required=True)
     parser.add_argument("--osm-pattern", required=True)
     parser.add_argument("--sky-cache", type=Path, required=True)
@@ -108,6 +116,15 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         choices=("none", "hann", "blackman_harris"),
         default="hann",
     )
+    parser.add_argument(
+        "--filter-bandwidth-scope",
+        choices=("analysis_subband", "full_band"),
+        default="analysis_subband",
+        help=(
+            "Apply foreground suppression only inside the analysis subband, "
+            "or across every input channel before selecting the subband."
+        ),
+    )
     parser.add_argument("--minimum-window-self-fraction", type=float, default=0.1)
     parser.add_argument("--minimum-relative-sensitivity", type=float, default=1e-4)
     parser.add_argument("--response-rcond", type=float, default=1e-4)
@@ -116,6 +133,71 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
 
 def _format_pattern(pattern: str, frequency_mhz: float) -> Path:
     return Path(str(pattern).format(freq=float(frequency_mhz)))
+
+
+def _analysis_frequency_indices(
+    input_frequencies_mhz: np.ndarray,
+    analysis_frequencies_mhz: np.ndarray,
+) -> np.ndarray:
+    input_frequencies = np.asarray(
+        input_frequencies_mhz, dtype=np.float64
+    ).reshape(-1)
+    analysis_frequencies = np.asarray(
+        analysis_frequencies_mhz, dtype=np.float64
+    ).reshape(-1)
+    indices: list[int] = []
+    for frequency in analysis_frequencies:
+        matches = np.flatnonzero(
+            np.isclose(
+                input_frequencies,
+                frequency,
+                rtol=0.0,
+                atol=1e-9,
+            )
+        )
+        if matches.size != 1:
+            raise ValueError(
+                f"Analysis frequency {frequency:.9f} MHz does not occur "
+                "exactly once in the input band"
+            )
+        indices.append(int(matches[0]))
+    result = np.asarray(indices, dtype=np.int64)
+    if np.any(np.diff(result) != 1):
+        raise ValueError("Analysis frequencies must form one contiguous input subband")
+    return result
+
+
+def _reporting_source_band_ids(
+    layout: Any,
+    *,
+    analysis_kpar_values: np.ndarray,
+    high_kpar_fraction: float,
+    mid_kperp_fraction_range: tuple[float, float],
+) -> np.ndarray:
+    analysis_kpar = np.asarray(
+        analysis_kpar_values, dtype=np.float64
+    ).reshape(-1)
+    if analysis_kpar.size == 0:
+        raise ValueError("Analysis kpar values are empty")
+    high_fraction = float(high_kpar_fraction)
+    low_perp, high_perp = (
+        float(value) for value in mid_kperp_fraction_range
+    )
+    nkperp = int(layout.kperp_edges.size - 1)
+    first_perp = int(math.floor(low_perp * nkperp))
+    stop_perp = int(math.ceil(high_perp * nkperp))
+    first_parallel = int(math.floor(high_fraction * analysis_kpar.size))
+    minimum_kpar = float(analysis_kpar[first_parallel])
+    maximum_kpar = float(analysis_kpar[-1])
+    source_kpar = layout.kpar_values[layout.active_kpar_indices]
+    tolerance = max(1e-12, abs(maximum_kpar) * 1e-9)
+    selected = (
+        (layout.active_kperp_indices >= first_perp)
+        & (layout.active_kperp_indices < stop_perp)
+        & (source_kpar >= minimum_kpar - tolerance)
+        & (source_kpar <= maximum_kpar + tolerance)
+    )
+    return np.flatnonzero(selected).astype(np.int64)
 
 
 def _sha256(path: Path) -> str:
@@ -479,6 +561,8 @@ def _visibility_bandpowers(
     *,
     visibilities: np.ndarray,
     frequencies_hz: np.ndarray,
+    analysis_frequency_indices: np.ndarray,
+    filter_bandwidth_scope: str,
     row_kperp: np.ndarray,
     kperp_edges: np.ndarray,
     maximum_delays_s: np.ndarray,
@@ -497,6 +581,24 @@ def _visibility_bandpowers(
     else:
         raise ValueError("Visibilities must have shape [freq,row] or [batch,freq,row]")
     batch, n_frequency, _ = values.shape
+    frequencies = np.asarray(frequencies_hz, dtype=np.float64).reshape(-1)
+    if frequencies.shape != (n_frequency,):
+        raise ValueError("Visibility and input-frequency axes differ")
+    analysis_indices = np.asarray(
+        analysis_frequency_indices, dtype=np.int64
+    ).reshape(-1)
+    if (
+        analysis_indices.size < 2
+        or np.unique(analysis_indices).size != analysis_indices.size
+        or np.any(analysis_indices < 0)
+        or np.any(analysis_indices >= n_frequency)
+        or np.any(np.diff(analysis_indices) <= 0)
+    ):
+        raise ValueError("Invalid analysis-frequency indices")
+    analysis_frequencies = frequencies[analysis_indices]
+    bandwidth_scope = str(filter_bandwidth_scope)
+    if bandwidth_scope not in {"analysis_subband", "full_band"}:
+        raise ValueError(f"Unsupported filter bandwidth scope: {bandwidth_scope}")
     n_kperp = int(kperp_edges.size - 1)
     output: np.ndarray | None = None
     window_self: np.ndarray | None = None
@@ -519,58 +621,90 @@ def _visibility_bandpowers(
         counts[transverse_index] = int(members.size)
         maximum_delay = float(maximum_delays_s[transverse_index])
         filter_name = str(foreground_filter)
-        if filter_name == "none":
-            response = build_quadratic_response(
-                frequencies_hz,
+        strength = (
+            0.0
+            if filter_name == "none"
+            else (
+                math.inf
+                if filter_name in {
+                    "dpss_hard",
+                    "chebyshev",
+                    "chebyshev_rank_matched",
+                }
+                else float(suppression_strength)
+            )
+        )
+        if bandwidth_scope == "full_band":
+            if filter_name not in {"none", "dpss_hard", "dpss_soft"}:
+                raise ValueError(
+                    "Full-band prefiltering currently supports DPSS or no filter"
+                )
+            response = build_dpss_prefiltered_subband_response(
+                frequencies,
+                analysis_frequency_indices=analysis_indices,
+                max_delay_s=maximum_delay,
+                suppression_strength=strength,
+                dpss_eigenvalue_threshold=float(dpss_eigenvalue_threshold),
+                taper=spectral_taper,
+            )
+            raw = build_dpss_prefiltered_subband_response(
+                frequencies,
+                analysis_frequency_indices=analysis_indices,
                 max_delay_s=maximum_delay,
                 suppression_strength=0.0,
                 dpss_eigenvalue_threshold=float(dpss_eigenvalue_threshold),
                 taper=spectral_taper,
             )
-        elif filter_name in {"dpss_hard", "dpss_soft"}:
-            response = build_quadratic_response(
-                frequencies_hz,
+        else:
+            if filter_name in {"none", "dpss_hard", "dpss_soft"}:
+                response = build_quadratic_response(
+                    analysis_frequencies,
+                    max_delay_s=maximum_delay,
+                    suppression_strength=strength,
+                    dpss_eigenvalue_threshold=float(
+                        dpss_eigenvalue_threshold
+                    ),
+                    taper=spectral_taper,
+                )
+            elif filter_name == "chebyshev":
+                response = build_chebyshev_quadratic_response(
+                    analysis_frequencies,
+                    degree=int(polynomial_degree),
+                    suppression_strength=math.inf,
+                    taper=spectral_taper,
+                )
+            elif filter_name == "chebyshev_rank_matched":
+                dpss_basis = dpss_foreground_basis(
+                    analysis_frequencies,
+                    maximum_delay,
+                    eigenvalue_threshold=float(dpss_eigenvalue_threshold),
+                )
+                response = build_chebyshev_quadratic_response(
+                    analysis_frequencies,
+                    degree=dpss_basis.rank - 1,
+                    suppression_strength=math.inf,
+                    taper=spectral_taper,
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported foreground filter: {filter_name}"
+                )
+            raw = build_quadratic_response(
+                analysis_frequencies,
                 max_delay_s=maximum_delay,
-                suppression_strength=(
-                    math.inf
-                    if filter_name == "dpss_hard"
-                    else float(suppression_strength)
-                ),
+                suppression_strength=0.0,
                 dpss_eigenvalue_threshold=float(dpss_eigenvalue_threshold),
                 taper=spectral_taper,
             )
-        elif filter_name == "chebyshev":
-            response = build_chebyshev_quadratic_response(
-                frequencies_hz,
-                degree=int(polynomial_degree),
-                suppression_strength=math.inf,
-                taper=spectral_taper,
-            )
-        elif filter_name == "chebyshev_rank_matched":
-            dpss_basis = dpss_foreground_basis(
-                frequencies_hz,
-                maximum_delay,
-                eigenvalue_threshold=float(dpss_eigenvalue_threshold),
-            )
-            response = build_chebyshev_quadratic_response(
-                frequencies_hz,
-                degree=dpss_basis.rank - 1,
-                suppression_strength=math.inf,
-                taper=spectral_taper,
-            )
-        else:
-            raise ValueError(f"Unsupported foreground filter: {filter_name}")
         foreground_ranks[transverse_index] = (
             0 if filter_name == "none" else int(response.foreground_rank)
         )
-        raw = build_quadratic_response(
-            frequencies_hz,
-            max_delay_s=maximum_delay,
-            suppression_strength=0.0,
-            dpss_eigenvalue_threshold=float(dpss_eigenvalue_threshold),
-            taper=spectral_taper,
+        response_values = (
+            values
+            if bandwidth_scope == "full_band"
+            else values[:, analysis_indices]
         )
-        selected = np.transpose(values[:, :, members], (0, 2, 1))
+        selected = np.transpose(response_values[:, :, members], (0, 2, 1))
         transformed = selected @ response.analysis_matrix.T
         estimate = np.mean(np.square(np.abs(transformed)), axis=1)
         estimate[:, response.supported] /= response.row_normalization[
@@ -583,9 +717,15 @@ def _visibility_bandpowers(
         raw_norm, _, _ = fold_absolute_delay(
             raw.row_normalization, raw.delays_s
         )
-        folded_window, _ = fold_window_absolute_delay(
-            response.window, response.delays_s
+        matched_window, matched_delays = (
+            matched_absolute_delay_window_fraction(
+                response.window,
+                response.delays_s,
+                response.input_delays_s,
+            )
         )
+        if not np.allclose(delays, matched_delays, rtol=1e-10, atol=1e-18):
+            raise ValueError("Folded response and matched-window delays differ")
         if output is None:
             n_delay = int(folded.shape[-1])
             output = np.empty((batch, n_kperp, n_delay), dtype=np.float64)
@@ -596,7 +736,7 @@ def _visibility_bandpowers(
         output[:, transverse_index] = folded
         assert window_self is not None
         assert relative_sensitivity is not None
-        window_self[transverse_index] = np.diag(folded_window)
+        window_self[transverse_index] = matched_window
         relative_sensitivity[transverse_index] = np.divide(
             folded_norm,
             raw_norm,
@@ -894,8 +1034,22 @@ def main(argv: Iterable[str] | None = None) -> None:
     started = time.monotonic()
     config = json.loads(args.config.read_text(encoding="utf-8"))
     resolved = resolve_mode_first_analysis(config)
-    frequencies_mhz = np.asarray(
+    analysis_frequencies_mhz = np.asarray(
         resolved.geometry["frequencies_mhz"], dtype=np.float64
+    )
+    frequency_config_path = (
+        args.config if args.frequency_config is None else args.frequency_config
+    )
+    frequency_config = json.loads(
+        frequency_config_path.read_text(encoding="utf-8")
+    )
+    frequency_resolved = resolve_mode_first_analysis(frequency_config)
+    frequencies_mhz = np.asarray(
+        frequency_resolved.geometry["frequencies_mhz"], dtype=np.float64
+    )
+    analysis_frequency_indices = _analysis_frequency_indices(
+        frequencies_mhz,
+        analysis_frequencies_mhz,
     )
     frequencies_hz = frequencies_mhz * 1e6
     bank, manifest = _load_bank(args.bank_dir)
@@ -904,6 +1058,11 @@ def main(argv: Iterable[str] | None = None) -> None:
     ):
         raise ValueError("Visibility-bank frequencies differ from the config")
     source_size = int(config["image_geometry"]["source_image_size"])
+    if (
+        int(frequency_config["image_geometry"]["source_image_size"])
+        != source_size
+    ):
+        raise ValueError("Analysis and frequency configs use different sky sizes")
     source_count = source_size * source_size
     sky = _load_or_build_sky_cache(args, frequencies_mhz, source_count)
 
@@ -1004,15 +1163,16 @@ def main(argv: Iterable[str] | None = None) -> None:
             args.source_scope != "all_in_range_with_nyquist"
         ),
     )
-    reporting_source_band_ids = reporting_band_ids(
+    reporting_source_band_ids = _reporting_source_band_ids(
         source_layout,
+        analysis_kpar_values=np.asarray(
+            resolved.contract.window_layout.kpar_values,
+            dtype=np.float64,
+        ),
         high_kpar_fraction=float(reporting["high_kpar_fraction"]),
         mid_kperp_fraction_range=tuple(
             float(value)
             for value in reporting["mid_kperp_fraction_range"]
-        ),
-        radial_band_count=int(
-            resolved.contract.window_layout.kpar_values.size
         ),
     )
     if args.source_scope == "reporting":
@@ -1021,6 +1181,13 @@ def main(argv: Iterable[str] | None = None) -> None:
         source_band_ids = np.arange(
             source_layout.band_count, dtype=np.int64
         )
+    source_kperp_indices = source_layout.active_kperp_indices[source_band_ids]
+    source_kpar_indices = source_layout.active_kpar_indices[source_band_ids]
+    source_kpar_values = source_layout.kpar_values[source_kpar_indices]
+    source_in_geometric_window = resolved.window_spec.mask(
+        kperp_edges[source_kperp_indices + 1],
+        source_kpar_values,
+    )
     reporting_source_positions = np.flatnonzero(
         np.isin(source_band_ids, reporting_source_band_ids)
     ).astype(np.int64)
@@ -1037,6 +1204,8 @@ def main(argv: Iterable[str] | None = None) -> None:
     )
     bandpower_kwargs = {
         "frequencies_hz": frequencies_hz,
+        "analysis_frequency_indices": analysis_frequency_indices,
+        "filter_bandwidth_scope": str(args.filter_bandwidth_scope),
         "row_kperp": row_kperp,
         "kperp_edges": kperp_edges,
         "maximum_delays_s": maximum_delays,
@@ -1262,17 +1431,20 @@ def main(argv: Iterable[str] | None = None) -> None:
         median_window_effective_width = math.nan
 
     products = {
+        "input_frequencies_mhz": frequencies_mhz,
+        "analysis_frequency_indices": analysis_frequency_indices,
+        "analysis_frequencies_mhz": analysis_frequencies_mhz,
         "selected_bank_rows": selected_rows,
         "selected_row_kperp_mpc_inv": row_kperp,
         "selected_row_kperp_indices": selected_row_kperp_indices,
         "source_band_ids": source_band_ids,
         "reporting_source_positions": reporting_source_positions,
-        "source_band_kperp_indices": source_layout.active_kperp_indices[
-            source_band_ids
-        ],
-        "source_band_kpar_indices": source_layout.active_kpar_indices[
-            source_band_ids
-        ],
+        "source_band_kperp_indices": source_kperp_indices,
+        "source_band_kpar_indices": source_kpar_indices,
+        "source_band_kpar_mpc_inv": source_kpar_values,
+        "source_band_in_geometric_window": (
+            source_in_geometric_window.astype(np.int8)
+        ),
         "source_band_mode_counts": source_layout.counts[source_band_ids],
         "output_band_ids": output_band_ids,
         "support": support.astype(np.int8),
@@ -1321,6 +1493,9 @@ def main(argv: Iterable[str] | None = None) -> None:
         "schema": "visibility_qbeta_noiseless_calibration",
         "schema_version": 1,
         "analysis_contract_sha256": resolved.contract.analysis_contract_sha256,
+        "frequency_contract_sha256": (
+            frequency_resolved.contract.analysis_contract_sha256
+        ),
         "visibility_bank_sha256": manifest["bank_sha256"],
         "sky_cache_sha256": _sha256(args.sky_cache),
         "settings": {
@@ -1341,6 +1516,12 @@ def main(argv: Iterable[str] | None = None) -> None:
             "integration_time_s": float(args.integration_time_s),
             "phase_ra_deg": float(args.phase_ra_deg),
             "phase_dec_deg": float(args.phase_dec_deg),
+            "input_frequency_count": int(frequencies_mhz.size),
+            "analysis_frequency_count": int(
+                analysis_frequencies_mhz.size
+            ),
+            "analysis_frequency_indices": analysis_frequency_indices,
+            "filter_bandwidth_scope": str(args.filter_bandwidth_scope),
             "foreground_filter": str(args.foreground_filter),
             "suppression_strength": float(args.suppression_strength),
             "effective_suppression": (
@@ -1450,12 +1631,19 @@ def main(argv: Iterable[str] | None = None) -> None:
                 "in this run"
             ),
             (
-                "Q_beta source scope is the predeclared 40-band reporting region"
+                "Q_beta source scope is the predeclared reporting region"
                 if args.source_scope == "reporting"
                 else (
-                    "Q_beta source scope includes all 512 in-range sky bands"
+                    (
+                        "Q_beta source scope includes all "
+                        f"{int(source_band_ids.size)} in-range sky bands"
+                    )
                     if args.source_scope == "all_in_range"
-                    else "Q_beta source scope includes all 544 in-range sky bands including radial Nyquist"
+                    else (
+                        "Q_beta source scope includes all "
+                        f"{int(source_band_ids.size)} in-range sky bands "
+                        "including radial Nyquist"
+                    )
                 )
             ),
             (

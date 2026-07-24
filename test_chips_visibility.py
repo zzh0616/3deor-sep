@@ -6,13 +6,16 @@ import numpy as np
 
 from chips_visibility import (
     build_chebyshev_quadratic_response,
+    build_dpss_prefiltered_subband_response,
     build_quadratic_response,
     chebyshev_foreground_basis,
     cross_quadratic_bandpowers,
     dpss_foreground_basis,
     fold_absolute_delay,
+    fold_rectangular_window_absolute_delay,
     fold_window_absolute_delay,
     frequency_fourier_basis,
+    matched_absolute_delay_window_fraction,
     weighted_lssa_matrix,
 )
 
@@ -128,6 +131,104 @@ def test_chebyshev_response_matches_monte_carlo_window() -> None:
     )
 
 
+def test_wideband_subband_response_matches_full_band_limit() -> None:
+    frequencies = _frequencies(16)
+    expected = build_quadratic_response(
+        frequencies,
+        max_delay_s=0.31e-6,
+        suppression_strength=np.inf,
+        dpss_eigenvalue_threshold=1e-10,
+        taper="hann",
+    )
+    actual = build_dpss_prefiltered_subband_response(
+        frequencies,
+        analysis_frequency_indices=np.arange(frequencies.size),
+        max_delay_s=0.31e-6,
+        suppression_strength=np.inf,
+        dpss_eigenvalue_threshold=1e-10,
+        taper="hann",
+    )
+    np.testing.assert_allclose(actual.analysis_matrix, expected.analysis_matrix)
+    np.testing.assert_allclose(actual.fisher, expected.fisher)
+    np.testing.assert_allclose(actual.window, expected.window)
+    np.testing.assert_allclose(actual.input_delays_s, expected.delays_s)
+
+
+def test_wideband_subband_response_annihilates_full_band_nuisance() -> None:
+    frequencies = _frequencies(32)
+    maximum_delay = 0.36e-6
+    nuisance = dpss_foreground_basis(
+        frequencies,
+        maximum_delay,
+        eigenvalue_threshold=1e-10,
+    )
+    response = build_dpss_prefiltered_subband_response(
+        frequencies,
+        analysis_frequency_indices=np.arange(8, 24),
+        max_delay_s=maximum_delay,
+        suppression_strength=np.inf,
+        dpss_eigenvalue_threshold=1e-10,
+        taper="hann",
+    )
+    assert response.analysis_matrix.shape == (16, 32)
+    np.testing.assert_allclose(
+        response.analysis_matrix @ nuisance.vectors,
+        np.zeros((16, nuisance.rank)),
+        rtol=0.0,
+        atol=2e-14,
+    )
+
+
+def test_wideband_subband_response_matches_monte_carlo_window() -> None:
+    rng = np.random.default_rng(2507)
+    frequencies = _frequencies(32)
+    basis, _ = frequency_fourier_basis(frequencies)
+    response = build_dpss_prefiltered_subband_response(
+        frequencies,
+        analysis_frequency_indices=np.arange(8, 24),
+        max_delay_s=0.36e-6,
+        suppression_strength=np.inf,
+        dpss_eigenvalue_threshold=1e-10,
+        taper="hann",
+    )
+    true_power = np.linspace(0.5, 2.0, frequencies.size)
+    coefficients = (
+        rng.normal(size=(50000, frequencies.size))
+        + 1j * rng.normal(size=(50000, frequencies.size))
+    ) * np.sqrt(true_power[None, :] / 2.0)
+    samples = coefficients @ basis.T
+    estimate, _ = cross_quadratic_bandpowers(samples, samples, response)
+    expected = response.window @ true_power
+    np.testing.assert_allclose(
+        estimate[response.supported],
+        expected[response.supported],
+        rtol=0.035,
+        atol=0.035,
+    )
+    matched, delays = matched_absolute_delay_window_fraction(
+        response.window,
+        response.delays_s,
+        response.input_delays_s,
+    )
+    folded, folded_output_delays, folded_source_delays = (
+        fold_rectangular_window_absolute_delay(
+            response.window,
+            response.delays_s,
+            response.input_delays_s,
+        )
+    )
+    assert matched.shape == delays.shape == (8,)
+    assert np.all((matched >= 0.0) & (matched <= 1.0))
+    np.testing.assert_allclose(delays, folded_output_delays)
+    np.testing.assert_allclose(np.sum(folded, axis=1), np.ones(8))
+    for index, delay in enumerate(delays):
+        source = np.flatnonzero(
+            np.isclose(folded_source_delays, delay, rtol=1e-10, atol=1e-18)
+        )
+        assert source.size == 1
+        np.testing.assert_allclose(matched[index], folded[index, source[0]])
+
+
 def test_quadratic_response_matches_monte_carlo_window() -> None:
     rng = np.random.default_rng(7023)
     frequencies = _frequencies(16)
@@ -208,6 +309,12 @@ def test_folded_window_preserves_flat_bandpower() -> None:
     folded, _ = fold_window_absolute_delay(
         response.window, response.delays_s
     )
+    matched, _ = matched_absolute_delay_window_fraction(
+        response.window,
+        response.delays_s,
+        response.input_delays_s,
+    )
+    np.testing.assert_allclose(matched, np.diag(folded), rtol=1e-12, atol=1e-12)
     supported = np.sum(folded, axis=1) > 0.0
     np.testing.assert_allclose(
         np.sum(folded[supported], axis=1),

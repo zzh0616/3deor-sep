@@ -19,6 +19,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import BoundaryNorm, ListedColormap
+from matplotlib.patches import Patch, Rectangle
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -55,6 +57,8 @@ def _display_label(label: str) -> str:
         "none_hann": "Hann only",
         "chebyshev_d3_hann": "Chebyshev\ndegree 3",
         "chebyshev_rankmatched_e12_hann": "Chebyshev\nrank matched",
+        "dpss_narrow32_e12_hann": "DPSS\nnarrow 32",
+        "dpss_wide64_to32_e12_hann": "DPSS\nwide 64 -> 32",
     }
     return replacements.get(label, label)
 
@@ -75,6 +79,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--baseline-label", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--figure", type=Path)
+    parser.add_argument("--grid-figure", type=Path)
     return parser.parse_args()
 
 
@@ -139,17 +144,22 @@ def _method_products(
         out=np.full(row_sum.shape, np.nan),
         where=row_sum > 0.0,
     )
-    source_kperp = np.asarray(
-        arrays["source_band_kperp_indices"], dtype=np.int64
-    )
-    source_kpar = np.asarray(
-        arrays["source_band_kpar_indices"], dtype=np.int64
-    )
-    source_in_geometric = np.zeros(source_kperp.shape, dtype=bool)
-    in_radial_range = source_kpar < geometric.shape[1]
-    source_in_geometric[in_radial_range] = geometric[
-        source_kperp[in_radial_range], source_kpar[in_radial_range]
-    ]
+    if "source_band_in_geometric_window" in arrays:
+        source_in_geometric = np.asarray(
+            arrays["source_band_in_geometric_window"], dtype=bool
+        )
+    else:
+        source_kperp = np.asarray(
+            arrays["source_band_kperp_indices"], dtype=np.int64
+        )
+        source_kpar = np.asarray(
+            arrays["source_band_kpar_indices"], dtype=np.int64
+        )
+        source_in_geometric = np.zeros(source_kperp.shape, dtype=bool)
+        in_radial_range = source_kpar < geometric.shape[1]
+        source_in_geometric[in_radial_range] = geometric[
+            source_kperp[in_radial_range], source_kpar[in_radial_range]
+        ]
     geometric_fraction = np.sum(window[:, source_in_geometric], axis=1)
     square_sum = np.sum(np.square(window), axis=1)
     effective_width = np.divide(
@@ -390,6 +400,174 @@ def _plot_summary(
     plt.close(fig)
 
 
+def _plot_broad_grid(
+    *,
+    path: Path,
+    labels: list[str],
+    rows: list[dict[str, Any]],
+    kperp_edges: np.ndarray,
+    kpar_edges: np.ndarray,
+    geometric: np.ndarray,
+    boundary: np.ndarray,
+) -> None:
+    """Plot every broad-support cell and its worst held-out error."""
+    _style()
+    column_count = min(2, len(labels))
+    row_count = int(math.ceil(len(labels) / column_count))
+    fig, axes_grid = plt.subplots(
+        row_count,
+        column_count,
+        figsize=(15.5, 5.8 * row_count),
+        constrained_layout=True,
+        squeeze=False,
+    )
+    axes = axes_grid.reshape(-1)
+    background_cmap = ListedColormap(["#ece8df", "#dce9e6"])
+    background_norm = BoundaryNorm(
+        [-0.5, 0.5, 1.5], background_cmap.N
+    )
+    x_centers = 0.5 * (kperp_edges[:-1] + kperp_edges[1:])
+    y_centers = 0.5 * (kpar_edges[:-1] + kpar_edges[1:])
+    image = None
+    for axis, label in zip(axes, labels):
+        method_rows = [row for row in rows if row["label"] == label]
+        error_grid = np.full(geometric.shape, np.nan, dtype=np.float64)
+        added_grid = np.zeros(geometric.shape, dtype=bool)
+        for row in method_rows:
+            kp_index = int(row["kperp_index"])
+            kpar_index = int(row["kpar_index"])
+            error_grid[kp_index, kpar_index] = float(
+                row["heldout_worst_total_error_percent"]
+            )
+            added_grid[kp_index, kpar_index] = bool(
+                row["added_vs_baseline_broad_support"]
+            )
+        finite = error_grid[np.isfinite(error_grid)]
+        if finite.size == 0:
+            raise ValueError(f"No broad-support cells for {label}")
+        axis.pcolormesh(
+            kperp_edges,
+            kpar_edges,
+            geometric.T.astype(np.int8),
+            cmap=background_cmap,
+            norm=background_norm,
+            shading="flat",
+            linewidth=0.12,
+            edgecolors=(1.0, 1.0, 1.0, 0.38),
+        )
+        image = axis.pcolormesh(
+            kperp_edges,
+            kpar_edges,
+            np.ma.masked_invalid(error_grid.T),
+            cmap="YlOrRd",
+            vmin=0.0,
+            vmax=20.0,
+            shading="flat",
+            linewidth=0.20,
+            edgecolors="#fbfaf6",
+        )
+        axis.plot(
+            x_centers,
+            boundary,
+            color="#17324d",
+            linewidth=1.2,
+            linestyle=(0, (4, 3)),
+        )
+        for kp_index, kpar_index in zip(
+            *np.nonzero(np.isfinite(error_grid)), strict=True
+        ):
+            value = float(error_grid[kp_index, kpar_index])
+            axis.text(
+                x_centers[kp_index],
+                y_centers[kpar_index],
+                f"{value:.1f}",
+                ha="center",
+                va="center",
+                fontsize=4.7,
+                color="#fbfaf6" if value >= 10.5 else "#17324d",
+            )
+        for kp_index, kpar_index in zip(
+            *np.nonzero(added_grid), strict=True
+        ):
+            axis.add_patch(
+                Rectangle(
+                    (kperp_edges[kp_index], kpar_edges[kpar_index]),
+                    kperp_edges[kp_index + 1] - kperp_edges[kp_index],
+                    kpar_edges[kpar_index + 1] - kpar_edges[kpar_index],
+                    fill=False,
+                    edgecolor="#147d7e",
+                    linewidth=2.0,
+                    zorder=5,
+                )
+            )
+        display = _display_label(label).replace("\n", " ")
+        axis.set_title(
+            f"{display}: {finite.size} cells, worst {np.max(finite):.2f}%"
+        )
+        axis.set(
+            xlabel=r"$k_\perp\ [{\rm Mpc}^{-1}]$",
+            ylabel=r"$|k_\parallel|\ [{\rm Mpc}^{-1}]$",
+            xlim=(float(kperp_edges[0]), float(kperp_edges[-1])),
+            ylim=(float(kpar_edges[0]), float(kpar_edges[-1])),
+        )
+        axis.set_xticks(x_centers[::4])
+        axis.set_xticklabels(
+            [f"{value:.2f}" for value in x_centers[::4]]
+        )
+        axis.set_yticks(y_centers)
+        axis.set_yticklabels([f"{value:.3f}" for value in y_centers])
+    for axis in axes[len(labels) :]:
+        axis.set_axis_off()
+    if image is None:
+        raise ValueError("At least one filter result is required")
+    colorbar = fig.colorbar(image, ax=axes[: len(labels)], shrink=0.92)
+    colorbar.set_label("worst absolute FG+EoR error over 16 phases [%]")
+    axes[0].legend(
+        handles=[
+            Patch(
+                facecolor="#ece8df",
+                edgecolor="none",
+                label="Outside geometric EoR window",
+            ),
+            Patch(
+                facecolor="#dce9e6",
+                edgecolor="none",
+                label="EoR-window cell outside broad support",
+            ),
+            Rectangle(
+                (0, 0),
+                1,
+                1,
+                fill=False,
+                edgecolor="#147d7e",
+                linewidth=2.0,
+                label="Added versus narrow-band support",
+            ),
+            plt.Line2D(
+                [0],
+                [0],
+                color="#17324d",
+                linewidth=1.2,
+                linestyle=(0, (4, 3)),
+                label="Frozen wedge/floor boundary",
+            ),
+        ],
+        loc="lower right",
+        frameon=True,
+        facecolor="#fbfaf6",
+        edgecolor="#d7d2c8",
+        fontsize=7.8,
+    )
+    fig.suptitle(
+        "Wide-band DPSS pre-filtering: response-selected PS2D stress test\n"
+        "Cell labels give the worst error across 16 fixed-FG, independent-EoR phases",
+        fontsize=12,
+        fontweight="bold",
+    )
+    fig.savefig(path, dpi=240)
+    plt.close(fig)
+
+
 def main() -> None:
     args = _arguments()
     loaded = [_load_result(specification) for specification in args.result]
@@ -397,9 +575,21 @@ def main() -> None:
     if args.baseline_label not in labels:
         raise ValueError("baseline label is not present in --result")
     contracts = {item[2]["analysis_contract_sha256"] for item in loaded}
+    frequency_contracts = {
+        item[2].get(
+            "frequency_contract_sha256",
+            item[2]["analysis_contract_sha256"],
+        )
+        for item in loaded
+    }
     banks = {item[2]["visibility_bank_sha256"] for item in loaded}
     skies = {item[2]["sky_cache_sha256"] for item in loaded}
-    if len(contracts) != 1 or len(banks) != 1 or len(skies) != 1:
+    if (
+        len(contracts) != 1
+        or len(frequency_contracts) != 1
+        or len(banks) != 1
+        or len(skies) != 1
+    ):
         raise ValueError("Compared results do not share one exact operator contract")
 
     config = json.loads(args.config.read_text(encoding="utf-8"))
@@ -409,6 +599,9 @@ def main() -> None:
     )
     kpar_values = np.asarray(
         resolved.contract.window_layout.kpar_values, dtype=np.float64
+    )
+    kpar_edges = np.asarray(
+        resolved.contract.window_layout.kpar_edges, dtype=np.float64
     )
     geometric = resolved.window_spec.mask(
         kperp_edges[1:, None], kpar_values[None, :]
@@ -425,6 +618,16 @@ def main() -> None:
     baseline_products = _method_products(
         arrays=baseline_arrays, geometric=geometric
     )
+    baseline_broad = (
+        (baseline_products["relative_response"] >= 0.1)
+        & (baseline_products["geometric_fraction"] >= 0.95)
+    )
+    baseline_broad_ids = set(
+        int(value)
+        for value in np.asarray(
+            baseline_arrays["output_band_ids"], dtype=np.int64
+        )[baseline_broad]
+    )
     baseline_id_to_position = {
         int(band_id): int(position)
         for position, band_id in enumerate(baseline_arrays["output_band_ids"])
@@ -438,6 +641,7 @@ def main() -> None:
 
     summary_rows: list[dict[str, Any]] = []
     cell_rows: list[dict[str, Any]] = []
+    broad_cell_rows: list[dict[str, Any]] = []
     total_error_rows: list[np.ndarray] = []
     for label, directory, metadata, arrays in loaded:
         products = _method_products(arrays=arrays, geometric=geometric)
@@ -501,14 +705,15 @@ def main() -> None:
                 )
                 for realization in total_mixtures
             ]
-            eor_mixtures = np.divide(
+            all_eor_mixtures = np.divide(
                 arrays["heldout_mixture_q"],
                 products["row_sum"][None, :],
                 out=np.full_like(
                     arrays["heldout_mixture_q"], np.nan, dtype=np.float64
                 ),
                 where=products["row_sum"][None, :] > 0.0,
-            )[:, common_positions]
+            )
+            eor_mixtures = all_eor_mixtures[:, common_positions]
             heldout_foreground_effect_l2 = [
                 _relative_l2(
                     total_realization,
@@ -560,6 +765,12 @@ def main() -> None:
                 for realization in all_total_mixtures
             ]
         else:
+            all_total_mixtures = np.empty(
+                (0, output_ids.size), dtype=np.float64
+            )
+            all_eor_mixtures = np.empty(
+                (0, output_ids.size), dtype=np.float64
+            )
             heldout_total_l2 = []
             heldout_total_maximum_error = []
             heldout_foreground_effect_l2 = []
@@ -590,6 +801,13 @@ def main() -> None:
                 else str(directory)
             ),
             "foreground_filter": filter_name,
+            "filter_bandwidth_scope": qbeta_meta.get(
+                "filter_bandwidth_scope", "analysis_subband"
+            ),
+            "input_frequency_count": qbeta_meta.get("input_frequency_count"),
+            "analysis_frequency_count": qbeta_meta.get(
+                "analysis_frequency_count"
+            ),
             "effective_suppression": effective_suppression,
             "requested_suppression_strength": qbeta_meta.get(
                 "suppression_strength"
@@ -607,6 +825,23 @@ def main() -> None:
             "supported_output_band_count": int(output_ids.size),
             "native_selected_window_count": int(native_positions.size),
             "broad_geometric_candidate_count": int(np.count_nonzero(broad)),
+            "broad_added_vs_baseline_count": int(
+                np.count_nonzero(
+                    [
+                        int(output_ids[position]) not in baseline_broad_ids
+                        for position in np.flatnonzero(broad)
+                    ]
+                )
+            ),
+            "broad_removed_vs_baseline_count": int(
+                len(
+                    baseline_broad_ids
+                    - {
+                        int(output_ids[position])
+                        for position in np.flatnonzero(broad)
+                    }
+                )
+            ),
             "broad_candidates_pure_passing_20pct_count": int(
                 np.count_nonzero(broad & (broad_pure_error < 0.2))
             ),
@@ -716,16 +951,97 @@ def main() -> None:
                     ),
                 }
             )
+        for position in np.flatnonzero(broad):
+            band_id = int(output_ids[position])
+            kp_index, kpar_index = divmod(band_id, geometric.shape[1])
+            target_value = float(products["target"][position])
+            denominator = max(abs(target_value), 1e-300)
+            if all_total_mixtures.shape[0]:
+                heldout_total_errors = np.abs(
+                    all_total_mixtures[:, position] - target_value
+                ) / denominator
+                heldout_foreground_effect = np.abs(
+                    all_total_mixtures[:, position]
+                    - all_eor_mixtures[:, position]
+                ) / denominator
+                worst_heldout_total = float(np.max(heldout_total_errors))
+                worst_heldout_foreground = float(
+                    np.max(heldout_foreground_effect)
+                )
+                passing_phase_count = int(
+                    np.count_nonzero(heldout_total_errors < 0.2)
+                )
+            else:
+                worst_heldout_total = math.nan
+                worst_heldout_foreground = math.nan
+                passing_phase_count = 0
+            broad_cell_rows.append(
+                {
+                    "label": label,
+                    "output_band_id": band_id,
+                    "kperp_index": kp_index,
+                    "kpar_index": kpar_index,
+                    "kperp_center_mpc_inv": float(
+                        0.5
+                        * (
+                            kperp_edges[kp_index]
+                            + kperp_edges[kp_index + 1]
+                        )
+                    ),
+                    "kpar_mpc_inv": float(kpar_values[kpar_index]),
+                    "in_baseline_broad_support": int(
+                        band_id in baseline_broad_ids
+                    ),
+                    "added_vs_baseline_broad_support": int(
+                        band_id not in baseline_broad_ids
+                    ),
+                    "target_windowed_power": target_value,
+                    "bank_pure_signed_error_percent": float(
+                        100.0
+                        * (products["pure"][position] - target_value)
+                        / denominator
+                    ),
+                    "bank_total_signed_error_percent": float(
+                        100.0
+                        * (products["total"][position] - target_value)
+                        / denominator
+                    ),
+                    "foreground_auto_over_target": float(
+                        products["foreground"][position] / denominator
+                    ),
+                    "heldout_phase_count": int(
+                        all_total_mixtures.shape[0]
+                    ),
+                    "heldout_passing_20pct_phase_count": passing_phase_count,
+                    "heldout_worst_total_error_percent": float(
+                        100.0 * worst_heldout_total
+                    ),
+                    "heldout_worst_foreground_effect_percent": float(
+                        100.0 * worst_heldout_foreground
+                    ),
+                    "geometric_window_response_fraction": float(
+                        products["geometric_fraction"][position]
+                    ),
+                    "relative_response": float(
+                        products["relative_response"][position]
+                    ),
+                    "window_effective_width": float(
+                        products["effective_width"][position]
+                    ),
+                }
+            )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": "visibility_qbeta_filter_ablation",
         "schema_version": 1,
         "analysis_contract_sha256": next(iter(contracts)),
+        "frequency_contract_sha256": next(iter(frequency_contracts)),
         "visibility_bank_sha256": next(iter(banks)),
         "sky_cache_sha256": next(iter(skies)),
         "baseline_label": args.baseline_label,
         "common_baseline_selected_cell_count": int(baseline_ids.size),
+        "baseline_broad_candidate_count": int(len(baseline_broad_ids)),
         "rank_matched_subspace_diagnostic": (
             _rank_matched_subspace_diagnostic(
                 config=config,
@@ -733,6 +1049,8 @@ def main() -> None:
                 kperp_edges=kperp_edges,
                 selected_kperp_indices=selected_kperp_indices,
             )
+            if any("rankmatched" in label for label in labels)
+            else None
         ),
         "methods": summary_rows,
         "notes": [
@@ -766,6 +1084,16 @@ def main() -> None:
         )
         writer.writeheader()
         writer.writerows(cell_rows)
+    with (args.output_dir / "broad_cell_errors.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=list(broad_cell_rows[0]),
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        writer.writerows(broad_cell_rows)
     figure_path = (
         args.figure
         if args.figure is not None
@@ -777,6 +1105,27 @@ def main() -> None:
         labels=labels,
         rows=summary_rows,
         total_errors=np.stack(total_error_rows),
+    )
+    grid_figure_path = (
+        args.grid_figure
+        if args.grid_figure is not None
+        else args.output_dir / "broad_grid.png"
+    )
+    grid_figure_path.parent.mkdir(parents=True, exist_ok=True)
+    boundary = np.maximum(
+        float(resolved.window_spec.kpar_min),
+        float(resolved.window_spec.wedge_slope)
+        * (0.5 * (kperp_edges[:-1] + kperp_edges[1:]))
+        + float(resolved.window_spec.wedge_intercept),
+    )
+    _plot_broad_grid(
+        path=grid_figure_path,
+        labels=labels,
+        rows=broad_cell_rows,
+        kperp_edges=kperp_edges,
+        kpar_edges=kpar_edges,
+        geometric=geometric,
+        boundary=boundary,
     )
     print(json.dumps(payload, indent=2, sort_keys=True))
 

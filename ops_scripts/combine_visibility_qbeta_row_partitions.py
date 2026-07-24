@@ -315,6 +315,26 @@ def main(argv: Iterable[str] | None = None) -> None:
         "output_band_ids",
         "support",
     )
+    frequency_array_names = (
+        "input_frequencies_mhz",
+        "analysis_frequency_indices",
+        "analysis_frequencies_mhz",
+    )
+    has_frequency_arrays = all(
+        all(name in archive for name in frequency_array_names)
+        for archive in archives
+    )
+    if has_frequency_arrays:
+        invariant_arrays += frequency_array_names
+    source_geometry_names = (
+        "source_band_kpar_mpc_inv",
+        "source_band_in_geometric_window",
+    )
+    if all(
+        all(name in archive for name in source_geometry_names)
+        for archive in archives
+    ):
+        invariant_arrays += source_geometry_names
     if all("foreground_ranks" in archive for archive in archives):
         invariant_arrays += ("foreground_ranks",)
     if all("selected_row_kperp_indices" in archive for archive in archives):
@@ -322,10 +342,11 @@ def main(argv: Iterable[str] | None = None) -> None:
     for meta, archive in zip(metadata[1:], archives[1:]):
         for key in (
             "analysis_contract_sha256",
+            "frequency_contract_sha256",
             "visibility_bank_sha256",
             "sky_cache_sha256",
         ):
-            if meta[key] != reference_meta[key]:
+            if meta.get(key) != reference_meta.get(key):
                 raise ValueError(f"Partition metadata differ in {key}")
         for key in invariant_arrays:
             if not np.array_equal(archive[key], reference[key]):
@@ -341,6 +362,10 @@ def main(argv: Iterable[str] | None = None) -> None:
             "polynomial_degree",
             "dpss_eigenvalue_threshold",
             "spectral_taper",
+            "input_frequency_count",
+            "analysis_frequency_count",
+            "analysis_frequency_indices",
+            "filter_bandwidth_scope",
         ):
             if meta["settings"].get(key) != reference_meta["settings"].get(key):
                 raise ValueError(f"Partition settings differ in {key}")
@@ -545,6 +570,9 @@ def main(argv: Iterable[str] | None = None) -> None:
         ],
         "total_windowed_power": total_windowed["estimated_windowed_power"],
     }
+    if has_frequency_arrays:
+        for name in frequency_array_names:
+            products[name] = reference[name]
     if (
         heldout_total_mixture_q is not None
         and mixture_total_windowed is not None
@@ -557,6 +585,10 @@ def main(argv: Iterable[str] | None = None) -> None:
         "schema": "visibility_qbeta_row_partition_combination",
         "schema_version": 1,
         "analysis_contract_sha256": reference_meta["analysis_contract_sha256"],
+        "frequency_contract_sha256": reference_meta.get(
+            "frequency_contract_sha256",
+            reference_meta["analysis_contract_sha256"],
+        ),
         "visibility_bank_sha256": reference_meta["visibility_bank_sha256"],
         "sky_cache_sha256": reference_meta["sky_cache_sha256"],
         "input_directories": [str(path) for path in args.input_dir],
@@ -572,6 +604,33 @@ def main(argv: Iterable[str] | None = None) -> None:
         "operator_closure": _operator_closure(predicted_vis, target_vis),
         "qbeta": {
             "source_scope": source_scope,
+            "input_frequency_count": reference_meta["settings"].get(
+                "input_frequency_count",
+                (
+                    int(reference["input_frequencies_mhz"].size)
+                    if has_frequency_arrays
+                    else None
+                ),
+            ),
+            "analysis_frequency_count": reference_meta["settings"].get(
+                "analysis_frequency_count",
+                (
+                    int(reference["analysis_frequencies_mhz"].size)
+                    if has_frequency_arrays
+                    else None
+                ),
+            ),
+            "analysis_frequency_indices": reference_meta["settings"].get(
+                "analysis_frequency_indices",
+                (
+                    reference["analysis_frequency_indices"].tolist()
+                    if has_frequency_arrays
+                    else []
+                ),
+            ),
+            "filter_bandwidth_scope": reference_meta["settings"].get(
+                "filter_bandwidth_scope", "analysis_subband"
+            ),
             "foreground_filter": reference_meta["settings"].get(
                 "foreground_filter", "dpss_hard"
             ),
@@ -680,12 +739,15 @@ def main(argv: Iterable[str] | None = None) -> None:
                 else "rows are concentrated in the predeclared reporting kperp range"
             ),
             (
-                "40-band target-subspace Q_beta calibration only"
+                "target-subspace Q_beta calibration only"
                 if source_scope == "reporting"
                 else (
-                    "all 512 in-range sky bands are included in Q_beta"
+                    f"all {source_count} in-range sky bands are included in Q_beta"
                     if source_scope == "all_in_range"
-                    else "all 544 in-range sky bands including radial Nyquist are included in Q_beta"
+                    else (
+                        f"all {source_count} in-range sky bands including "
+                        "radial Nyquist are included in Q_beta"
+                    )
                 )
             ),
             (
