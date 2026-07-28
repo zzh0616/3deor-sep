@@ -1,0 +1,102 @@
+{
+  "schema": "visibility_qbeta_aperture_pb_128to64_formal_status",
+  "schema_version": 1,
+  "snapshot_time": "2026-07-28T13:52:53+08:00",
+  "wide": {
+    "status": "complete",
+    "partition_count": 20,
+    "rows_per_kperp_bin": 240,
+    "selected_row_count": 7440,
+    "operator_closure_relative_l2": 8.941087489852669e-07,
+    "selected_visibility_count": 952320,
+    "response_shape": [
+      810,
+      2080
+    ],
+    "response_rank": 810,
+    "response_retained_condition_number": 540.7955474750033,
+    "calibration_validation_response_relative_l2": 0.08212083091301331,
+    "quad_kperp_response": {
+      "selected_group_count": 147,
+      "strict_group_count": 130,
+      "strict_fraction_of_selected": 0.8843537414965986,
+      "selected_window_fraction_minimum": 0.9583981587853574,
+      "heldout_total_integrated_ratio_minimum": 0.9860212371672773,
+      "heldout_total_integrated_ratio_maximum": 1.0238727939025376,
+      "heldout_total_worst_relative_l2": 0.0772945231287738,
+      "foreground_effect_maximum_fraction": 0.00027397627777050624,
+      "response_window_numerical_rank": 147,
+      "response_window_participation_rank": 46.37353542125044,
+      "bank_total_integrated_power_ratio": 0.8539604527215936,
+      "bank_total_relative_l2": 0.15487975101531087,
+      "bank_total_maximum_absolute_error_fraction": 0.31817943666771203,
+      "bank_total_median_absolute_error_fraction": 0.11019415839642367,
+      "bank_total_p90_absolute_error_fraction": 0.21391280430658552
+    }
+  },
+  "screen_to_formal_wide": {
+    "calibration_validation_relative_l2_reduction_fraction": 0.4335264172447255,
+    "heldout_worst_relative_l2_reduction_fraction": 0.19826725797160316,
+    "foreground_effect_reduction_factor": 3.0923502139194126,
+    "screen_bank_total_integrated_power_ratio": 0.8571971137284027,
+    "formal_bank_total_integrated_power_ratio": 0.8539604527215936,
+    "screen_bank_total_relative_l2": 0.14980762392424918,
+    "formal_bank_total_relative_l2": 0.15487975101531087
+  },
+  "narrow": {
+    "status": "complete",
+    "completed_at": "2026-07-28T13:35:06+08:00",
+    "partition_count": 20,
+    "rows_per_kperp_bin": 240,
+    "selected_row_count": 7440,
+    "operator_closure_relative_l2": 8.941087489852669e-07,
+    "selected_visibility_count": 952320,
+    "response_shape": [
+      810,
+      2080
+    ],
+    "response_rank": 790,
+    "response_retained_condition_number": 7906.8692031817545,
+    "calibration_validation_response_relative_l2": 0.08192454293088297,
+    "quad_kperp_response": {
+      "selected_group_count": 159,
+      "strict_group_count": 142,
+      "strict_fraction_of_selected": 0.8930817610062893,
+      "selected_window_fraction_minimum": 0.9523448250869135,
+      "heldout_total_integrated_ratio_minimum": 0.979730293292708,
+      "heldout_total_integrated_ratio_maximum": 1.0225265258981011,
+      "heldout_total_worst_relative_l2": 0.058493650634581625,
+      "foreground_effect_maximum_fraction": 0.000879136186921645,
+      "response_window_numerical_rank": 159,
+      "response_window_participation_rank": 44.644384405919,
+      "bank_total_integrated_power_ratio": 0.8467380875921031,
+      "bank_total_relative_l2": 0.17728215949965453,
+      "bank_total_maximum_absolute_error_fraction": 0.3181835185941948,
+      "bank_total_median_absolute_error_fraction": 0.10991116561395452,
+      "bank_total_p90_absolute_error_fraction": 0.20558804419111074
+    },
+    "errors_detected": false
+  },
+  "paired_comparison": {
+    "common_quad_kperp_group_count": 147,
+    "narrow_only_quad_kperp_group_count": 12,
+    "wide_condition_number_improvement_factor": 14.620810470979748,
+    "common_support_bank_total_relative_l2": {
+      "wide": 0.15487975101531087,
+      "narrow": 0.17746653708984492
+    },
+    "common_support_heldout_total_worst_relative_l2": {
+      "wide": 0.0772945231287738,
+      "narrow": 0.05853513122520189
+    },
+    "common_support_foreground_effect_maximum_fraction": {
+      "wide": 0.00027397627777050624,
+      "narrow": 0.0007948372704568677
+    }
+  },
+  "interpretation": {
+    "engineering": "The formal pair completed normally. Full-input filtering improves response rank and conditioning, foreground suppression, and physical-bank relative L2 on the common selected support.",
+    "science": "The approximately 14.6 percent integrated under-recovery and 15.5 percent relative L2 error do not converge away with more sampled rows, so they should be treated as systematic estimator/window bias rather than finite-row response noise.",
+    "paired_gate": "The guard band is a useful conditioning and foreground-control improvement, but it worsens the aggregate held-out worst L2, rejects 12 high-kperp narrow-selected groups on response-locality grounds, and does not solve the absolute bias."
+  }
+}

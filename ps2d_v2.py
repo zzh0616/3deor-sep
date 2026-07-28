@@ -524,6 +524,7 @@ def build_mode_first_analysis_contract(
     demean_mode: str,
     radial_taper: str,
     spatial_taper: str,
+    window_energy_override: float | None = None,
 ) -> ModeFirstAnalysisContract:
     full_layout = build_cylindrical_mode_layout(
         shape,
@@ -548,6 +549,18 @@ def build_mode_first_analysis_contract(
         radial_taper=radial_taper,
         spatial_taper=spatial_taper,
     )
+    if window_energy_override is not None:
+        frozen_energy = float(window_energy_override)
+        if (
+            not math.isfinite(frozen_energy)
+            or frozen_energy <= 0.0
+            or abs(frozen_energy - window_energy) / frozen_energy > 1e-12
+        ):
+            raise ValueError(
+                "Frozen analysis-window energy differs from the taper"
+            )
+        # NumPy reduction order changed at machine precision between releases.
+        window_energy = frozen_energy
     spacings = np.asarray([dx_mpc, dy_mpc, dpar_mpc], dtype=np.float64)
     if not np.all(np.isfinite(spacings)) or np.any(spacings <= 0.0):
         raise ValueError("Physical spacings must be finite and positive")

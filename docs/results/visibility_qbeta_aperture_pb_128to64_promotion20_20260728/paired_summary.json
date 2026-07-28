@@ -1,0 +1,105 @@
+{
+  "schema": "visibility_qbeta_aperture_pb_128to64_formal_paired_summary",
+  "schema_version": 1,
+  "completed_at": "2026-07-28T13:35:06+08:00",
+  "shared_contract": {
+    "partition_count": 20,
+    "rows_per_kperp_bin": 240,
+    "selected_row_count": 7440,
+    "selected_visibility_count": 952320,
+    "operator_closure_relative_l2": 8.941087489852669e-07,
+    "response_shape": [
+      810,
+      2080
+    ],
+    "maximum_kperp_index_exclusive": 31
+  },
+  "wide": {
+    "filter_bandwidth_scope": "full_band",
+    "response_rank": 810,
+    "response_retained_condition_number": 540.7955474750033,
+    "calibration_validation_response_relative_l2": 0.08212083091301331,
+    "quad_kperp_response": {
+      "selected_group_count": 147,
+      "strict_group_count": 130,
+      "strict_fraction_of_selected": 0.8843537414965986,
+      "heldout_total_worst_relative_l2": 0.0772945231287738,
+      "foreground_effect_maximum_fraction": 0.00027397627777050624,
+      "bank_total_integrated_power_ratio": 0.8539604527215936,
+      "bank_total_relative_l2": 0.15487975101531087
+    }
+  },
+  "narrow": {
+    "filter_bandwidth_scope": "analysis_subband",
+    "response_rank": 790,
+    "response_retained_condition_number": 7906.8692031817545,
+    "calibration_validation_response_relative_l2": 0.08192454293088297,
+    "quad_kperp_response": {
+      "selected_group_count": 159,
+      "strict_group_count": 142,
+      "strict_fraction_of_selected": 0.8930817610062893,
+      "heldout_total_worst_relative_l2": 0.058493650634581625,
+      "foreground_effect_maximum_fraction": 0.000879136186921645,
+      "bank_total_integrated_power_ratio": 0.8467380875921031,
+      "bank_total_relative_l2": 0.17728215949965453
+    }
+  },
+  "common_quad_kperp_response_support": {
+    "group_count": 147,
+    "wide_only_group_count": 0,
+    "narrow_only_group_count": 12,
+    "wide": {
+      "strict_group_count": 130,
+      "bank_total_integrated_power_ratio": 0.8539604527215936,
+      "bank_total_relative_l2": 0.15487975101531087,
+      "bank_total_median_absolute_error_fraction": 0.11019415839642367,
+      "bank_total_p90_absolute_error_fraction": 0.21391280430658552,
+      "bank_total_maximum_absolute_error_fraction": 0.31817943666771203,
+      "heldout_total_worst_relative_l2": 0.0772945231287738,
+      "heldout_total_integrated_ratio_minimum": 0.9860212371672773,
+      "heldout_total_integrated_ratio_maximum": 1.0238727939025376,
+      "foreground_effect_maximum_fraction": 0.00027397627777050624
+    },
+    "narrow": {
+      "strict_group_count": 130,
+      "bank_total_integrated_power_ratio": 0.8449443937923666,
+      "bank_total_relative_l2": 0.17746653708984492,
+      "bank_total_median_absolute_error_fraction": 0.11058070104331068,
+      "bank_total_p90_absolute_error_fraction": 0.20864157810357906,
+      "bank_total_maximum_absolute_error_fraction": 0.3181835185941948,
+      "heldout_total_worst_relative_l2": 0.05853513122520189,
+      "heldout_total_integrated_ratio_minimum": 0.9797837005735568,
+      "heldout_total_integrated_ratio_maximum": 1.0235341313606234,
+      "foreground_effect_maximum_fraction": 0.0007948372704568677
+    },
+    "wide_relative_to_narrow": {
+      "condition_number_improvement_factor": 14.620810470979748,
+      "bank_total_relative_l2_reduction_fraction": 0.1272734930478706,
+      "foreground_effect_reduction_factor": 2.901117121981838,
+      "heldout_worst_relative_l2_increase_fraction": 0.3204809062680496,
+      "integrated_power_ratio_closer_to_unity_percentage_points": 0.9016058929226967
+    }
+  },
+  "selection_tradeoff": {
+    "narrow_only_quad_kperp_group_indices": [
+      87,
+      113,
+      114,
+      115,
+      139,
+      140,
+      141,
+      142,
+      164,
+      165,
+      166,
+      167
+    ],
+    "reason": "The 12 narrow-only groups fail the frozen 0.95 response-locality cut in the wide response, mainly at higher transverse bins; they do not fail the minimum input-response cut."
+  },
+  "interpretation": {
+    "supported": "Full-input filtering materially improves response rank and conditioning, foreground suppression, and physical-bank relative L2 on the common response-selected support.",
+    "not_supported": "It does not improve every validation metric, does not retain every narrow-selected window, and does not remove the approximately 15 percent absolute under-recovery.",
+    "decision": "Treat the guard band as a useful conditioning and foreground-control improvement, not as a complete or universally superior science recovery."
+  }
+}

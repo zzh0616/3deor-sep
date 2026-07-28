@@ -47,6 +47,17 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-uv-lambda", type=float, default=30.0)
     parser.add_argument("--max-uv-lambda", type=float, default=2500.0)
     parser.add_argument("--reference-frequency-mhz", type=float, default=119.45)
+    parser.add_argument(
+        "--station-type",
+        choices=("isotropic", "gaussian", "aperture_array"),
+        default="isotropic",
+    )
+    parser.add_argument("--gaussian-fwhm-deg", type=float, default=5.0)
+    parser.add_argument(
+        "--gaussian-reference-frequency-mhz",
+        type=float,
+        default=119.4,
+    )
     parser.add_argument("--chunk-rows", type=int, default=262144)
     parser.add_argument("--sample-kperp-bins", type=int, default=16)
     parser.add_argument("--sample-rows-per-bin", type=int, default=2048)
@@ -84,7 +95,27 @@ def _write_oskar_config(
     ms: Path,
     frequency_mhz: float,
     telescope_dir: Path,
+    station_type: str,
+    gaussian_fwhm_deg: float,
+    gaussian_reference_frequency_mhz: float,
 ) -> None:
+    if str(station_type) == "isotropic":
+        station_settings = "station_type=Isotropic beam\n"
+    elif str(station_type) == "gaussian":
+        station_settings = (
+            "station_type=Gaussian beam\n"
+            "gaussian_beam/elliptical=false\n"
+            "gaussian_beam/ref_freq_hz="
+            f"{float(gaussian_reference_frequency_mhz) * 1e6:.1f}\n"
+            f"gaussian_beam/fwhm_deg={float(gaussian_fwhm_deg):.12g}\n"
+        )
+    elif str(station_type) == "aperture_array":
+        station_settings = (
+            "station_type=Aperture array\n"
+            "pol_mode=Full\n"
+        )
+    else:
+        raise ValueError(f"Unsupported station type: {station_type}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         f"""[General]
@@ -110,14 +141,16 @@ num_time_steps=32
 
 [telescope]
 input_directory={telescope_dir}
-station_type=Isotropic beam
+normalise_beams_at_phase_centre=true
 allow_station_beam_duplication=true
+{station_settings}
 
 [interferometer]
 channel_bandwidth_hz=100000.0
 time_average_sec=10.0
 max_time_samples_per_block=4
 noise/enable=false
+force_polarised_ms=true
 ms_filename={ms}
 """,
         encoding="utf-8",
@@ -251,6 +284,8 @@ def _select_row_sample(
     times: np.ndarray,
     fg: np.ndarray,
     eor: np.ndarray,
+    antenna1: np.ndarray,
+    antenna2: np.ndarray,
     reference_frequency_mhz: float,
     min_uv_lambda: float,
     max_uv_lambda: float,
@@ -286,6 +321,8 @@ def _select_row_sample(
         "sample_split": np.asarray(split, dtype=np.int8),
         "sample_fg": np.asarray(fg[selected], dtype=np.complex64),
         "sample_eor": np.asarray(eor[selected], dtype=np.complex64),
+        "sample_antenna1": np.asarray(antenna1[selected], dtype=np.int32),
+        "sample_antenna2": np.asarray(antenna2[selected], dtype=np.int32),
     }
 
 
@@ -324,6 +361,8 @@ def grid_ms_pair(
         "times": [],
         "fg": [],
         "eor": [],
+        "antenna1": [],
+        "antenna2": [],
     }
     with table(str(fg_ms), readonly=True, ack=False) as fg_table, table(
         str(eor_ms), readonly=True, ack=False
@@ -357,6 +396,23 @@ def grid_ms_pair(
             )
             if not np.array_equal(time_fg, time_eor):
                 raise ValueError("Foreground and EoR time rows differ")
+            antenna1_fg = np.asarray(
+                fg_table.getcol("ANTENNA1", first, count), dtype=np.int32
+            )
+            antenna2_fg = np.asarray(
+                fg_table.getcol("ANTENNA2", first, count), dtype=np.int32
+            )
+            antenna1_eor = np.asarray(
+                eor_table.getcol("ANTENNA1", first, count), dtype=np.int32
+            )
+            antenna2_eor = np.asarray(
+                eor_table.getcol("ANTENNA2", first, count), dtype=np.int32
+            )
+            if not (
+                np.array_equal(antenna1_fg, antenna1_eor)
+                and np.array_equal(antenna2_fg, antenna2_eor)
+            ):
+                raise ValueError("Foreground and EoR antenna rows differ")
             flag_rows = np.asarray(
                 fg_table.getcol("FLAG_ROW", first, count), dtype=bool
             ) | np.asarray(eor_table.getcol("FLAG_ROW", first, count), dtype=bool)
@@ -433,6 +489,8 @@ def grid_ms_pair(
                 candidates["times"].append(time_fg[candidate])
                 candidates["fg"].append(fg[candidate])
                 candidates["eor"].append(eor[candidate])
+                candidates["antenna1"].append(antenna1_fg[candidate])
+                candidates["antenna2"].append(antenna2_fg[candidate])
 
     fg_grid = np.zeros_like(fg_sum)
     eor_grid = np.zeros_like(eor_sum)
@@ -445,6 +503,8 @@ def grid_ms_pair(
         times=np.concatenate(candidates["times"]),
         fg=np.concatenate(candidates["fg"]),
         eor=np.concatenate(candidates["eor"]),
+        antenna1=np.concatenate(candidates["antenna1"]),
+        antenna2=np.concatenate(candidates["antenna2"]),
         reference_frequency_mhz=reference_frequency_mhz,
         min_uv_lambda=min_uv_lambda,
         max_uv_lambda=max_uv_lambda,
@@ -502,6 +562,11 @@ def _simulate_shard(args: argparse.Namespace) -> None:
                 ms=ms,
                 frequency_mhz=frequency,
                 telescope_dir=Path(args.telescope_dir),
+                station_type=str(args.station_type),
+                gaussian_fwhm_deg=float(args.gaussian_fwhm_deg),
+                gaussian_reference_frequency_mhz=float(
+                    args.gaussian_reference_frequency_mhz
+                ),
             )
             _run_oskar(str(args.oskar), config, logs / f"oskar_{label}_{tag}.log")
 
@@ -517,6 +582,14 @@ def _simulate_shard(args: argparse.Namespace) -> None:
         sample_rows_per_bin=int(args.sample_rows_per_bin),
     )
     payload["elapsed_seconds"] = np.asarray(time.monotonic() - started, dtype=np.float64)
+    payload["station_type"] = np.asarray(str(args.station_type))
+    payload["gaussian_fwhm_deg"] = np.asarray(
+        float(args.gaussian_fwhm_deg), dtype=np.float64
+    )
+    payload["gaussian_reference_frequency_hz"] = np.asarray(
+        float(args.gaussian_reference_frequency_mhz) * 1e6,
+        dtype=np.float64,
+    )
     _atomic_npz(shard_path, payload)
     if args.delete_ms:
         for ms in ms_paths.values():
@@ -538,6 +611,15 @@ def _combine(args: argparse.Namespace) -> None:
             shards.append({name: np.asarray(loaded[name]) for name in loaded.files})
         shard_paths.append(path)
     reference = shards[0]
+    station_type = str(reference.get("station_type", np.asarray("isotropic")).item())
+    gaussian_fwhm_deg = float(
+        reference.get("gaussian_fwhm_deg", np.asarray(np.nan)).item()
+    )
+    gaussian_reference_frequency_hz = float(
+        reference.get(
+            "gaussian_reference_frequency_hz", np.asarray(np.nan)
+        ).item()
+    )
     for shard in shards[1:]:
         for name in (
             "u_centers_lambda",
@@ -549,6 +631,28 @@ def _combine(args: argparse.Namespace) -> None:
         ):
             if not np.array_equal(shard[name], reference[name]):
                 raise ValueError(f"Visibility shards disagree in {name}")
+        if str(shard.get("station_type", np.asarray("isotropic")).item()) != station_type:
+            raise ValueError("Visibility shards disagree in station_type")
+        if station_type == "gaussian" and not (
+            np.array_equal(
+                shard["gaussian_fwhm_deg"],
+                reference["gaussian_fwhm_deg"],
+            )
+            and np.array_equal(
+                shard["gaussian_reference_frequency_hz"],
+                reference["gaussian_reference_frequency_hz"],
+            )
+        ):
+            raise ValueError("Visibility shards disagree in Gaussian beam settings")
+    optional_geometry = ("sample_antenna1", "sample_antenna2")
+    for name in optional_geometry:
+        present = [name in shard for shard in shards]
+        if any(present) and not all(present):
+            raise ValueError(f"Visibility shards inconsistently provide {name}")
+        if all(present):
+            for shard in shards[1:]:
+                if not np.array_equal(shard[name], reference[name]):
+                    raise ValueError(f"Visibility shards disagree in {name}")
     bank_payload = {
         "frequencies_hz": np.asarray(
             [float(shard["frequency_hz"].item()) for shard in shards],
@@ -567,7 +671,16 @@ def _combine(args: argparse.Namespace) -> None:
         "sample_split": reference["sample_split"],
         "sample_fg": np.stack([shard["sample_fg"] for shard in shards], axis=0),
         "sample_eor": np.stack([shard["sample_eor"] for shard in shards], axis=0),
+        "station_type": np.asarray(station_type),
     }
+    for name in optional_geometry:
+        if name in reference:
+            bank_payload[name] = reference[name]
+    if station_type == "gaussian":
+        bank_payload["gaussian_fwhm_deg"] = np.asarray(gaussian_fwhm_deg)
+        bank_payload["gaussian_reference_frequency_hz"] = np.asarray(
+            gaussian_reference_frequency_hz
+        )
     bank_path = args.out_dir / "visibility_bank.npz"
     _atomic_npz(bank_path, bank_payload)
     manifest = {
@@ -592,7 +705,7 @@ def _combine(args: argparse.Namespace) -> None:
         },
         "instrument": {
             "simulator": "OSKAR 2.12.2",
-            "station_type": "isotropic",
+            "station_type": station_type,
             "noise": False,
             "time_steps": 32,
             "observation_length_s": 320.0,
@@ -600,6 +713,12 @@ def _combine(args: argparse.Namespace) -> None:
             "time_average_s": 10.0,
         },
     }
+    if station_type == "gaussian":
+        manifest["instrument"]["gaussian_beam"] = {
+            "fwhm_deg": gaussian_fwhm_deg,
+            "reference_frequency_hz": gaussian_reference_frequency_hz,
+            "fwhm_convention": "OSKAR voltage FWHM",
+        }
     _atomic_json(args.out_dir / "manifest.json", manifest)
     print(f"wrote bank: {bank_path}", flush=True)
 

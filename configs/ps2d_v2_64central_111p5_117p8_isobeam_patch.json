@@ -1,0 +1,70 @@
+{
+  "schema": "ps2d_v2_mode_first_config",
+  "schema_version": 2,
+  "frozen_analysis_contract_sha256": "1071e791c0cabe4fb0fa33e5463887d686c2b828cf7e61121ad5d5e23db0d782",
+  "frequencies_mhz": [
+    111.5, 111.6, 111.7, 111.8, 111.9, 112.0, 112.1, 112.2,
+    112.3, 112.4, 112.5, 112.6, 112.7, 112.8, 112.9, 113.0,
+    113.1, 113.2, 113.3, 113.4, 113.5, 113.6, 113.7, 113.8,
+    113.9, 114.0, 114.1, 114.2, 114.3, 114.4, 114.5, 114.6,
+    114.7, 114.8, 114.9, 115.0, 115.1, 115.2, 115.3, 115.4,
+    115.5, 115.6, 115.7, 115.8, 115.9, 116.0, 116.1, 116.2,
+    116.3, 116.4, 116.5, 116.6, 116.7, 116.8, 116.9, 117.0,
+    117.1, 117.2, 117.3, 117.4, 117.5, 117.6, 117.7, 117.8
+  ],
+  "reference_frequency_mhz": 114.65,
+  "rest_frequency_mhz": 1420.40575,
+  "cosmology": {
+    "H0_km_s_mpc": 67.8,
+    "Om0": 0.308
+  },
+  "frozen_geometry": {
+    "radial_spacing_mpc": 1.973362602222695,
+    "transverse_distance_mpc": 9931.924735541223,
+    "spatial_spacing_mpc": 1.5408425572929902,
+    "patch_wedge_slope": 0.24645906744648213,
+    "horizon_wedge_slope": 4.390291554316547,
+    "kperp_uv_min_mpc_inv": 0.018978754293300214,
+    "kperp_uv_max_mpc_inv": 1.581562857775018
+  },
+  "frozen_analysis_window_energy": 0.051505642477422967,
+  "image_geometry": {
+    "eval_crop_size": 256,
+    "source_image_size": 512,
+    "spatial_pixel_arcsec": 32.0
+  },
+  "instrument_support": {
+    "min_uv_lambda": 30.0,
+    "max_uv_lambda": 2500.0
+  },
+  "analysis": {
+    "demean_mode": "global",
+    "radial_taper": "hann",
+    "spatial_taper": "hann",
+    "radial_nyquist_policy": "exclude",
+    "full_kperp_bins": 32,
+    "window_kperp_bins": 32
+  },
+  "estimator_partitions": {
+    "control_kpar_indices": [0, 1],
+    "guard_kpar_indices": [2]
+  },
+  "calibration_source": {
+    "transverse_support": "full_fft_square",
+    "kperp_bins": 32,
+    "radial_nyquist_policy": "include"
+  },
+  "eor_window": {
+    "profile": "finite_source_patch_corner",
+    "kpar_floor_h_mpc": 0.2,
+    "suprahorizon_buffer_h_mpc": 0.1,
+    "exclude_exact_dc": true
+  },
+  "reporting_masks": {
+    "high_kpar_fraction": 0.75,
+    "mid_kperp_fraction_range": [0.2, 0.5]
+  },
+  "legacy_reproduction": {
+    "status": "not_applicable_111p5_117p8_internal_subband"
+  }
+}

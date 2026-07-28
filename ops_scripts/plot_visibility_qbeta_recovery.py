@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -19,7 +20,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import BoundaryNorm, ListedColormap
-from matplotlib.patches import Patch
+from matplotlib.patches import Patch, Rectangle
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -56,6 +57,11 @@ def _arguments() -> argparse.Namespace:
         "--coverage-summary",
         type=Path,
         default=ROOT / "docs/results/visibility_qbeta_coverage_20260724_summary.json",
+    )
+    parser.add_argument(
+        "--cell-table",
+        type=Path,
+        default=ROOT / "docs/results/visibility_qbeta_cell_errors_20260724.csv",
     )
     parser.add_argument("--dpss-supported-band-count", type=int, default=337)
     return parser.parse_args()
@@ -329,6 +335,281 @@ def _plot_recovery(
     plt.close(fig)
 
 
+def _output_grid(
+    values: np.ndarray,
+    output_band_ids: np.ndarray,
+    shape: tuple[int, int],
+) -> np.ndarray:
+    grid = np.full(shape, np.nan, dtype=np.float64)
+    flat = grid.reshape(-1)
+    flat[np.asarray(output_band_ids, dtype=np.int64)] = np.asarray(
+        values, dtype=np.float64
+    )
+    return grid
+
+
+def _plot_full_grid_errors(
+    *,
+    output: Path,
+    kperp_edges: np.ndarray,
+    kpar_edges: np.ndarray,
+    geometric: np.ndarray,
+    selected: np.ndarray,
+    boundary: np.ndarray,
+    output_band_ids: np.ndarray,
+    pure_error_percent: np.ndarray,
+    total_error_percent: np.ndarray,
+) -> None:
+    shape = geometric.shape
+    pure_grid = _output_grid(pure_error_percent, output_band_ids, shape)
+    total_grid = _output_grid(total_error_percent, output_band_ids, shape)
+    finite_values = np.concatenate(
+        (pure_grid[np.isfinite(pure_grid)], total_grid[np.isfinite(total_grid)])
+    )
+    error_limit = max(
+        20.0,
+        5.0 * np.ceil(float(np.max(np.abs(finite_values))) / 5.0),
+    )
+    background = np.asarray(geometric, dtype=np.int8)
+    background_cmap = ListedColormap(["#ece8df", "#dce9e6"])
+    background_norm = BoundaryNorm([-0.5, 0.5, 1.5], background_cmap.N)
+    x_centers = 0.5 * (kperp_edges[:-1] + kperp_edges[1:])
+    y_centers = 0.5 * (kpar_edges[:-1] + kpar_edges[1:])
+
+    fig, axes = plt.subplots(1, 2, figsize=(19.0, 7.2), constrained_layout=True)
+    images = []
+    for ax, values, title in (
+        (
+            axes[0],
+            pure_grid,
+            r"Pure-EoR closure: $(\widehat P-WP_{\rm EoR})/WP_{\rm EoR}$",
+        ),
+        (
+            axes[1],
+            total_grid,
+            r"FG+EoR closure: $(\widehat P_{\rm total}-WP_{\rm EoR})/WP_{\rm EoR}$",
+        ),
+    ):
+        ax.pcolormesh(
+            kperp_edges,
+            kpar_edges,
+            background.T,
+            cmap=background_cmap,
+            norm=background_norm,
+            shading="flat",
+            linewidth=0.13,
+            edgecolors=(1.0, 1.0, 1.0, 0.42),
+        )
+        image = ax.pcolormesh(
+            kperp_edges,
+            kpar_edges,
+            np.ma.masked_invalid(values.T),
+            cmap="RdBu_r",
+            vmin=-error_limit,
+            vmax=error_limit,
+            shading="flat",
+            linewidth=0.22,
+            edgecolors="#fbfaf6",
+        )
+        images.append(image)
+        ax.plot(
+            x_centers,
+            boundary,
+            color=INK,
+            linewidth=1.25,
+            linestyle=(0, (4, 3)),
+        )
+        for kp_index, kpar_index in zip(*np.nonzero(selected), strict=True):
+            ax.add_patch(
+                Rectangle(
+                    (kperp_edges[kp_index], kpar_edges[kpar_index]),
+                    kperp_edges[kp_index + 1] - kperp_edges[kp_index],
+                    kpar_edges[kpar_index + 1] - kpar_edges[kpar_index],
+                    fill=False,
+                    edgecolor=GOLD,
+                    linewidth=1.35,
+                    zorder=5,
+                )
+            )
+        for band_id in np.asarray(output_band_ids, dtype=np.int64):
+            kp_index, kpar_index = divmod(int(band_id), shape[1])
+            value = float(values[kp_index, kpar_index])
+            text_color = "#fbfaf6" if abs(value) >= 11.0 else INK
+            ax.text(
+                x_centers[kp_index],
+                y_centers[kpar_index],
+                f"{value:+.1f}",
+                ha="center",
+                va="center",
+                fontsize=4.6,
+                color=text_color,
+                zorder=6,
+            )
+        ax.set(
+            xlabel=r"$k_\perp\ [{\rm Mpc}^{-1}]$",
+            xlim=(float(kperp_edges[0]), float(kperp_edges[-1])),
+            ylim=(float(kpar_edges[0]), float(kpar_edges[-1])),
+            title=title,
+        )
+        ax.set_xticks(x_centers[::4])
+        ax.set_xticklabels([f"{value:.2f}" for value in x_centers[::4]])
+        ax.set_yticks(y_centers)
+        ax.set_yticklabels([f"{value:.3f}" for value in y_centers])
+    axes[0].set_ylabel(r"$|k_\parallel|\ [{\rm Mpc}^{-1}]$")
+    axes[1].set_yticklabels([])
+    colorbar = fig.colorbar(images[0], ax=axes, shrink=0.90, pad=0.012)
+    colorbar.set_label("signed fractional error [%]")
+    legend = [
+        Patch(facecolor="#ece8df", edgecolor="none", label="Outside EoR window"),
+        Patch(
+            facecolor="#dce9e6",
+            edgecolor="none",
+            label="EoR-window cell not evaluated",
+        ),
+        Rectangle(
+            (0, 0),
+            1,
+            1,
+            fill=False,
+            edgecolor=GOLD,
+            linewidth=1.35,
+            label="Original 20 response-selected windows",
+        ),
+        plt.Line2D(
+            [0],
+            [0],
+            color=INK,
+            linewidth=1.25,
+            linestyle=(0, (4, 3)),
+            label="Frozen wedge/floor boundary",
+        ),
+    ]
+    axes[0].legend(
+        handles=legend,
+        loc="lower right",
+        ncols=2,
+        frameon=True,
+        facecolor="#fbfaf6",
+        edgecolor=GRID,
+        framealpha=0.94,
+        fontsize=7.8,
+    )
+    fig.suptitle(
+        "Exact-visibility Q-beta cell closure over the full cylindrical grid\n"
+        "Numbers are signed percent errors for 112 evaluated response-windowed "
+        "bandpowers; blank EoR-window cells were not evaluated",
+        fontsize=12,
+        fontweight="bold",
+    )
+    fig.savefig(output, dpi=240)
+    plt.close(fig)
+
+
+def _write_cell_table(
+    *,
+    output: Path,
+    kperp_edges: np.ndarray,
+    kpar_values: np.ndarray,
+    geometric: np.ndarray,
+    selected: np.ndarray,
+    output_band_ids: np.ndarray,
+    relative_response: np.ndarray,
+    reporting_window_fraction: np.ndarray,
+    geometric_window_fraction: np.ndarray,
+    same_cell_fraction: np.ndarray,
+    effective_width: np.ndarray,
+    target_power: np.ndarray,
+    pure_estimate: np.ndarray,
+    total_estimate: np.ndarray,
+    foreground_estimate: np.ndarray,
+) -> None:
+    shape = geometric.shape
+    output_positions = {
+        int(band_id): int(position)
+        for position, band_id in enumerate(np.asarray(output_band_ids, dtype=np.int64))
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "kperp_index",
+        "kpar_index",
+        "kperp_low_mpc_inv",
+        "kperp_high_mpc_inv",
+        "kperp_center_mpc_inv",
+        "kpar_mpc_inv",
+        "geometric_eor_window",
+        "qbeta_evaluated",
+        "original_response_selected",
+        "qbeta_relative_response",
+        "reporting_region_window_fraction",
+        "geometric_eor_window_response_fraction",
+        "same_source_cell_response_fraction",
+        "window_effective_width_source_bands",
+        "target_windowed_power",
+        "pure_eor_recovered_windowed_power",
+        "pure_eor_signed_error_percent",
+        "total_recovered_windowed_power",
+        "total_signed_error_percent",
+        "foreground_windowed_power",
+        "foreground_over_target",
+    ]
+    with output.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for kp_index in range(shape[0]):
+            for kpar_index in range(shape[1]):
+                band_id = kp_index * shape[1] + kpar_index
+                position = output_positions.get(band_id)
+                row: dict[str, Any] = {
+                    "kperp_index": kp_index,
+                    "kpar_index": kpar_index,
+                    "kperp_low_mpc_inv": float(kperp_edges[kp_index]),
+                    "kperp_high_mpc_inv": float(kperp_edges[kp_index + 1]),
+                    "kperp_center_mpc_inv": float(
+                        0.5 * (kperp_edges[kp_index] + kperp_edges[kp_index + 1])
+                    ),
+                    "kpar_mpc_inv": float(kpar_values[kpar_index]),
+                    "geometric_eor_window": int(geometric[kp_index, kpar_index]),
+                    "qbeta_evaluated": int(position is not None),
+                    "original_response_selected": int(selected[kp_index, kpar_index]),
+                }
+                if position is not None:
+                    target = float(target_power[position])
+                    pure = float(pure_estimate[position])
+                    total = float(total_estimate[position])
+                    foreground = float(foreground_estimate[position])
+                    row.update(
+                        {
+                            "qbeta_relative_response": float(
+                                relative_response[position]
+                            ),
+                            "reporting_region_window_fraction": float(
+                                reporting_window_fraction[position]
+                            ),
+                            "geometric_eor_window_response_fraction": float(
+                                geometric_window_fraction[position]
+                            ),
+                            "same_source_cell_response_fraction": float(
+                                same_cell_fraction[position]
+                            ),
+                            "window_effective_width_source_bands": float(
+                                effective_width[position]
+                            ),
+                            "target_windowed_power": target,
+                            "pure_eor_recovered_windowed_power": pure,
+                            "pure_eor_signed_error_percent": float(
+                                100.0 * (pure - target) / target
+                            ),
+                            "total_recovered_windowed_power": total,
+                            "total_signed_error_percent": float(
+                                100.0 * (total - target) / target
+                            ),
+                            "foreground_windowed_power": foreground,
+                            "foreground_over_target": foreground / target,
+                        }
+                    )
+                writer.writerow(row)
+
+
 def _plot_context_progression(
     *, output: Path, progression: list[dict[str, Any]]
 ) -> None:
@@ -412,6 +693,7 @@ def main() -> None:
     shape = (kperp_edges.size - 1, kpar_values.size)
     geometric = resolved.window_spec.mask(kperp_edges[1:, None], kpar_values[None, :])
     selected, selected_ids, selected_positions = _selected_mask(archive, shape)
+    output_band_ids = np.asarray(archive["output_band_ids"], dtype=np.int64)
     reporting = _reporting_mask(archive, shape)
     evaluated = np.asarray(archive["support"], dtype=bool)
     if evaluated.shape != shape:
@@ -443,6 +725,53 @@ def main() -> None:
     source_power = np.asarray(archive["restricted_eor_source_power"], dtype=np.float64)
     target_all = qbeta_window @ source_power
     estimate_all = np.asarray(archive["full_eor_windowed_power"], dtype=np.float64)[0]
+    total_estimate_all = np.asarray(archive["total_windowed_power"], dtype=np.float64)[
+        0
+    ]
+    response_row_sum = np.sum(
+        np.asarray(archive["calibration_response"], dtype=np.float64), axis=1
+    )
+    foreground_estimate_all = np.divide(
+        np.asarray(archive["bank_foreground_q"], dtype=np.float64),
+        response_row_sum,
+        out=np.full(response_row_sum.shape, np.nan, dtype=np.float64),
+        where=response_row_sum > 0.0,
+    )
+    pure_error_percent = 100.0 * (estimate_all - target_all) / target_all
+    total_error_percent = 100.0 * (total_estimate_all - target_all) / target_all
+    source_kperp_indices = np.asarray(
+        archive["source_band_kperp_indices"], dtype=np.int64
+    )
+    source_kpar_indices = np.asarray(
+        archive["source_band_kpar_indices"], dtype=np.int64
+    )
+    source_in_geometric_window = np.zeros(source_kperp_indices.shape, dtype=bool)
+    source_in_output_radial_range = source_kpar_indices < shape[1]
+    source_in_geometric_window[source_in_output_radial_range] = geometric[
+        source_kperp_indices[source_in_output_radial_range],
+        source_kpar_indices[source_in_output_radial_range],
+    ]
+    geometric_window_response_fraction = np.sum(
+        qbeta_window[:, source_in_geometric_window], axis=1
+    )
+    same_cell_response_fraction = np.empty(output_band_ids.size, dtype=np.float64)
+    for output_position, output_band_id in enumerate(output_band_ids):
+        output_kperp_index, output_kpar_index = divmod(int(output_band_id), shape[1])
+        source_match = np.flatnonzero(
+            (source_kperp_indices == output_kperp_index)
+            & (source_kpar_indices == output_kpar_index)
+        )
+        if source_match.size != 1:
+            raise ValueError("Each output cell must match exactly one source cell")
+        same_cell_response_fraction[output_position] = qbeta_window[
+            output_position, source_match[0]
+        ]
+    window_effective_width = np.divide(
+        1.0,
+        np.sum(np.square(qbeta_window), axis=1),
+        out=np.full(output_band_ids.size, np.inf, dtype=np.float64),
+        where=np.sum(np.square(qbeta_window), axis=1) > 0.0,
+    )
     selected_target = target_all[selected_positions]
     selected_estimate = estimate_all[selected_positions]
     if np.any(selected_target <= 0.0) or np.any(selected_estimate <= 0.0):
@@ -459,6 +788,9 @@ def main() -> None:
     figure_paths = {
         "coverage": args.output_dir / "visibility_qbeta_eor_window_coverage.png",
         "recovery": args.output_dir / "visibility_qbeta_ps2d_recovery.png",
+        "full_grid_errors": (
+            args.output_dir / "visibility_qbeta_full_grid_cell_errors.png"
+        ),
         "context": args.output_dir / "visibility_qbeta_context_progression.png",
     }
     _plot_coverage(
@@ -483,14 +815,112 @@ def main() -> None:
         estimate=selected_estimate,
         metrics=full_eor_metrics,
     )
+    _plot_full_grid_errors(
+        output=figure_paths["full_grid_errors"],
+        kperp_edges=kperp_edges,
+        kpar_edges=kpar_edges,
+        geometric=geometric,
+        selected=selected,
+        boundary=boundary,
+        output_band_ids=output_band_ids,
+        pure_error_percent=pure_error_percent,
+        total_error_percent=total_error_percent,
+    )
     _plot_context_progression(
         output=figure_paths["context"],
         progression=run_summary["source_context_progression"],
     )
+    _write_cell_table(
+        output=args.cell_table,
+        kperp_edges=kperp_edges,
+        kpar_values=kpar_values,
+        geometric=geometric,
+        selected=selected,
+        output_band_ids=output_band_ids,
+        relative_response=np.asarray(
+            archive["qbeta_relative_response"], dtype=np.float64
+        ),
+        reporting_window_fraction=np.asarray(
+            archive["qbeta_target_window_fraction"], dtype=np.float64
+        ),
+        geometric_window_fraction=geometric_window_response_fraction,
+        same_cell_fraction=same_cell_response_fraction,
+        effective_width=window_effective_width,
+        target_power=target_all,
+        pure_estimate=estimate_all,
+        total_estimate=total_estimate_all,
+        foreground_estimate=foreground_estimate_all,
+    )
+
+    selected_output_mask = np.zeros(output_band_ids.size, dtype=bool)
+    selected_output_mask[selected_positions] = True
+    all_cell_diagnostic = {
+        "status": (
+            "post-hoc diagnostic only; the original 20-window response contract "
+            "remains the frozen main result"
+        ),
+        "evaluated_cell_count": int(output_band_ids.size),
+        "all_evaluated_cells_are_inside_geometric_eor_window": bool(
+            np.all(geometric.reshape(-1)[output_band_ids])
+        ),
+        "pure_eor": {
+            "maximum_absolute_error": float(np.max(np.abs(pure_error_percent)) / 100.0),
+            "median_absolute_error": float(
+                np.median(np.abs(pure_error_percent)) / 100.0
+            ),
+            "cells_below_20_percent": int(
+                np.count_nonzero(np.abs(pure_error_percent) < 20.0)
+            ),
+        },
+        "foreground_plus_eor": {
+            "maximum_absolute_error": float(
+                np.max(np.abs(total_error_percent)) / 100.0
+            ),
+            "median_absolute_error": float(
+                np.median(np.abs(total_error_percent)) / 100.0
+            ),
+            "cells_below_20_percent": int(
+                np.count_nonzero(np.abs(total_error_percent) < 20.0)
+            ),
+        },
+        "not_originally_selected_but_below_20_percent": {
+            "pure_eor": int(
+                np.count_nonzero(
+                    (~selected_output_mask) & (np.abs(pure_error_percent) < 20.0)
+                )
+            ),
+            "foreground_plus_eor": int(
+                np.count_nonzero(
+                    (~selected_output_mask) & (np.abs(total_error_percent) < 20.0)
+                )
+            ),
+        },
+        "geometric_eor_window_response_fraction": {
+            "minimum": float(np.min(geometric_window_response_fraction)),
+            "median": float(np.median(geometric_window_response_fraction)),
+            "cells_at_least_0p95": int(
+                np.count_nonzero(geometric_window_response_fraction >= 0.95)
+            ),
+        },
+        "window_localization": {
+            "same_cell_fraction_minimum": float(np.min(same_cell_response_fraction)),
+            "same_cell_fraction_median": float(np.median(same_cell_response_fraction)),
+            "same_cell_fraction_maximum": float(np.max(same_cell_response_fraction)),
+            "effective_width_minimum_source_bands": float(
+                np.min(window_effective_width)
+            ),
+            "effective_width_median_source_bands": float(
+                np.median(window_effective_width)
+            ),
+            "effective_width_maximum_source_bands": float(
+                np.max(window_effective_width)
+            ),
+        },
+    }
 
     output = {
         "schema": "visibility_qbeta_eor_window_coverage",
-        "schema_version": 1,
+        "schema_version": 2,
         "date": "2026-07-24",
         "analysis_contract_sha256": resolved.contract.analysis_contract_sha256,
         "result_json_sha256": _sha256(args.result_json),
@@ -520,6 +950,7 @@ def main() -> None:
             ),
         },
         "full_eor_recovery": full_eor_metrics,
+        "all_evaluated_cell_diagnostic": all_cell_diagnostic,
         "foreground_to_target_integrated_absolute_ratio": float(
             run_summary["windowed_results"][
                 "foreground_to_target_integrated_absolute_ratio"
@@ -534,10 +965,19 @@ def main() -> None:
             }
             for key, path in figure_paths.items()
         },
+        "cell_table": {
+            "path": str(args.cell_table.relative_to(ROOT)),
+            "sha256": _sha256(args.cell_table),
+            "row_count": int(np.prod(shape)),
+            "evaluated_row_count": int(output_band_ids.size),
+        },
         "interpretation": (
             "The selected outputs are overlapping response-windowed bandpowers. "
             "The direct 20-cell footprint is a coverage diagnostic, not a claim "
-            "that 20 independent delta-function sky bins were deconvolved."
+            "that 20 independent delta-function sky bins were deconvolved. "
+            "The 112-cell closure audit is post hoc and separates numerical "
+            "closure from the original reporting-region localization gate; it "
+            "does not replace the frozen 20-window main result."
         ),
     }
     args.coverage_summary.parent.mkdir(parents=True, exist_ok=True)

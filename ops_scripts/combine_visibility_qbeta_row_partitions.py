@@ -366,6 +366,18 @@ def main(argv: Iterable[str] | None = None) -> None:
             "analysis_frequency_count",
             "analysis_frequency_indices",
             "filter_bandwidth_scope",
+            "operator_dtype",
+            "operator_storage",
+            "primary_beam_request",
+            "station_type",
+            "aperture_beam_model",
+            "aperture_beam_edge_error_fraction",
+            "aperture_beam_ripple_cycles",
+            "channel_bandwidth_hz",
+            "integration_time_s",
+            "phase_ra_deg",
+            "phase_dec_deg",
+            "response_rcond",
         ):
             if meta["settings"].get(key) != reference_meta["settings"].get(key):
                 raise ValueError(f"Partition settings differ in {key}")
@@ -591,6 +603,47 @@ def main(argv: Iterable[str] | None = None) -> None:
         ),
         "visibility_bank_sha256": reference_meta["visibility_bank_sha256"],
         "sky_cache_sha256": reference_meta["sky_cache_sha256"],
+        "instrument": {
+            "primary_beam_request": reference_meta["settings"].get(
+                "primary_beam_request", "none"
+            ),
+            "station_type": reference_meta["settings"].get(
+                "station_type", "isotropic"
+            ),
+            "aperture_beam_model": reference_meta["settings"].get(
+                "aperture_beam_model", "exact"
+            ),
+            "aperture_beam_edge_error_fraction": reference_meta[
+                "settings"
+            ].get("aperture_beam_edge_error_fraction", 0.0),
+            "aperture_beam_ripple_cycles": reference_meta["settings"].get(
+                "aperture_beam_ripple_cycles", 2.0
+            ),
+            "operator_dtype": reference_meta["settings"].get(
+                "operator_dtype"
+            ),
+            "operator_storage": reference_meta["settings"].get(
+                "operator_storage"
+            ),
+            "channel_bandwidth_hz": reference_meta["settings"].get(
+                "channel_bandwidth_hz"
+            ),
+            "integration_time_s": reference_meta["settings"].get(
+                "integration_time_s"
+            ),
+            "phase_ra_deg": reference_meta["settings"].get(
+                "phase_ra_deg"
+            ),
+            "phase_dec_deg": reference_meta["settings"].get(
+                "phase_dec_deg"
+            ),
+            "aperture_row_beam_cache_sha256_by_partition": [
+                meta["settings"].get(
+                    "aperture_row_beam_cache_sha256", []
+                )
+                for meta in metadata
+            ],
+        },
         "input_directories": [str(path) for path in args.input_dir],
         "partition_count": int(len(archives)),
         "rows_per_kperp_bin_per_partition": int(

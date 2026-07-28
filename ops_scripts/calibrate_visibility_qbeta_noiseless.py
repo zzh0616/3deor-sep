@@ -45,6 +45,37 @@ from visibility_qbeta import (  # noqa: E402
     stratified_row_indices,
     weighted_response_pseudoinverse,
 )
+from visibility_primary_beam import (  # noqa: E402
+    build_direction_corrected_kernel_multiplier,
+    build_oskar_circular_gaussian_kernel_multiplier,
+    direction_cosine_geometry_sha256,
+    open_indexed_frequency_row_direction_kernel_multiplier,
+)
+
+
+class CpuStreamedExactOperator:
+    """Keep the full operator in host RAM and stage one frequency at a time."""
+
+    def __init__(
+        self,
+        *,
+        values: np.ndarray,
+        torch: Any,
+        device: Any,
+        dtype: Any,
+    ) -> None:
+        self.values = np.asarray(values)
+        self.torch = torch
+        self.device = device
+        self.dtype = dtype
+        self.shape = self.values.shape
+
+    def frequency_matrix(self, frequency_index: int) -> Any:
+        return self.torch.as_tensor(
+            self.values[int(frequency_index)],
+            dtype=self.dtype,
+            device=self.device,
+        )
 
 
 def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
@@ -69,6 +100,14 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         choices=("all", "reporting_kperp"),
         default="all",
     )
+    parser.add_argument(
+        "--maximum-kperp-index-exclusive",
+        type=int,
+        help=(
+            "Optional truth-blind row-support cutoff. Kperp bins at or above "
+            "this index are not sampled and therefore cannot enter support."
+        ),
+    )
     parser.add_argument("--row-seed", type=int, default=20260724)
     parser.add_argument("--row-partition-index", type=int, default=0)
     parser.add_argument("--row-partition-count", type=int, default=1)
@@ -92,6 +131,53 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         "--operator-dtype",
         choices=("complex64", "complex128"),
         default="complex64",
+    )
+    parser.add_argument(
+        "--operator-storage",
+        choices=("gpu", "cpu_streamed"),
+        default="gpu",
+    )
+    parser.add_argument(
+        "--primary-beam",
+        choices=("bank", "isotropic"),
+        default="bank",
+        help="Use beam metadata from the bank, or force the no-PB control.",
+    )
+    parser.add_argument(
+        "--aperture-row-beam-cache-pattern",
+        help=(
+            "Directory pattern with {freq} for one exact OSKAR station-pair "
+            "coherency cache per input frequency"
+        ),
+    )
+    parser.add_argument(
+        "--aperture-beam-model",
+        choices=(
+            "exact",
+            "radial_static",
+            "radial_linear",
+            "radial_ripple",
+        ),
+        default="exact",
+        help=(
+            "Estimator-side model applied to the exact aperture-PB cache. "
+            "The visibility bank is never modified."
+        ),
+    )
+    parser.add_argument(
+        "--aperture-beam-edge-error-fraction",
+        type=float,
+        default=0.0,
+        help=(
+            "Maximum multiplicative PB error at the source-patch edge; "
+            "limited to an absolute value of 0.5."
+        ),
+    )
+    parser.add_argument(
+        "--aperture-beam-ripple-cycles",
+        type=float,
+        default=2.0,
+        help="Full-band cycles for the radial_ripple sensitivity profile.",
     )
     parser.add_argument("--channel-bandwidth-hz", type=float, default=100000.0)
     parser.add_argument("--integration-time-s", type=float, default=10.0)
@@ -377,6 +463,87 @@ def _row_kperp(
     return 2.0 * math.pi * uv_radius_lambda / float(transverse_distance_mpc)
 
 
+def _select_qbeta_rows(
+    *,
+    bank: dict[str, np.ndarray],
+    resolved: Any,
+    config: dict[str, Any],
+    row_scope: str,
+    maximum_kperp_index_exclusive: int | None,
+    rows_per_kperp_bin: int,
+    row_seed: int,
+    row_partition_index: int,
+    row_partition_count: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Apply the evaluator's deterministic row-selection contract."""
+    reference_frequency_hz = (
+        float(resolved.geometry["reference_frequency_mhz"]) * 1e6
+    )
+    all_row_kperp = _row_kperp(
+        bank["sample_uvw_m"],
+        reference_frequency_hz=reference_frequency_hz,
+        transverse_distance_mpc=float(
+            resolved.geometry["transverse_distance_mpc"]
+        ),
+    )
+    kperp_edges = np.asarray(
+        resolved.contract.window_layout.kperp_edges, dtype=np.float64
+    )
+    if str(row_scope) == "reporting_kperp":
+        low_fraction, high_fraction = (
+            float(value)
+            for value in config["reporting_masks"][
+                "mid_kperp_fraction_range"
+            ]
+        )
+        transverse_bin_count = int(kperp_edges.size - 1)
+        first_reporting_kperp = int(
+            math.floor(low_fraction * transverse_bin_count)
+        )
+        stop_reporting_kperp = int(
+            math.ceil(high_fraction * transverse_bin_count)
+        )
+        selected_row_kperp_indices = np.arange(
+            first_reporting_kperp,
+            stop_reporting_kperp,
+            dtype=np.int64,
+        )
+    elif str(row_scope) == "all":
+        selected_row_kperp_indices = np.arange(
+            kperp_edges.size - 1, dtype=np.int64
+        )
+    else:
+        raise ValueError(f"Unsupported row scope: {row_scope}")
+    if maximum_kperp_index_exclusive is not None:
+        stop = int(maximum_kperp_index_exclusive)
+        bin_count = int(kperp_edges.size - 1)
+        if stop <= 0 or stop > bin_count:
+            raise ValueError(
+                "maximum_kperp_index_exclusive must be in "
+                f"[1, {bin_count}]"
+            )
+        selected_row_kperp_indices = selected_row_kperp_indices[
+            selected_row_kperp_indices < stop
+        ]
+        if selected_row_kperp_indices.size == 0:
+            raise ValueError("The kperp row-support cutoff selects no bins")
+    selected_rows = stratified_row_indices(
+        all_row_kperp,
+        kperp_edges,
+        rows_per_bin=int(rows_per_kperp_bin),
+        seed=int(row_seed),
+        partition_index=int(row_partition_index),
+        partition_count=int(row_partition_count),
+        bin_indices=selected_row_kperp_indices,
+    )
+    return (
+        all_row_kperp,
+        kperp_edges,
+        selected_row_kperp_indices,
+        selected_rows,
+    )
+
+
 def _build_exact_operator(
     *,
     torch: Any,
@@ -392,6 +559,8 @@ def _build_exact_operator(
     operator_dtype: str,
     row_chunk: int,
     source_chunk: int,
+    operator_storage: str = "gpu",
+    kernel_multiplier: Any | None = None,
 ) -> Any:
     complex_dtype = (
         torch.complex64 if str(operator_dtype) == "complex64" else torch.complex128
@@ -407,15 +576,38 @@ def _build_exact_operator(
     n_frequency = int(frequencies.numel())
     n_row = int(uvw.shape[0])
     n_source = int(l_tensor.numel())
-    operator = torch.empty(
-        (n_frequency, n_row, n_source),
-        dtype=complex_dtype,
-        device=device,
-    )
+    if str(operator_storage) == "gpu":
+        operator: Any = torch.empty(
+            (n_frequency, n_row, n_source),
+            dtype=complex_dtype,
+            device=device,
+        )
+        host_operator: np.ndarray | None = None
+    elif str(operator_storage) == "cpu_streamed":
+        host_operator = np.empty(
+            (n_frequency, n_row, n_source),
+            dtype=(
+                np.complex64
+                if complex_dtype == torch.complex64
+                else np.complex128
+            ),
+        )
+        operator = None
+    else:
+        raise ValueError(f"Unsupported operator storage: {operator_storage}")
     dec0 = math.radians(float(phase_dec_deg))
     started = time.monotonic()
     for frequency_index in range(n_frequency):
         frequency = frequencies[frequency_index]
+        frequency_operator = (
+            operator[frequency_index]
+            if host_operator is None
+            else torch.empty(
+                (n_row, n_source),
+                dtype=complex_dtype,
+                device=device,
+            )
+        )
         for row_first in range(0, n_row, int(row_chunk)):
             row_stop = min(n_row, row_first + int(row_chunk))
             uvw_block = uvw[row_first:row_stop]
@@ -451,11 +643,32 @@ def _build_exact_operator(
                     amplitude * torch.cos(phase),
                     amplitude * torch.sin(phase),
                 )
-                operator[
-                    frequency_index,
+                if kernel_multiplier is not None:
+                    multiplier = kernel_multiplier(
+                        int(frequency_index),
+                        int(row_first),
+                        int(row_stop),
+                        int(source_first),
+                        int(source_stop),
+                        device,
+                        complex_dtype,
+                    )
+                    kernel = kernel * torch.as_tensor(
+                        multiplier,
+                        dtype=complex_dtype,
+                        device=device,
+                    )
+                frequency_operator[
                     row_first:row_stop,
                     source_first:source_stop,
                 ] = kernel.to(complex_dtype)
+        if host_operator is not None:
+            host_operator[frequency_index] = np.asarray(
+                frequency_operator.detach().cpu()
+            )
+            del frequency_operator
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
         print(
             json.dumps(
                 {
@@ -467,7 +680,14 @@ def _build_exact_operator(
             ),
             flush=True,
         )
-    return operator
+    if host_operator is None:
+        return operator
+    return CpuStreamedExactOperator(
+        values=host_operator,
+        torch=torch,
+        device=device,
+        dtype=complex_dtype,
+    )
 
 
 def _apply_operator(
@@ -492,9 +712,16 @@ def _apply_operator(
     )
     for frequency_index in range(n_frequency):
         flux = sky[:, frequency_index].reshape(batch, -1).T
+        frequency_operator = (
+            operator.frequency_matrix(frequency_index)
+            if isinstance(operator, CpuStreamedExactOperator)
+            else operator[frequency_index]
+        )
         output[:, frequency_index] = (
-            operator[frequency_index] @ flux.to(operator.dtype)
+            frequency_operator @ flux.to(operator.dtype)
         ).T
+        if isinstance(operator, CpuStreamedExactOperator):
+            del frequency_operator
     result = np.asarray(output.detach().cpu())
     return result[0] if squeeze else result
 
@@ -1069,44 +1296,26 @@ def main(argv: Iterable[str] | None = None) -> None:
     reference_frequency_hz = (
         float(resolved.geometry["reference_frequency_mhz"]) * 1e6
     )
-    all_row_kperp = _row_kperp(
-        bank["sample_uvw_m"],
-        reference_frequency_hz=reference_frequency_hz,
-        transverse_distance_mpc=float(resolved.geometry["transverse_distance_mpc"]),
-    )
-    kperp_edges = np.asarray(
-        resolved.contract.window_layout.kperp_edges, dtype=np.float64
-    )
     reporting = config["reporting_masks"]
-    if args.row_scope == "reporting_kperp":
-        low_fraction, high_fraction = (
-            float(value)
-            for value in reporting["mid_kperp_fraction_range"]
-        )
-        transverse_bin_count = int(kperp_edges.size - 1)
-        first_reporting_kperp = int(
-            math.floor(low_fraction * transverse_bin_count)
-        )
-        stop_reporting_kperp = int(
-            math.ceil(high_fraction * transverse_bin_count)
-        )
-        selected_row_kperp_indices = np.arange(
-            first_reporting_kperp,
-            stop_reporting_kperp,
-            dtype=np.int64,
-        )
-    else:
-        selected_row_kperp_indices = np.arange(
-            kperp_edges.size - 1, dtype=np.int64
-        )
-    selected_rows = stratified_row_indices(
+    (
         all_row_kperp,
         kperp_edges,
-        rows_per_bin=int(args.rows_per_kperp_bin),
-        seed=int(args.row_seed),
-        partition_index=int(args.row_partition_index),
-        partition_count=int(args.row_partition_count),
-        bin_indices=selected_row_kperp_indices,
+        selected_row_kperp_indices,
+        selected_rows,
+    ) = _select_qbeta_rows(
+        bank=bank,
+        resolved=resolved,
+        config=config,
+        row_scope=str(args.row_scope),
+        maximum_kperp_index_exclusive=(
+            None
+            if args.maximum_kperp_index_exclusive is None
+            else int(args.maximum_kperp_index_exclusive)
+        ),
+        rows_per_kperp_bin=int(args.rows_per_kperp_bin),
+        row_seed=int(args.row_seed),
+        row_partition_index=int(args.row_partition_index),
+        row_partition_count=int(args.row_partition_count),
     )
     uvw = np.asarray(bank["sample_uvw_m"][selected_rows], dtype=np.float64)
     row_kperp = all_row_kperp[selected_rows]
@@ -1116,6 +1325,159 @@ def main(argv: Iterable[str] | None = None) -> None:
     device = torch.device(str(args.device))
     if device.type != "cuda" or not torch.cuda.is_available():
         raise RuntimeError("This formal Q_beta pilot requires a CUDA device")
+    bank_station_type = str(
+        bank.get(
+            "station_type",
+            np.asarray(
+                manifest.get("instrument", {}).get(
+                    "station_type", "isotropic"
+                )
+            ),
+        ).item()
+    ).lower()
+    station_type = (
+        bank_station_type
+        if str(args.primary_beam) == "bank"
+        else "isotropic"
+    )
+    if station_type != "aperture_array" and (
+        str(args.aperture_beam_model) != "exact"
+        or float(args.aperture_beam_edge_error_fraction) != 0.0
+    ):
+        raise ValueError(
+            "Aperture-beam model errors require an aperture-array bank"
+        )
+    aperture_cache_metadata: list[dict[str, Any]] = []
+    if station_type == "gaussian":
+        beam_multiplier = build_oskar_circular_gaussian_kernel_multiplier(
+            torch=torch,
+            frequencies_hz=frequencies_hz,
+            l_cosine=sky["l_cosine"],
+            m_cosine=sky["m_cosine"],
+            fwhm_deg=float(bank["gaussian_fwhm_deg"].item()),
+            reference_frequency_hz=float(
+                bank["gaussian_reference_frequency_hz"].item()
+            ),
+            device=device,
+            operator_dtype=str(args.operator_dtype),
+        )
+    elif station_type == "aperture_array":
+        if not args.aperture_row_beam_cache_pattern:
+            raise ValueError(
+                "Aperture-array banks require "
+                "--aperture-row-beam-cache-pattern"
+            )
+        cache_dirs = [
+            _format_pattern(
+                str(args.aperture_row_beam_cache_pattern),
+                float(frequency_mhz),
+            )
+            for frequency_mhz in frequencies_mhz
+        ]
+        (
+            beam_multiplier,
+            aperture_cache_metadata,
+            cached_rows_by_frequency,
+        ) = open_indexed_frequency_row_direction_kernel_multiplier(
+            cache_dirs,
+            selected_bank_rows=selected_rows,
+        )
+        expected_direction_sha256 = direction_cosine_geometry_sha256(
+            l_cosine=sky["l_cosine"],
+            m_cosine=sky["m_cosine"],
+            n_minus_one=sky["n_minus_one"],
+        )
+        for index, (cache_dir, metadata, cached_rows) in enumerate(
+            zip(
+                cache_dirs,
+                aperture_cache_metadata,
+                cached_rows_by_frequency,
+                strict=True,
+            )
+        ):
+            frequency_tag = f"{float(frequencies_mhz[index]):.2f}"
+            expected_bank_shard = (
+                args.bank_dir / "shards" / f"freq_{frequency_tag}.npz"
+            )
+            expected_oskar_config = (
+                args.bank_dir
+                / "configs"
+                / f"sim_eor_{frequency_tag}.ini"
+            )
+            if (
+                str(metadata.get("bank_shard_sha256", ""))
+                != _sha256(expected_bank_shard)
+            ):
+                raise ValueError(
+                    f"Aperture row-beam bank shard differs in {cache_dir}"
+                )
+            if (
+                str(metadata.get("oskar_config_sha256", ""))
+                != _sha256(expected_oskar_config)
+            ):
+                raise ValueError(
+                    f"Aperture row-beam OSKAR config differs in {cache_dir}"
+                )
+            if tuple(int(value) for value in metadata["shape"]) != (
+                int(cached_rows.size),
+                int(sky["l_cosine"].size),
+            ):
+                raise ValueError(
+                    f"Aperture row-beam source geometry differs in {cache_dir}"
+                )
+            if (
+                str(metadata.get("direction_sha256", ""))
+                != expected_direction_sha256
+            ):
+                raise ValueError(
+                    f"Aperture row-beam direction order differs in {cache_dir}"
+                )
+            if not np.isclose(
+                float(metadata["frequency_hz"]),
+                float(frequencies_hz[index]),
+                rtol=0.0,
+                atol=1e-3,
+            ):
+                raise ValueError(
+                    "Aperture row-beam cache frequency differs from bank"
+                )
+            cached_settings = metadata.get("oskar_operator_settings", {})
+            expected_settings = {
+                "frequency_hz": float(frequencies_hz[index]),
+                "phase_centre_dec_deg": float(args.phase_dec_deg),
+                "channel_bandwidth_hz": float(args.channel_bandwidth_hz),
+                "time_average_sec": float(args.integration_time_s),
+            }
+            for name, expected_value in expected_settings.items():
+                if not np.isclose(
+                    float(cached_settings.get(name, math.nan)),
+                    expected_value,
+                    rtol=0.0,
+                    atol=max(1e-9, abs(expected_value) * 1e-12),
+                ):
+                    raise ValueError(
+                        f"Aperture row-beam {name} differs in {cache_dir}"
+                    )
+        beam_multiplier = build_direction_corrected_kernel_multiplier(
+            base=beam_multiplier,
+            torch=torch,
+            frequencies_hz=frequencies_hz,
+            l_cosine=sky["l_cosine"],
+            m_cosine=sky["m_cosine"],
+            mode=str(args.aperture_beam_model),
+            edge_error_fraction=float(
+                args.aperture_beam_edge_error_fraction
+            ),
+            ripple_cycles=float(args.aperture_beam_ripple_cycles),
+            device=device,
+            operator_dtype=str(args.operator_dtype),
+        )
+    elif station_type == "isotropic":
+        beam_multiplier = None
+    else:
+        raise ValueError(
+            f"Unsupported visibility-bank station type: {station_type}"
+        )
     operator = _build_exact_operator(
         torch=torch,
         frequencies_hz=frequencies_hz,
@@ -1130,6 +1492,8 @@ def main(argv: Iterable[str] | None = None) -> None:
         operator_dtype=str(args.operator_dtype),
         row_chunk=int(args.row_chunk),
         source_chunk=int(args.source_chunk),
+        operator_storage=str(args.operator_storage),
+        kernel_multiplier=beam_multiplier,
     )
     real_dtype = (
         torch.float32 if operator.dtype == torch.complex64 else torch.float64
@@ -1491,7 +1855,7 @@ def main(argv: Iterable[str] | None = None) -> None:
     }
     result = {
         "schema": "visibility_qbeta_noiseless_calibration",
-        "schema_version": 1,
+        "schema_version": 3,
         "analysis_contract_sha256": resolved.contract.analysis_contract_sha256,
         "frequency_contract_sha256": (
             frequency_resolved.contract.analysis_contract_sha256
@@ -1501,6 +1865,11 @@ def main(argv: Iterable[str] | None = None) -> None:
         "settings": {
             "rows_per_kperp_bin": int(args.rows_per_kperp_bin),
             "row_scope": str(args.row_scope),
+            "maximum_kperp_index_exclusive": (
+                None
+                if args.maximum_kperp_index_exclusive is None
+                else int(args.maximum_kperp_index_exclusive)
+            ),
             "selected_row_count": int(selected_rows.size),
             "row_seed": int(args.row_seed),
             "row_partition_index": int(args.row_partition_index),
@@ -1512,6 +1881,25 @@ def main(argv: Iterable[str] | None = None) -> None:
             "probe_batch_size": int(args.probe_batch_size),
             "probe_seed": int(args.probe_seed),
             "operator_dtype": str(args.operator_dtype),
+            "operator_storage": str(args.operator_storage),
+            "primary_beam_request": str(args.primary_beam),
+            "station_type": station_type,
+            "aperture_row_beam_cache_pattern": (
+                str(args.aperture_row_beam_cache_pattern)
+                if args.aperture_row_beam_cache_pattern
+                else None
+            ),
+            "aperture_row_beam_cache_sha256": [
+                str(metadata["data_sha256"])
+                for metadata in aperture_cache_metadata
+            ],
+            "aperture_beam_model": str(args.aperture_beam_model),
+            "aperture_beam_edge_error_fraction": float(
+                args.aperture_beam_edge_error_fraction
+            ),
+            "aperture_beam_ripple_cycles": float(
+                args.aperture_beam_ripple_cycles
+            ),
             "channel_bandwidth_hz": float(args.channel_bandwidth_hz),
             "integration_time_s": float(args.integration_time_s),
             "phase_ra_deg": float(args.phase_ra_deg),
@@ -1622,9 +2010,19 @@ def main(argv: Iterable[str] | None = None) -> None:
             "no thermal noise",
             "fixed baseline-time row pilot; no uv gridding",
             (
-                "rows cover every configured kperp bin"
-                if args.row_scope == "all"
-                else "rows are concentrated in the predeclared reporting kperp range"
+                (
+                    "rows cover kperp bins below the predeclared "
+                    f"exclusive index {int(args.maximum_kperp_index_exclusive)}"
+                )
+                if args.maximum_kperp_index_exclusive is not None
+                else (
+                    "rows cover every configured kperp bin"
+                    if args.row_scope == "all"
+                    else (
+                        "rows are concentrated in the predeclared reporting "
+                        "kperp range"
+                    )
+                )
             ),
             (
                 f"{int(args.rows_per_kperp_bin)} sampled rows per kperp bin "

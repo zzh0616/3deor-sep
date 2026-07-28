@@ -1,0 +1,63 @@
+{
+  "conclusion": {
+    "dominant_mechanism": "nonstationary_lightcone_cross_frequency_covariance",
+    "excluded_mechanisms": [
+      "exact_primary_beam_operator_closure",
+      "finite_visibility_row_count",
+      "single_response_phase_probe",
+      "source_mode_amplitude_or_unit_conversion",
+      "old_new_sky_or_oskar_contract_drift"
+    ],
+    "invalid_fix": "truth_derived_scalar_rescaling",
+    "required_estimator_change": "overlapping_tapered_local_redshift_source_covariance_with_cross_window_terms"
+  },
+  "formal_integrated_power_ratio": {
+    "new_narrow_common_support": 0.8449444,
+    "new_wide": 0.85396045,
+    "old": 1.012884
+  },
+  "global_actual_amplitude_random_phase": {
+    "new_narrow_mean": 1.039693308796112,
+    "new_narrow_standard_deviation": 0.047730357552682075,
+    "new_wide_mean": 1.0291420256203667,
+    "new_wide_standard_deviation": 0.04615250039703596,
+    "old_mean": 1.00987686,
+    "old_standard_deviation": 0.0475393
+  },
+  "lightcone_stationarity": {
+    "new_analysis_to_input_spatial_variance_ratio": 0.8743046868861738,
+    "new_input_second_to_first_half_variance_ratio": 0.4315873068312196,
+    "old_analysis_to_input_spatial_variance_ratio": 0.9812595710582872,
+    "old_input_second_to_first_half_variance_ratio": 0.7134721870268582
+  },
+  "operator_closure_relative_l2": {
+    "new_matrix_free_to_oskar": 3.346010798961469e-7,
+    "new_narrow_restricted_q": 1.284507509768695e-6,
+    "new_wide_restricted_q": 1.0609132356717502e-6,
+    "old_matrix_free_to_oskar": 5.231265388773346e-7,
+    "old_restricted_q": 5.159822364483504e-7
+  },
+  "overlap_contract": {
+    "frequency_count": 64,
+    "sky_frequency_match_count": 64,
+    "sky_geometry_match": true,
+    "visibility_frequency_match_count": 64
+  },
+  "schema": "visibility_qbeta_response_bias_diagnosis",
+  "schema_version": 1,
+  "spectral_coherence_random_spatial_phase": {
+    "new_narrow_matched_physical": 0.863831963086018,
+    "new_narrow_mean": 0.866108022622627,
+    "new_narrow_physical_minus_mean_z_score": -0.08351715260993314,
+    "new_narrow_standard_deviation": 0.02725259980113747,
+    "new_wide_matched_physical": 0.8720342831296511,
+    "new_wide_mean": 0.874930966556402,
+    "new_wide_physical_minus_mean_z_score": -0.1636269487502697,
+    "new_wide_standard_deviation": 0.01770297282247704,
+    "old_matched_physical": 1.0446552854740656,
+    "old_mean": 0.9976797230608554,
+    "old_physical_minus_mean_z_score": 2.3336879719107,
+    "old_standard_deviation": 0.020129324476377667,
+    "row_partition_count": 2
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "analysis_contract_sha256": "1071e791c0cabe4fb0fa33e5463887d686c2b828cf7e61121ad5d5e23db0d782",
+  "frequency_contract_sha256": "b62b13e1a577f2d5476de35636a00396cd4500c7cfb440bcdb29d5b4facf9621",
+  "formal_promotion": {
+    "maximum_kperp_index_exclusive": 31,
+    "partition_count": 20,
+    "rows_per_kperp_bin": 240,
+    "selected_kperp_bin_count": 31,
+    "selected_row_count": 7440,
+    "status": "running"
+  },
+  "interpretation": {
+    "absolute_science_acceptance": false,
+    "engineering_promotion": true,
+    "reason": "Wide filtering improves conditioning, held-out stability, foreground suppression, and response rank, while the four-partition absolute bank error remains about 15 percent."
+  },
+  "operator_closure_relative_l2": 8.185775432020424e-07,
+  "profile": "quad_kperp_response",
+  "schema": "visibility_qbeta_aperture_pb_128to64_paired_screen",
+  "schema_version": 1,
+  "screen": {
+    "combined_rows_per_kperp_bin": 48,
+    "narrow_analysis_subband": {
+      "bank_total_integrated_power_ratio": 0.8593542014691116,
+      "bank_total_relative_l2": 0.1544437323131772,
+      "foreground_effect_maximum_fraction": 0.0024600875290314516,
+      "heldout_total_integrated_ratio_maximum": 1.0415313944423004,
+      "heldout_total_integrated_ratio_minimum": 0.9534179272035014,
+      "heldout_total_worst_relative_l2": 0.12645152144141275,
+      "response_calibration_validation_relative_l2": 0.14365372929162426,
+      "response_participation_rank": 48.15190964458498,
+      "response_rank": 815,
+      "response_retained_condition_number": 9832.920341981308,
+      "selected_group_count": 179,
+      "strict_fraction_of_selected": 0.8603351955307262
+    },
+    "response_shape": [
+      832,
+      2080
+    ],
+    "wide_full_input": {
+      "bank_total_integrated_power_ratio": 0.8571971137284027,
+      "bank_total_relative_l2": 0.14980762392424918,
+      "foreground_effect_maximum_fraction": 0.0008472306011724694,
+      "heldout_total_integrated_ratio_maximum": 1.03137506671271,
+      "heldout_total_integrated_ratio_minimum": 0.9693511915817423,
+      "heldout_total_worst_relative_l2": 0.09640933827052817,
+      "response_calibration_validation_relative_l2": 0.1449685094114809,
+      "response_participation_rank": 49.84996518002454,
+      "response_rank": 832,
+      "response_retained_condition_number": 565.7176772359173,
+      "selected_group_count": 166,
+      "strict_fraction_of_selected": 0.8674698795180723
+    }
+  },
+  "selected_visibility_count": 196608
+}

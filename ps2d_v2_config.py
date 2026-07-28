@@ -27,6 +27,50 @@ class ResolvedModeFirstAnalysis:
     contract: ModeFirstAnalysisContract
 
 
+FROZEN_GEOMETRY_KEYS = (
+    "radial_spacing_mpc",
+    "transverse_distance_mpc",
+    "spatial_spacing_mpc",
+    "patch_wedge_slope",
+    "horizon_wedge_slope",
+    "kperp_uv_min_mpc_inv",
+    "kperp_uv_max_mpc_inv",
+)
+
+
+def _apply_frozen_geometry(
+    geometry: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    frozen = config.get("frozen_geometry")
+    if frozen is None:
+        return {
+            **geometry,
+            "frozen_geometry_applied": False,
+        }
+    missing = [name for name in FROZEN_GEOMETRY_KEYS if name not in frozen]
+    if missing:
+        raise ValueError(
+            "frozen_geometry lacks required values: " + ", ".join(missing)
+        )
+    values = {name: float(frozen[name]) for name in FROZEN_GEOMETRY_KEYS}
+    if not all(math.isfinite(value) and value > 0.0 for value in values.values()):
+        raise ValueError("frozen_geometry values must be finite and positive")
+    live_relative_difference = {
+        name: float(
+            abs(values[name] - float(geometry[name]))
+            / max(abs(values[name]), np.finfo(np.float64).tiny)
+        )
+        for name in FROZEN_GEOMETRY_KEYS
+    }
+    return {
+        **geometry,
+        **values,
+        "frozen_geometry_applied": True,
+        "frozen_geometry_live_relative_difference": live_relative_difference,
+    }
+
+
 def _wedge_slope(
     cosmology: FlatLambdaCDM,
     redshift: float,
@@ -100,7 +144,7 @@ def resolve_mode_first_geometry(config: dict[str, Any]) -> dict[str, Any]:
     )
     horizon_slope = _wedge_slope(cosmology, reference_redshift, 90.0)
     h = float(cosmology_config["H0_km_s_mpc"]) / 100.0
-    return {
+    geometry = {
         "frequencies_mhz": frequencies,
         "redshifts": redshifts,
         "comoving_distances_mpc": distances,
@@ -120,6 +164,7 @@ def resolve_mode_first_geometry(config: dict[str, Any]) -> dict[str, Any]:
         "kperp_uv_min_mpc_inv": kperp_uv_min,
         "kperp_uv_max_mpc_inv": kperp_uv_max,
     }
+    return _apply_frozen_geometry(geometry, config)
 
 
 def resolve_mode_first_analysis(config: dict[str, Any]) -> ResolvedModeFirstAnalysis:
@@ -171,6 +216,9 @@ def resolve_mode_first_analysis(config: dict[str, Any]) -> ResolvedModeFirstAnal
         demean_mode=str(analysis["demean_mode"]),
         radial_taper=str(analysis["radial_taper"]),
         spatial_taper=str(analysis["spatial_taper"]),
+        window_energy_override=config.get(
+            "frozen_analysis_window_energy"
+        ),
     )
     expected_hash = config.get("frozen_analysis_contract_sha256")
     if expected_hash is not None and str(expected_hash) != contract.analysis_contract_sha256:

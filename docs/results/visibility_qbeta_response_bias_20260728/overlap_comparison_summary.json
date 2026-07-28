@@ -1,0 +1,15 @@
+{
+  "frequency_count": 64,
+  "frequency_first_mhz": 114.7,
+  "frequency_last_mhz": 121.0,
+  "new_manifest": "new_overlap_contract.json",
+  "old_manifest": "old_overlap_contract.json",
+  "schema": "visibility_qbeta_overlap_contract_comparison",
+  "schema_version": 1,
+  "sky_frequency_digest_match_count": 64,
+  "sky_frequency_digest_mismatch_count": 0,
+  "sky_geometry_match": true,
+  "sky_geometry_sha256": "24f4d8c3d5369feb16565dc046f1aba749a397de9856279dd5a8bde69b2cda44",
+  "visibility_frequency_digest_match_count": 64,
+  "visibility_frequency_digest_mismatch_count": 0
+}

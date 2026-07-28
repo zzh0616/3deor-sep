@@ -22,6 +22,7 @@ from visibility_qbeta import (
     stratified_row_indices,
     weighted_response_pseudoinverse,
 )
+from visibility_primary_beam import primary_beam_model_correction
 
 
 def test_direction_cosines_at_phase_centre() -> None:
@@ -34,6 +35,75 @@ def test_direction_cosines_at_phase_centre() -> None:
     np.testing.assert_allclose(l_cosine, 0.0, atol=1e-15)
     np.testing.assert_allclose(m_cosine, 0.0, atol=1e-15)
     np.testing.assert_allclose(n, 1.0, atol=1e-15)
+
+
+def test_primary_beam_model_correction_contract() -> None:
+    frequencies = np.asarray([100.0, 150.0, 200.0])
+    l_cosine = np.asarray([0.0, 0.1, 0.0])
+    m_cosine = np.asarray([0.0, 0.0, 0.2])
+    exact = primary_beam_model_correction(
+        frequencies_hz=frequencies,
+        l_cosine=l_cosine,
+        m_cosine=m_cosine,
+        mode="exact",
+        edge_error_fraction=0.0,
+    )
+    np.testing.assert_array_equal(exact, np.ones((3, 3)))
+
+    static = primary_beam_model_correction(
+        frequencies_hz=frequencies,
+        l_cosine=l_cosine,
+        m_cosine=m_cosine,
+        mode="radial_static",
+        edge_error_fraction=0.1,
+    )
+    np.testing.assert_allclose(static[:, 0], 1.0)
+    np.testing.assert_allclose(static[:, -1], 1.1)
+    np.testing.assert_allclose(static[0], static[-1])
+
+    static_negative = primary_beam_model_correction(
+        frequencies_hz=frequencies,
+        l_cosine=l_cosine,
+        m_cosine=m_cosine,
+        mode="radial_static",
+        edge_error_fraction=-0.1,
+    )
+    np.testing.assert_allclose(static_negative[:, 0], 1.0)
+    np.testing.assert_allclose(static_negative[:, -1], 0.9)
+
+    linear = primary_beam_model_correction(
+        frequencies_hz=frequencies,
+        l_cosine=l_cosine,
+        m_cosine=m_cosine,
+        mode="radial_linear",
+        edge_error_fraction=0.1,
+    )
+    np.testing.assert_allclose(linear[:, 0], 1.0)
+    np.testing.assert_allclose(linear[:, -1], [0.9, 1.0, 1.1])
+
+    ripple = primary_beam_model_correction(
+        frequencies_hz=np.linspace(100.0, 200.0, 5),
+        l_cosine=l_cosine,
+        m_cosine=m_cosine,
+        mode="radial_ripple",
+        edge_error_fraction=0.1,
+        ripple_cycles=1.0,
+    )
+    np.testing.assert_allclose(ripple[:, 0], 1.0)
+    np.testing.assert_allclose(ripple[:, -1], [1.0, 1.1, 1.0, 0.9, 1.0])
+
+    try:
+        primary_beam_model_correction(
+            frequencies_hz=frequencies,
+            l_cosine=l_cosine,
+            m_cosine=m_cosine,
+            mode="exact",
+            edge_error_fraction=0.01,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Exact PB accepted a non-zero model error")
 
 
 def test_time_smearing_uvw_algebra_matches_station_expression() -> None:
@@ -215,6 +285,17 @@ def test_stratified_rows_and_response_inverse() -> None:
         partition_count=2,
     )
     assert np.intersect1d(first, second).size == 0
+    shared = stratified_row_indices(
+        values,
+        np.asarray([0.0, 1.0, 2.0]),
+        rows_per_bin=2,
+        seed=9,
+        partition_index=0,
+        partition_count=1,
+    )
+    np.testing.assert_array_equal(
+        np.sort(shared), np.sort(np.concatenate((first, second)))
+    )
     middle_only = stratified_row_indices(
         values,
         np.asarray([0.0, 1.0, 2.0]),

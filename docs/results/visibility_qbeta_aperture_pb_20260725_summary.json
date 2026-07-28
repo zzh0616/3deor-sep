@@ -1,0 +1,118 @@
+{
+  "analysis_contract_sha256": "2408c72bdc57ac1715b39b292a483564505680f4a67de22c61cb4f38738cf056",
+  "aperture_pb_64freq": {
+    "bank_directory": "/data/zhenghao/fg_rmw/runs/chips_visibility_aperture_pb_64freq_20260725",
+    "bank_sha256": "c0e201145dbb9c7719330d639e0ca0d290a5bfa6b4db241d0ff695eea333d501",
+    "coarse_profiles": {
+      "quad_kperp_kpar2_response": {
+        "bank_total_integrated_power_ratio": 1.0128842903148032,
+        "bank_total_maximum_absolute_error_fraction": 0.16233381103019145,
+        "bank_total_relative_l2": 0.03920957298944688,
+        "foreground_effect_maximum_fraction": 0.00024119933058803247,
+        "heldout_total_integrated_ratio_maximum": 1.018625064699478,
+        "heldout_total_integrated_ratio_minimum": 0.971268928037988,
+        "heldout_total_worst_relative_l2": 0.06129514602943631,
+        "response_window_participation_rank": 30.26070898177544,
+        "selected_group_count": 45,
+        "selected_nominal_cell_count": 348,
+        "strict_group_count": 45
+      },
+      "quad_kperp_response": {
+        "bank_total_integrated_power_ratio": 1.0128842903148028,
+        "bank_total_maximum_absolute_error_fraction": 0.16945987929497383,
+        "bank_total_relative_l2": 0.03978786596709649,
+        "foreground_effect_maximum_fraction": 0.00035127824599111675,
+        "heldout_total_integrated_ratio_maximum": 1.0186250646994774,
+        "heldout_total_integrated_ratio_minimum": 0.9712689280379877,
+        "heldout_total_worst_relative_l2": 0.06279921386205682,
+        "response_window_effective_width_median": 28.09458888586559,
+        "response_window_participation_rank": 36.483230585960115,
+        "selected_group_count": 88,
+        "selected_nominal_cell_count": 348,
+        "strict_group_count": 88
+      }
+    },
+    "combined_directory": "/data/zhenghao/fg_rmw/runs/visibility_qbeta_aperture_pb_64freq_20260725/combined",
+    "combined_rows_per_kperp_bin": 240,
+    "frequency_count": 64,
+    "frequency_maximum_mhz": 121.0,
+    "frequency_minimum_mhz": 114.7,
+    "maximum_partition_frequency_operator_relative_l2": 3.470423310478154e-06,
+    "operator_relative_l2": 1.1000482904675735e-06,
+    "partition_count": 20,
+    "qbeta_calibration_validation_relative_l2": 0.07564476393398072,
+    "qbeta_response_retained_condition_number": 426.22207263005197,
+    "qbeta_response_shape": [
+      408,
+      1056
+    ],
+    "qbeta_response_svd_rank": 408,
+    "result_directory": "/data/zhenghao/fg_rmw/runs/visibility_qbeta_aperture_pb_64freq_20260725",
+    "selected_row_count": 7680
+  },
+  "aperture_pb_8freq_engineering_gate": {
+    "elapsed_seconds": 13.416412387043238,
+    "frequency_count": 8,
+    "maximum_per_frequency_operator_relative_l2": 1.3664552707556727e-06,
+    "operator_relative_l2": 1.1537565929464714e-06,
+    "qbeta_response_svd_rank": 23,
+    "scientific_window_count": 0,
+    "source_band_count": 160,
+    "supported_output_band_count": 23
+  },
+  "compute": {
+    "aperture_pb_64freq_bank_elapsed_hours_approximate": 3.55,
+    "combined_response_and_coarse_elapsed_seconds_approximate": 11.0,
+    "materialized_operator_gib_per_partition_approximate": 48.0,
+    "qbeta_20_partition_elapsed_hours_approximate": 3.5,
+    "shared_beam_cache_elapsed_hours_approximate": 4.75,
+    "shared_beam_cache_gib_per_frequency_approximate": 15.0,
+    "shared_beam_cache_total_tib_approximate": 0.94
+  },
+  "frequency_contract_sha256": "6aa156342c26355cf2f09319e9c814d9cb1f9bd8e9713d3339b729220b6ec25e",
+  "limitations": [
+    "no thermal noise",
+    "fixed baseline-time rows and no uv gridding",
+    "no independent time split or cross-power",
+    "the exact beam cache and OSKAR simulation use the same telescope model",
+    "348 nominal cells are aggregated into 88 overlapping windows and are not independent PS2D estimates"
+  ],
+  "no_primary_beam_baseline": {
+    "quad_kperp_response": {
+      "bank_total_integrated_power_ratio": 1.013116823069395,
+      "bank_total_maximum_absolute_error_fraction": 0.14027636722079628,
+      "bank_total_relative_l2": 0.019840995586482578,
+      "foreground_effect_maximum_fraction": 0.0006896849555642485,
+      "heldout_total_worst_relative_l2": 0.05776855422599383,
+      "physical_shift_pure_integrated_ratio_maximum": 1.017577448003624,
+      "physical_shift_pure_integrated_ratio_minimum": 0.9772615201576708,
+      "physical_shift_pure_worst_relative_l2": 0.0709166565010105,
+      "physical_shift_total_integrated_ratio_maximum": 1.0175782995946736,
+      "physical_shift_total_integrated_ratio_minimum": 0.9771213551700493,
+      "physical_shift_total_worst_relative_l2": 0.07106448089500134,
+      "response_window_participation_rank": 33.18124091772601,
+      "selected_group_count": 85,
+      "selected_nominal_cell_count": 337,
+      "strict_group_count": 85
+    }
+  },
+  "schema": "visibility_qbeta_aperture_pb_promotion",
+  "schema_version": 1,
+  "single_frequency_beam_closure": {
+    "frequency_mhz": 119.4,
+    "selected_row_count": 384,
+    "station0_auto_power": {
+      "complex_correlation": 0.996721,
+      "predicted_to_target_norm": 0.9453055,
+      "relative_l2": 0.09592435
+    },
+    "station_pair_coherency": {
+      "cache_elapsed_seconds": 68.99603432044387,
+      "complex_correlation": 0.9999999999999829,
+      "matrix_free_apply_elapsed_seconds": 0.44027257710695267,
+      "predicted_to_target_norm": 0.9999999853775671,
+      "relative_l2": 1.8977624602877997e-07,
+      "relative_maximum": 2.656462902042113e-07
+    }
+  }
+}
