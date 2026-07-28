@@ -1,0 +1,155 @@
+{
+  "bandpower_count": 436,
+  "bank_kl_relative_l2": 0.086899100396617,
+  "bank_whitened_relative_l2": 0.162412849548632,
+  "covariance_participation_rank": 7.325274452793677,
+  "covariance_rank_limit": 511,
+  "cross_window_correlations": [
+    {
+      "first": "local_00_109p9_113p0mhz",
+      "maximum_absolute_correlation": 0.4277141700353726,
+      "median_absolute_correlation": 0.029677906488883722,
+      "second": "local_01_111p5_114p6mhz"
+    },
+    {
+      "first": "local_00_109p9_113p0mhz",
+      "maximum_absolute_correlation": 0.16656540360082991,
+      "median_absolute_correlation": 0.030558573736657012,
+      "second": "local_02_113p1_116p2mhz"
+    },
+    {
+      "first": "local_00_109p9_113p0mhz",
+      "maximum_absolute_correlation": 0.16950195217317293,
+      "median_absolute_correlation": 0.03023460838534437,
+      "second": "local_03_114p7_117p8mhz"
+    },
+    {
+      "first": "local_00_109p9_113p0mhz",
+      "maximum_absolute_correlation": 0.16282356846131552,
+      "median_absolute_correlation": 0.030274422996847503,
+      "second": "local_04_116p3_119p4mhz"
+    },
+    {
+      "first": "local_01_111p5_114p6mhz",
+      "maximum_absolute_correlation": 0.4142683122785981,
+      "median_absolute_correlation": 0.03030705183490775,
+      "second": "local_02_113p1_116p2mhz"
+    },
+    {
+      "first": "local_01_111p5_114p6mhz",
+      "maximum_absolute_correlation": 0.1745340924687232,
+      "median_absolute_correlation": 0.029721790998517815,
+      "second": "local_03_114p7_117p8mhz"
+    },
+    {
+      "first": "local_01_111p5_114p6mhz",
+      "maximum_absolute_correlation": 0.1659776655530698,
+      "median_absolute_correlation": 0.030152320376386536,
+      "second": "local_04_116p3_119p4mhz"
+    },
+    {
+      "first": "local_02_113p1_116p2mhz",
+      "maximum_absolute_correlation": 0.4633610511466226,
+      "median_absolute_correlation": 0.030160641798580145,
+      "second": "local_03_114p7_117p8mhz"
+    },
+    {
+      "first": "local_02_113p1_116p2mhz",
+      "maximum_absolute_correlation": 0.19841435589815035,
+      "median_absolute_correlation": 0.02992686384463312,
+      "second": "local_04_116p3_119p4mhz"
+    },
+    {
+      "first": "local_03_114p7_117p8mhz",
+      "maximum_absolute_correlation": 0.4996228830107625,
+      "median_absolute_correlation": 0.03051217213964702,
+      "second": "local_04_116p3_119p4mhz"
+    }
+  ],
+  "crossfit_covariance_diagnostics": [
+    {
+      "retained_eigenmode_count": 255,
+      "test_kl_correlation_maximum_off_diagonal": 0.3751587555256195,
+      "test_realization_count": 256,
+      "test_standardized_mean_rms": 4.657228631881794,
+      "test_to_train_variance_ratio_median": 1.7409062587157136,
+      "test_to_train_variance_ratio_p10": 0.9749242484366801,
+      "test_to_train_variance_ratio_p90": 6.82823728772315,
+      "train_covariance_participation_rank": 7.518430584902003,
+      "train_fold": 0,
+      "train_realization_count": 256
+    },
+    {
+      "retained_eigenmode_count": 255,
+      "test_kl_correlation_maximum_off_diagonal": 0.40707460509556737,
+      "test_realization_count": 256,
+      "test_standardized_mean_rms": 5.025123984102853,
+      "test_to_train_variance_ratio_median": 1.814904637004885,
+      "test_to_train_variance_ratio_p10": 1.0412381431947757,
+      "test_to_train_variance_ratio_p90": 7.089794935243203,
+      "train_covariance_participation_rank": 6.894505860455783,
+      "train_fold": 1,
+      "train_realization_count": 256
+    }
+  ],
+  "decorrelated_correlation_maximum_off_diagonal": 1.6097136669926902e-12,
+  "decorrelated_covariance_maximum_off_diagonal": 1.609713666992693e-12,
+  "eigen_rcond": 1e-06,
+  "kl_correlation_maximum_off_diagonal": 1.6096214741673082e-12,
+  "profile": "quad_kperp_response",
+  "realization_count": 512,
+  "realization_source": "common 2D spatial phase randomization retaining every spatial mode's complete 128-frequency complex vector",
+  "response_window_participation_rank_sum": 178.38708779969562,
+  "response_window_ranks": [
+    {
+      "label": "local_00_109p9_113p0mhz",
+      "numerical_rank_rcond_1e3": 88,
+      "participation_rank": 35.48039677361971,
+      "selected_bandpower_count": 88
+    },
+    {
+      "label": "local_01_111p5_114p6mhz",
+      "numerical_rank_rcond_1e3": 88,
+      "participation_rank": 35.70189272361556,
+      "selected_bandpower_count": 88
+    },
+    {
+      "label": "local_02_113p1_116p2mhz",
+      "numerical_rank_rcond_1e3": 87,
+      "participation_rank": 35.775917062724076,
+      "selected_bandpower_count": 87
+    },
+    {
+      "label": "local_03_114p7_117p8mhz",
+      "numerical_rank_rcond_1e3": 87,
+      "participation_rank": 35.698913104545454,
+      "selected_bandpower_count": 87
+    },
+    {
+      "label": "local_04_116p3_119p4mhz",
+      "numerical_rank_rcond_1e3": 86,
+      "participation_rank": 35.72996813519081,
+      "selected_bandpower_count": 86
+    }
+  ],
+  "retained_eigenmode_count": 403,
+  "schema": "visibility_qbeta_local_redshift_covariance",
+  "schema_version": 1,
+  "selection_uses_covariance": false,
+  "shared_realization_contract_sha256": "0316dc53227fa36832d927f8d778aa994e8cab6a99e188fa3efae6d05e9a2e9e",
+  "window_labels": [
+    "local_00_109p9_113p0mhz",
+    "local_01_111p5_114p6mhz",
+    "local_02_113p1_116p2mhz",
+    "local_03_114p7_117p8mhz",
+    "local_04_116p3_119p4mhz"
+  ],
+  "window_offsets": [
+    0,
+    88,
+    176,
+    263,
+    350,
+    436
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "analysis": {
+    "demean_mode": "global",
+    "full_kperp_bins": 32,
+    "radial_nyquist_policy": "exclude",
+    "radial_taper": "hann",
+    "spatial_taper": "hann",
+    "window_kperp_bins": 32
+  },
+  "calibration_source": {
+    "kperp_bins": 32,
+    "radial_nyquist_policy": "include",
+    "transverse_support": "full_fft_square"
+  },
+  "cosmology": {
+    "H0_km_s_mpc": 67.8,
+    "Om0": 0.308
+  },
+  "eor_window": {
+    "exclude_exact_dc": true,
+    "foreground_support_angle_deg": 6.4436,
+    "kpar_floor_h_mpc": 0.2,
+    "profile": "finite_source_patch_corner",
+    "suprahorizon_buffer_h_mpc": 0.1
+  },
+  "estimator_partitions": {
+    "control_kpar_indices": [
+      0,
+      1
+    ],
+    "guard_kpar_indices": [
+      2
+    ]
+  },
+  "frequencies_mhz": [
+    113.1,
+    113.2,
+    113.3,
+    113.4,
+    113.5,
+    113.6,
+    113.7,
+    113.8,
+    113.9,
+    114.0,
+    114.1,
+    114.2,
+    114.3,
+    114.4,
+    114.5,
+    114.6,
+    114.7,
+    114.8,
+    114.9,
+    115.0,
+    115.1,
+    115.2,
+    115.3,
+    115.4,
+    115.5,
+    115.6,
+    115.7,
+    115.8,
+    115.9,
+    116.0,
+    116.1,
+    116.2
+  ],
+  "frozen_analysis_contract_sha256": "bb1986707be441a155c36eace6686b3edafea18d5c830657e4ea1e1ee6a92193",
+  "frozen_analysis_window_energy": 0.05068809259682895,
+  "frozen_geometry": {
+    "horizon_wedge_slope": 4.390291554316547,
+    "kperp_uv_max_mpc_inv": 1.581562857775018,
+    "kperp_uv_min_mpc_inv": 0.018978754293300214,
+    "patch_wedge_slope": 0.49270100102664455,
+    "radial_spacing_mpc": 1.9739326482830812,
+    "spatial_spacing_mpc": 1.5408425572929902,
+    "transverse_distance_mpc": 9931.924735541223
+  },
+  "image_geometry": {
+    "eval_crop_size": 256,
+    "source_image_size": 512,
+    "spatial_pixel_arcsec": 32.0
+  },
+  "instrument_support": {
+    "max_uv_lambda": 2500.0,
+    "min_uv_lambda": 30.0
+  },
+  "legacy_reproduction": {
+    "status": "local_02_113p1_116p2mhz_analysis"
+  },
+  "reference_frequency_mhz": 114.65,
+  "reporting_masks": {
+    "high_kpar_fraction": 0.75,
+    "mid_kperp_fraction_range": [
+      0.2,
+      0.5
+    ]
+  },
+  "rest_frequency_mhz": 1420.40575,
+  "schema": "ps2d_v2_mode_first_config",
+  "schema_version": 2
+}

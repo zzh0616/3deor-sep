@@ -120,7 +120,7 @@ def resolve_mode_first_geometry(config: dict[str, Any]) -> dict[str, Any]:
     image = config["image_geometry"]
     pixel_angle_rad = math.radians(float(image["spatial_pixel_arcsec"]) / 3600.0)
     spatial_spacing = transverse_distance * pixel_angle_rad
-    source_corner_angle_deg = math.sqrt(2.0) * (
+    source_image_corner_angle_deg = math.sqrt(2.0) * (
         float(image["source_image_size"])
         * float(image["spatial_pixel_arcsec"])
         / 2.0
@@ -139,8 +139,23 @@ def resolve_mode_first_geometry(config: dict[str, Any]) -> dict[str, Any]:
     profile = str(window["profile"]).strip().lower()
     if profile != "finite_source_patch_corner":
         raise ValueError("v2 pilot currently requires finite_source_patch_corner")
+    foreground_support_angle_deg = float(
+        window.get(
+            "foreground_support_angle_deg",
+            source_image_corner_angle_deg,
+        )
+    )
+    if (
+        not math.isfinite(foreground_support_angle_deg)
+        or foreground_support_angle_deg < source_image_corner_angle_deg
+        or foreground_support_angle_deg > 90.0
+    ):
+        raise ValueError(
+            "foreground_support_angle_deg must cover the source image "
+            "and be at most 90 degrees"
+        )
     patch_slope = _wedge_slope(
-        cosmology, reference_redshift, source_corner_angle_deg
+        cosmology, reference_redshift, foreground_support_angle_deg
     )
     horizon_slope = _wedge_slope(cosmology, reference_redshift, 90.0)
     h = float(cosmology_config["H0_km_s_mpc"]) / 100.0
@@ -155,7 +170,10 @@ def resolve_mode_first_geometry(config: dict[str, Any]) -> dict[str, Any]:
         "reference_redshift": reference_redshift,
         "transverse_distance_mpc": transverse_distance,
         "spatial_spacing_mpc": spatial_spacing,
-        "source_corner_angle_deg": source_corner_angle_deg,
+        "source_image_corner_angle_deg": source_image_corner_angle_deg,
+        "foreground_support_angle_deg": foreground_support_angle_deg,
+        # Historical consumers use this key as the delay-support angle.
+        "source_corner_angle_deg": foreground_support_angle_deg,
         "patch_wedge_slope": patch_slope,
         "horizon_wedge_slope": horizon_slope,
         "h": h,

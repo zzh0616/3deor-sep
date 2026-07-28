@@ -10,6 +10,7 @@ used only for direct-DFT closure and a held-out target-subspace test.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -44,6 +45,9 @@ from visibility_qbeta import (  # noqa: E402
     source_bandpowers,
     stratified_row_indices,
     weighted_response_pseudoinverse,
+)
+from visibility_qbeta_local_redshift import (  # noqa: E402
+    frequency_subset_indices,
 )
 from visibility_primary_beam import (  # noqa: E402
     build_direction_corrected_kernel_multiplier,
@@ -92,6 +96,15 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--bank-dir", type=Path, required=True)
     parser.add_argument("--osm-pattern", required=True)
     parser.add_argument("--sky-cache", type=Path, required=True)
+    parser.add_argument(
+        "--evaluation-osm-pattern",
+        help="Optional independent EoR realization used only after calibration.",
+    )
+    parser.add_argument(
+        "--evaluation-sky-cache",
+        type=Path,
+        help="Cache for --evaluation-osm-pattern.",
+    )
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--rows-per-kperp-bin", type=int, default=8)
@@ -428,10 +441,20 @@ def _load_or_build_sky_cache(
         )
     with np.load(args.sky_cache, allow_pickle=False) as archive:
         cache = {name: np.asarray(archive[name]) for name in archive.files}
-    if not np.allclose(
-        cache["frequencies_mhz"], frequencies_mhz, rtol=0.0, atol=1e-9
-    ):
-        raise ValueError("Sky-cache frequencies differ from the analysis")
+    cached_frequencies = np.asarray(
+        cache["frequencies_mhz"], dtype=np.float64
+    )
+    indices = frequency_subset_indices(
+        cached_frequencies,
+        frequencies_mhz,
+        atol=1e-9,
+    )
+    cache["frequencies_mhz"] = cached_frequencies[indices]
+    cache["eor_jy"] = np.asarray(cache["eor_jy"])[indices]
+    cache["k2jy_per_pixel"] = np.asarray(
+        cache["k2jy_per_pixel"]
+    )[indices]
+    cache["parent_frequency_indices"] = indices
     if cache["eor_jy"].shape != (frequencies_mhz.size, expected_source_count):
         raise ValueError("Sky-cache flux cube has the wrong shape")
     return cache
@@ -439,13 +462,43 @@ def _load_or_build_sky_cache(
 
 def _load_bank(
     bank_dir: Path,
+    requested_frequencies_hz: np.ndarray | None = None,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     manifest = json.loads((bank_dir / "manifest.json").read_text(encoding="utf-8"))
     bank_path = bank_dir / "visibility_bank.npz"
     if _sha256(bank_path) != str(manifest["bank_sha256"]):
         raise ValueError("Visibility-bank SHA256 differs from its manifest")
     with np.load(bank_path, allow_pickle=False) as archive:
-        bank = {name: np.asarray(archive[name]) for name in archive.files}
+        parent_frequencies = np.asarray(
+            archive["frequencies_hz"], dtype=np.float64
+        )
+        if requested_frequencies_hz is None:
+            indices = np.arange(parent_frequencies.size, dtype=np.int64)
+        else:
+            indices = frequency_subset_indices(
+                parent_frequencies,
+                requested_frequencies_hz,
+                atol=1e-3,
+            )
+        bank = {
+            "frequencies_hz": parent_frequencies[indices],
+            "sample_uvw_m": np.asarray(archive["sample_uvw_m"]),
+            "sample_fg": np.asarray(archive["sample_fg"])[indices],
+            "sample_eor": np.asarray(archive["sample_eor"])[indices],
+            "parent_frequency_indices": indices,
+        }
+        for name in (
+            "station_type",
+            "gaussian_fwhm_deg",
+            "gaussian_reference_frequency_hz",
+            "sample_row_indices",
+            "sample_time_s",
+            "sample_split",
+            "sample_antenna1",
+            "sample_antenna2",
+        ):
+            if name in archive.files:
+                bank[name] = np.asarray(archive[name])
     return bank, manifest
 
 
@@ -1270,16 +1323,33 @@ def main(argv: Iterable[str] | None = None) -> None:
     frequency_config = json.loads(
         frequency_config_path.read_text(encoding="utf-8")
     )
-    frequency_resolved = resolve_mode_first_analysis(frequency_config)
     frequencies_mhz = np.asarray(
-        frequency_resolved.geometry["frequencies_mhz"], dtype=np.float64
+        frequency_config["frequencies_mhz"], dtype=np.float64
     )
+    frequency_contract_sha256 = str(
+        frequency_config.get(
+            "frozen_analysis_contract_sha256",
+            frequency_config.get("frequency_view_contract_sha256", ""),
+        )
+    )
+    if not frequency_contract_sha256:
+        frequency_contract_sha256 = hashlib.sha256(
+            json.dumps(
+                frequency_config,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
     analysis_frequency_indices = _analysis_frequency_indices(
         frequencies_mhz,
         analysis_frequencies_mhz,
     )
     frequencies_hz = frequencies_mhz * 1e6
-    bank, manifest = _load_bank(args.bank_dir)
+    bank, manifest = _load_bank(
+        args.bank_dir,
+        requested_frequencies_hz=frequencies_hz,
+    )
     if not np.allclose(
         bank["frequencies_hz"], frequencies_hz, rtol=0.0, atol=1e-3
     ):
@@ -1292,6 +1362,38 @@ def main(argv: Iterable[str] | None = None) -> None:
         raise ValueError("Analysis and frequency configs use different sky sizes")
     source_count = source_size * source_size
     sky = _load_or_build_sky_cache(args, frequencies_mhz, source_count)
+    if (args.evaluation_osm_pattern is None) != (
+        args.evaluation_sky_cache is None
+    ):
+        raise ValueError(
+            "--evaluation-osm-pattern and --evaluation-sky-cache must coexist"
+        )
+    science_sky = sky
+    evaluation_sky_cache_sha256: str | None = None
+    if args.evaluation_sky_cache is not None:
+        evaluation_args = copy.copy(args)
+        evaluation_args.osm_pattern = str(args.evaluation_osm_pattern)
+        evaluation_args.sky_cache = args.evaluation_sky_cache
+        science_sky = _load_or_build_sky_cache(
+            evaluation_args, frequencies_mhz, source_count
+        )
+        for name in ("l_cosine", "m_cosine", "n_minus_one"):
+            if not np.array_equal(science_sky[name], sky[name]):
+                raise ValueError(
+                    f"Independent evaluation sky differs in {name}"
+                )
+        if not np.allclose(
+            science_sky["k2jy_per_pixel"],
+            sky["k2jy_per_pixel"],
+            rtol=1e-12,
+            atol=0.0,
+        ):
+            raise ValueError(
+                "Independent evaluation sky uses different K-to-Jy factors"
+            )
+        evaluation_sky_cache_sha256 = _sha256(
+            args.evaluation_sky_cache
+        )
 
     reference_frequency_hz = (
         float(resolved.geometry["reference_frequency_mhz"]) * 1e6
@@ -1516,6 +1618,21 @@ def main(argv: Iterable[str] | None = None) -> None:
         json.dumps({"event": "operator_closure", **operator_closure}),
         flush=True,
     )
+    if science_sky is sky:
+        science_eor_vis = target_eor_vis
+    else:
+        science_eor_tensor = torch.as_tensor(
+            science_sky["eor_jy"].reshape(
+                frequencies_hz.size, source_size, source_size
+            ),
+            dtype=real_dtype,
+            device=device,
+        )
+        science_eor_vis = _apply_operator(
+            torch=torch,
+            operator=operator,
+            sky_jy=science_eor_tensor,
+        )
 
     source_layout = build_sky_band_layout(
         (frequencies_hz.size, source_size, source_size),
@@ -1637,8 +1754,10 @@ def main(argv: Iterable[str] | None = None) -> None:
     identity = np.eye(source_band_ids.size, dtype=np.float64)
 
     eor_k = (
-        sky["eor_jy"]
-        / np.asarray(sky["k2jy_per_pixel"], dtype=np.float64)[:, None]
+        science_sky["eor_jy"]
+        / np.asarray(
+            science_sky["k2jy_per_pixel"], dtype=np.float64
+        )[:, None]
     ).reshape(frequencies_hz.size, source_size, source_size)
     eor_spectrum = np.fft.fftn(eor_k, norm="ortho")
     source_scope_mask = np.isin(source_layout.mode_bands, source_band_ids)
@@ -1702,7 +1821,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         **bandpower_kwargs,
     )
     bank_eor_q, _, _, _, _ = _visibility_bandpowers(
-        visibilities=target_eor_vis,
+        visibilities=science_eor_vis,
         **bandpower_kwargs,
     )
     bank_total_q, _, _, _, _ = _visibility_bandpowers(
@@ -1710,7 +1829,7 @@ def main(argv: Iterable[str] | None = None) -> None:
             np.asarray(
                 bank["sample_fg"][:, selected_rows], dtype=np.complex128
             )
-            + target_eor_vis
+            + science_eor_vis
         ),
         **bandpower_kwargs,
     )
@@ -1796,6 +1915,15 @@ def main(argv: Iterable[str] | None = None) -> None:
 
     products = {
         "input_frequencies_mhz": frequencies_mhz,
+        "bank_parent_frequency_indices": bank[
+            "parent_frequency_indices"
+        ],
+        "sky_parent_frequency_indices": sky[
+            "parent_frequency_indices"
+        ],
+        "science_sky_parent_frequency_indices": science_sky[
+            "parent_frequency_indices"
+        ],
         "analysis_frequency_indices": analysis_frequency_indices,
         "analysis_frequencies_mhz": analysis_frequencies_mhz,
         "selected_bank_rows": selected_rows,
@@ -1858,10 +1986,11 @@ def main(argv: Iterable[str] | None = None) -> None:
         "schema_version": 3,
         "analysis_contract_sha256": resolved.contract.analysis_contract_sha256,
         "frequency_contract_sha256": (
-            frequency_resolved.contract.analysis_contract_sha256
+            frequency_contract_sha256
         ),
         "visibility_bank_sha256": manifest["bank_sha256"],
         "sky_cache_sha256": _sha256(args.sky_cache),
+        "evaluation_sky_cache_sha256": evaluation_sky_cache_sha256,
         "settings": {
             "rows_per_kperp_bin": int(args.rows_per_kperp_bin),
             "row_scope": str(args.row_scope),
@@ -1878,6 +2007,9 @@ def main(argv: Iterable[str] | None = None) -> None:
             "validation_repeats": int(args.validation_repeats),
             "mixture_repeats": int(args.mixture_repeats),
             "source_scope": str(args.source_scope),
+            "independent_evaluation_sky": bool(
+                args.evaluation_sky_cache is not None
+            ),
             "probe_batch_size": int(args.probe_batch_size),
             "probe_seed": int(args.probe_seed),
             "operator_dtype": str(args.operator_dtype),

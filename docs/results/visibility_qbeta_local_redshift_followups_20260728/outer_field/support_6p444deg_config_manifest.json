@@ -1,0 +1,124 @@
+{
+  "analysis_channel_count": 32,
+  "foreground_support_angle_deg": 6.4436,
+  "full_config": "/data1/zhenghao/fg_rmw/code/3dnet_128freq_20260726/configs/ps2d_v2_128wide_isobeam_patch.json",
+  "geometry_reference_frequency_mhz": 114.65,
+  "input_channel_count": 64,
+  "schema": "visibility_qbeta_local_redshift_config_set",
+  "schema_version": 1,
+  "stride_channels": 16,
+  "target_start": 32,
+  "target_stop": 96,
+  "windows": [
+    {
+      "analysis_config": "local_00_109p9_113p0mhz_analysis.json",
+      "analysis_contract_sha256": "bb1986707be441a155c36eace6686b3edafea18d5c830657e4ea1e1ee6a92193",
+      "analysis_frequency_range_mhz": [
+        109.9,
+        113.0
+      ],
+      "analysis_start": 16,
+      "analysis_stop": 48,
+      "geometry_reference_frequency_mhz": 114.65,
+      "index": 0,
+      "input_config": "local_00_109p9_113p0mhz_input.json",
+      "input_contract_sha256": "0f343f0022f609cff943c16b01984f628a4cdc3a20010e9d4ffb65cd04710c89",
+      "input_frequency_range_mhz": [
+        108.3,
+        114.6
+      ],
+      "input_start": 0,
+      "input_stop": 64,
+      "label": "local_00_109p9_113p0mhz",
+      "reference_frequency_mhz": 111.45
+    },
+    {
+      "analysis_config": "local_01_111p5_114p6mhz_analysis.json",
+      "analysis_contract_sha256": "bb1986707be441a155c36eace6686b3edafea18d5c830657e4ea1e1ee6a92193",
+      "analysis_frequency_range_mhz": [
+        111.5,
+        114.6
+      ],
+      "analysis_start": 32,
+      "analysis_stop": 64,
+      "geometry_reference_frequency_mhz": 114.65,
+      "index": 1,
+      "input_config": "local_01_111p5_114p6mhz_input.json",
+      "input_contract_sha256": "5ed4eb92f710a4fc5e036c59ed357734cce264036fe1b1f6175f9ebf41e09895",
+      "input_frequency_range_mhz": [
+        109.9,
+        116.2
+      ],
+      "input_start": 16,
+      "input_stop": 80,
+      "label": "local_01_111p5_114p6mhz",
+      "reference_frequency_mhz": 113.05
+    },
+    {
+      "analysis_config": "local_02_113p1_116p2mhz_analysis.json",
+      "analysis_contract_sha256": "bb1986707be441a155c36eace6686b3edafea18d5c830657e4ea1e1ee6a92193",
+      "analysis_frequency_range_mhz": [
+        113.1,
+        116.2
+      ],
+      "analysis_start": 48,
+      "analysis_stop": 80,
+      "geometry_reference_frequency_mhz": 114.65,
+      "index": 2,
+      "input_config": "local_02_113p1_116p2mhz_input.json",
+      "input_contract_sha256": "ebeee6e0342a5813db7fd15e94594b051885343e89ace17e2ccd6a7e69446eb4",
+      "input_frequency_range_mhz": [
+        111.5,
+        117.8
+      ],
+      "input_start": 32,
+      "input_stop": 96,
+      "label": "local_02_113p1_116p2mhz",
+      "reference_frequency_mhz": 114.64999999999999
+    },
+    {
+      "analysis_config": "local_03_114p7_117p8mhz_analysis.json",
+      "analysis_contract_sha256": "bb1986707be441a155c36eace6686b3edafea18d5c830657e4ea1e1ee6a92193",
+      "analysis_frequency_range_mhz": [
+        114.7,
+        117.8
+      ],
+      "analysis_start": 64,
+      "analysis_stop": 96,
+      "geometry_reference_frequency_mhz": 114.65,
+      "index": 3,
+      "input_config": "local_03_114p7_117p8mhz_input.json",
+      "input_contract_sha256": "6f04ec6b032decd7e508bbf9522d5249ef53f15092d603a378929cb1639f25a6",
+      "input_frequency_range_mhz": [
+        113.1,
+        119.4
+      ],
+      "input_start": 48,
+      "input_stop": 112,
+      "label": "local_03_114p7_117p8mhz",
+      "reference_frequency_mhz": 116.25
+    },
+    {
+      "analysis_config": "local_04_116p3_119p4mhz_analysis.json",
+      "analysis_contract_sha256": "bb1986707be441a155c36eace6686b3edafea18d5c830657e4ea1e1ee6a92193",
+      "analysis_frequency_range_mhz": [
+        116.3,
+        119.4
+      ],
+      "analysis_start": 80,
+      "analysis_stop": 112,
+      "geometry_reference_frequency_mhz": 114.65,
+      "index": 4,
+      "input_config": "local_04_116p3_119p4mhz_input.json",
+      "input_contract_sha256": "f89c27a01a8bd23696a81e0a2d3f37a769b3626fc4b047fb8d1f3162fd588f0e",
+      "input_frequency_range_mhz": [
+        114.7,
+        121.0
+      ],
+      "input_start": 64,
+      "input_stop": 128,
+      "label": "local_04_116p3_119p4mhz",
+      "reference_frequency_mhz": 117.85
+    }
+  ]
+}

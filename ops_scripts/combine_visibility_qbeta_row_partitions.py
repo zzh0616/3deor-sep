@@ -339,12 +339,20 @@ def main(argv: Iterable[str] | None = None) -> None:
         invariant_arrays += ("foreground_ranks",)
     if all("selected_row_kperp_indices" in archive for archive in archives):
         invariant_arrays += ("selected_row_kperp_indices",)
+    for name in (
+        "bank_parent_frequency_indices",
+        "sky_parent_frequency_indices",
+        "science_sky_parent_frequency_indices",
+    ):
+        if all(name in archive for archive in archives):
+            invariant_arrays += (name,)
     for meta, archive in zip(metadata[1:], archives[1:]):
         for key in (
             "analysis_contract_sha256",
             "frequency_contract_sha256",
             "visibility_bank_sha256",
             "sky_cache_sha256",
+            "evaluation_sky_cache_sha256",
         ):
             if meta.get(key) != reference_meta.get(key):
                 raise ValueError(f"Partition metadata differ in {key}")
@@ -384,6 +392,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         for key, default in (
             ("source_scope", "reporting"),
             ("row_scope", "all"),
+            ("independent_evaluation_sky", False),
         ):
             if meta["settings"].get(key, default) != reference_meta[
                 "settings"
@@ -603,6 +612,9 @@ def main(argv: Iterable[str] | None = None) -> None:
         ),
         "visibility_bank_sha256": reference_meta["visibility_bank_sha256"],
         "sky_cache_sha256": reference_meta["sky_cache_sha256"],
+        "evaluation_sky_cache_sha256": reference_meta.get(
+            "evaluation_sky_cache_sha256"
+        ),
         "instrument": {
             "primary_beam_request": reference_meta["settings"].get(
                 "primary_beam_request", "none"
@@ -657,6 +669,11 @@ def main(argv: Iterable[str] | None = None) -> None:
         "operator_closure": _operator_closure(predicted_vis, target_vis),
         "qbeta": {
             "source_scope": source_scope,
+            "independent_evaluation_sky": bool(
+                reference_meta["settings"].get(
+                    "independent_evaluation_sky", False
+                )
+            ),
             "input_frequency_count": reference_meta["settings"].get(
                 "input_frequency_count",
                 (
