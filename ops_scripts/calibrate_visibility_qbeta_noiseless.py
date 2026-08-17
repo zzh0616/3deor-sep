@@ -52,8 +52,11 @@ from visibility_qbeta_local_redshift import (  # noqa: E402
 from visibility_primary_beam import (  # noqa: E402
     build_direction_corrected_kernel_multiplier,
     build_oskar_circular_gaussian_kernel_multiplier,
+    build_time_direction_kernel_multiplier,
     direction_cosine_geometry_sha256,
+    load_frequency_time_direction_power_caches,
     open_indexed_frequency_row_direction_kernel_multiplier,
+    row_time_indices_for_selected_rows,
 )
 
 
@@ -161,6 +164,14 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         help=(
             "Directory pattern with {freq} for one exact OSKAR station-pair "
             "coherency cache per input frequency"
+        ),
+    )
+    parser.add_argument(
+        "--aperture-common-beam-cache-pattern",
+        help=(
+            "Directory pattern with {freq} for one OSKAR station auto-power "
+            "cache per input frequency. This intentionally applies one "
+            "common scalar beam to every baseline."
         ),
     )
     parser.add_argument(
@@ -1450,6 +1461,8 @@ def main(argv: Iterable[str] | None = None) -> None:
             "Aperture-beam model errors require an aperture-array bank"
         )
     aperture_cache_metadata: list[dict[str, Any]] = []
+    aperture_common_cache_metadata: list[dict[str, Any]] = []
+    aperture_beam_implementation: str | None = None
     if station_type == "gaussian":
         beam_multiplier = build_oskar_circular_gaussian_kernel_multiplier(
             torch=torch,
@@ -1464,102 +1477,169 @@ def main(argv: Iterable[str] | None = None) -> None:
             operator_dtype=str(args.operator_dtype),
         )
     elif station_type == "aperture_array":
-        if not args.aperture_row_beam_cache_pattern:
-            raise ValueError(
-                "Aperture-array banks require "
-                "--aperture-row-beam-cache-pattern"
-            )
-        cache_dirs = [
-            _format_pattern(
-                str(args.aperture_row_beam_cache_pattern),
-                float(frequency_mhz),
-            )
-            for frequency_mhz in frequencies_mhz
-        ]
-        (
-            beam_multiplier,
-            aperture_cache_metadata,
-            cached_rows_by_frequency,
-        ) = open_indexed_frequency_row_direction_kernel_multiplier(
-            cache_dirs,
-            selected_bank_rows=selected_rows,
-        )
-        expected_direction_sha256 = direction_cosine_geometry_sha256(
-            l_cosine=sky["l_cosine"],
-            m_cosine=sky["m_cosine"],
-            n_minus_one=sky["n_minus_one"],
-        )
-        for index, (cache_dir, metadata, cached_rows) in enumerate(
-            zip(
-                cache_dirs,
-                aperture_cache_metadata,
-                cached_rows_by_frequency,
-                strict=True,
-            )
+        if bool(args.aperture_row_beam_cache_pattern) == bool(
+            args.aperture_common_beam_cache_pattern
         ):
-            frequency_tag = f"{float(frequencies_mhz[index]):.2f}"
-            expected_bank_shard = (
-                args.bank_dir / "shards" / f"freq_{frequency_tag}.npz"
+            raise ValueError(
+                "Aperture-array banks require exactly one of "
+                "--aperture-row-beam-cache-pattern and "
+                "--aperture-common-beam-cache-pattern"
             )
-            expected_oskar_config = (
-                args.bank_dir
-                / "configs"
-                / f"sim_eor_{frequency_tag}.ini"
+        if args.aperture_common_beam_cache_pattern:
+            cache_dirs = [
+                _format_pattern(
+                    str(args.aperture_common_beam_cache_pattern),
+                    float(frequency_mhz),
+                )
+                for frequency_mhz in frequencies_mhz
+            ]
+            (
+                common_beam_values,
+                aperture_common_cache_metadata,
+            ) = load_frequency_time_direction_power_caches(
+                cache_dirs,
+                frequencies_hz=frequencies_hz,
+                expected_source_count=int(sky["l_cosine"].size),
             )
-            if (
-                str(metadata.get("bank_shard_sha256", ""))
-                != _sha256(expected_bank_shard)
+            row_time_indices = row_time_indices_for_selected_rows(
+                all_times_s=bank["sample_time_s"],
+                selected_rows=selected_rows,
+                time_count=int(common_beam_values.shape[1]),
+            )
+            beam_multiplier = build_time_direction_kernel_multiplier(
+                torch=torch,
+                values=common_beam_values,
+                row_time_indices=row_time_indices,
+                device=device,
+                operator_dtype=str(args.operator_dtype),
+            )
+            for index, (cache_dir, metadata) in enumerate(
+                zip(cache_dirs, aperture_common_cache_metadata, strict=True)
             ):
-                raise ValueError(
-                    f"Aperture row-beam bank shard differs in {cache_dir}"
+                expected_osm = _format_pattern(
+                    str(args.osm_pattern), float(frequencies_mhz[index])
                 )
-            if (
-                str(metadata.get("oskar_config_sha256", ""))
-                != _sha256(expected_oskar_config)
-            ):
-                raise ValueError(
-                    f"Aperture row-beam OSKAR config differs in {cache_dir}"
-                )
-            if tuple(int(value) for value in metadata["shape"]) != (
-                int(cached_rows.size),
-                int(sky["l_cosine"].size),
-            ):
-                raise ValueError(
-                    f"Aperture row-beam source geometry differs in {cache_dir}"
-                )
-            if (
-                str(metadata.get("direction_sha256", ""))
-                != expected_direction_sha256
-            ):
-                raise ValueError(
-                    f"Aperture row-beam direction order differs in {cache_dir}"
-                )
-            if not np.isclose(
-                float(metadata["frequency_hz"]),
-                float(frequencies_hz[index]),
-                rtol=0.0,
-                atol=1e-3,
-            ):
-                raise ValueError(
-                    "Aperture row-beam cache frequency differs from bank"
-                )
-            cached_settings = metadata.get("oskar_operator_settings", {})
-            expected_settings = {
-                "frequency_hz": float(frequencies_hz[index]),
-                "phase_centre_dec_deg": float(args.phase_dec_deg),
-                "channel_bandwidth_hz": float(args.channel_bandwidth_hz),
-                "time_average_sec": float(args.integration_time_s),
-            }
-            for name, expected_value in expected_settings.items():
-                if not np.isclose(
-                    float(cached_settings.get(name, math.nan)),
-                    expected_value,
-                    rtol=0.0,
-                    atol=max(1e-9, abs(expected_value) * 1e-12),
+                if str(metadata.get("osm_sha256", "")) != _sha256(
+                    expected_osm
                 ):
                     raise ValueError(
-                        f"Aperture row-beam {name} differs in {cache_dir}"
+                        f"Common power-beam OSM differs in {cache_dir}"
                     )
+                expected_common_settings = {
+                    "phase_ra_deg": float(args.phase_ra_deg),
+                    "phase_dec_deg": float(args.phase_dec_deg),
+                    "observation_length_s": float(
+                        manifest["instrument"]["observation_length_s"]
+                    ),
+                    "time_steps": float(
+                        manifest["instrument"]["time_steps"]
+                    ),
+                }
+                for name, expected_value in expected_common_settings.items():
+                    if not np.isclose(
+                        float(metadata.get(name, math.nan)),
+                        expected_value,
+                        rtol=0.0,
+                        atol=max(1e-9, abs(expected_value) * 1e-12),
+                    ):
+                        raise ValueError(
+                            f"Common power-beam {name} differs in {cache_dir}"
+                        )
+            aperture_beam_implementation = "common_scalar_power"
+        else:
+            cache_dirs = [
+                _format_pattern(
+                    str(args.aperture_row_beam_cache_pattern),
+                    float(frequency_mhz),
+                )
+                for frequency_mhz in frequencies_mhz
+            ]
+            (
+                beam_multiplier,
+                aperture_cache_metadata,
+                cached_rows_by_frequency,
+            ) = open_indexed_frequency_row_direction_kernel_multiplier(
+                cache_dirs,
+                selected_bank_rows=selected_rows,
+            )
+            expected_direction_sha256 = direction_cosine_geometry_sha256(
+                l_cosine=sky["l_cosine"],
+                m_cosine=sky["m_cosine"],
+                n_minus_one=sky["n_minus_one"],
+            )
+            for index, (cache_dir, metadata, cached_rows) in enumerate(
+                zip(
+                    cache_dirs,
+                    aperture_cache_metadata,
+                    cached_rows_by_frequency,
+                    strict=True,
+                )
+            ):
+                frequency_tag = f"{float(frequencies_mhz[index]):.2f}"
+                expected_bank_shard = (
+                    args.bank_dir / "shards" / f"freq_{frequency_tag}.npz"
+                )
+                expected_oskar_config = (
+                    args.bank_dir
+                    / "configs"
+                    / f"sim_eor_{frequency_tag}.ini"
+                )
+                if (
+                    str(metadata.get("bank_shard_sha256", ""))
+                    != _sha256(expected_bank_shard)
+                ):
+                    raise ValueError(
+                        f"Aperture row-beam bank shard differs in {cache_dir}"
+                    )
+                if (
+                    str(metadata.get("oskar_config_sha256", ""))
+                    != _sha256(expected_oskar_config)
+                ):
+                    raise ValueError(
+                        f"Aperture row-beam OSKAR config differs in {cache_dir}"
+                    )
+                if tuple(int(value) for value in metadata["shape"]) != (
+                    int(cached_rows.size),
+                    int(sky["l_cosine"].size),
+                ):
+                    raise ValueError(
+                        f"Aperture row-beam source geometry differs in {cache_dir}"
+                    )
+                if (
+                    str(metadata.get("direction_sha256", ""))
+                    != expected_direction_sha256
+                ):
+                    raise ValueError(
+                        "Aperture row-beam direction order differs in "
+                        f"{cache_dir}"
+                    )
+                if not np.isclose(
+                    float(metadata["frequency_hz"]),
+                    float(frequencies_hz[index]),
+                    rtol=0.0,
+                    atol=1e-3,
+                ):
+                    raise ValueError(
+                        "Aperture row-beam cache frequency differs from bank"
+                    )
+                cached_settings = metadata.get("oskar_operator_settings", {})
+                expected_settings = {
+                    "frequency_hz": float(frequencies_hz[index]),
+                    "phase_centre_dec_deg": float(args.phase_dec_deg),
+                    "channel_bandwidth_hz": float(args.channel_bandwidth_hz),
+                    "time_average_sec": float(args.integration_time_s),
+                }
+                for name, expected_value in expected_settings.items():
+                    if not np.isclose(
+                        float(cached_settings.get(name, math.nan)),
+                        expected_value,
+                        rtol=0.0,
+                        atol=max(1e-9, abs(expected_value) * 1e-12),
+                    ):
+                        raise ValueError(
+                            f"Aperture row-beam {name} differs in {cache_dir}"
+                        )
+            aperture_beam_implementation = "exact_station_pair"
         beam_multiplier = build_direction_corrected_kernel_multiplier(
             base=beam_multiplier,
             torch=torch,
@@ -2016,6 +2096,7 @@ def main(argv: Iterable[str] | None = None) -> None:
             "operator_storage": str(args.operator_storage),
             "primary_beam_request": str(args.primary_beam),
             "station_type": station_type,
+            "aperture_beam_implementation": aperture_beam_implementation,
             "aperture_row_beam_cache_pattern": (
                 str(args.aperture_row_beam_cache_pattern)
                 if args.aperture_row_beam_cache_pattern
@@ -2024,6 +2105,15 @@ def main(argv: Iterable[str] | None = None) -> None:
             "aperture_row_beam_cache_sha256": [
                 str(metadata["data_sha256"])
                 for metadata in aperture_cache_metadata
+            ],
+            "aperture_common_beam_cache_pattern": (
+                str(args.aperture_common_beam_cache_pattern)
+                if args.aperture_common_beam_cache_pattern
+                else None
+            ),
+            "aperture_common_beam_cache_sha256": [
+                str(metadata["beam_cache_sha256"])
+                for metadata in aperture_common_cache_metadata
             ],
             "aperture_beam_model": str(args.aperture_beam_model),
             "aperture_beam_edge_error_fraction": float(

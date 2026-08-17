@@ -204,6 +204,13 @@ def main(argv: Iterable[str] | None = None) -> None:
         "station_beam_duplication": True,
         "normalised_at_phase_centre": True,
         "osm": str(args.osm),
+        "osm_sha256": _sha256(args.osm),
+        "telescope_dir": str(args.telescope_dir),
+        "phase_ra_deg": float(args.phase_ra_deg),
+        "phase_dec_deg": float(args.phase_dec_deg),
+        "start_time_utc": str(args.start_time_utc),
+        "observation_length_s": float(args.observation_length_s),
+        "oskar_config_sha256": _sha256(config),
         "minimum_power": float(np.min(beam)),
         "maximum_power": float(np.max(beam)),
     }

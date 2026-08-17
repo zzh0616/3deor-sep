@@ -1,0 +1,12 @@
+{
+  "combined_npz": "/data1/zhenghao/fg_rmw/runs/visibility_qbeta_local_redshift_screen4_20260728/local_04_116p3_119p4mhz/combined/result.npz",
+  "combined_npz_sha256": "90aed15728d43301f6af4f8493c7c863922e652fc71d08ddb8b5fb945c0201e1",
+  "interpretation": "Each calibrated response row is assigned to its nominal single source band. The exact row sum is retained; non-local window mixing is intentionally ignored.",
+  "normalisation": "exact_response_row_sum",
+  "output_count": 407,
+  "output_npz": "/data1/zhenghao/fg_rmw/runs/visibility_qbeta_operator_hierarchy_screen4_20260817/delay_diagonal/combined/result.npz",
+  "output_npz_sha256": "a0b8d773330684f01c807e16f5374b4b554def18302d4592aed00be77b0a3530",
+  "schema": "visibility_qbeta_delay_diagonal_control",
+  "schema_version": 1,
+  "source_count": 1056
+}

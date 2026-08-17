@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 from pathlib import Path
@@ -9,10 +10,12 @@ import numpy as np
 from visibility_primary_beam import (
     build_oskar_circular_gaussian_kernel_multiplier,
     build_time_direction_kernel_multiplier,
+    load_frequency_time_direction_power_caches,
     open_frequency_row_direction_kernel_multiplier,
     open_indexed_frequency_row_direction_kernel_multiplier,
     open_row_direction_kernel_multiplier,
     oskar_circular_gaussian_stokes_i_power,
+    row_time_indices_for_selected_rows,
 )
 
 
@@ -89,6 +92,56 @@ def test_time_direction_multiplier_selects_each_row_time() -> None:
         block.numpy(),
         values[1, np.asarray([2, 0]), 1:4],
     )
+
+
+def test_selected_row_times_map_to_common_beam_indices() -> None:
+    indices = row_time_indices_for_selected_rows(
+        all_times_s=np.asarray([20.0, 10.0, 30.0, 10.0, 20.0]),
+        selected_rows=np.asarray([3, 0, 2]),
+        time_count=3,
+    )
+    np.testing.assert_array_equal(indices, np.asarray([0, 1, 2]))
+
+
+def test_frequency_time_direction_power_cache_loader() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        directories = []
+        expected = []
+        for index, frequency_hz in enumerate((100.0e6, 100.1e6)):
+            directory = root / f"freq_{index}"
+            directory.mkdir()
+            beam = np.full((3, 4), index + 0.5, dtype=np.float32)
+            cache_path = directory / "beam_cache.npz"
+            np.savez_compressed(
+                cache_path,
+                frequency_hz=np.asarray(frequency_hz),
+                station_id=np.asarray(0, dtype=np.int32),
+                stokes_i_power=beam,
+            )
+            digest = hashlib.sha256(cache_path.read_bytes()).hexdigest()
+            (directory / "result.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "oskar_aperture_array_stokes_i_beam_cache",
+                        "beam_cache_sha256": digest,
+                        "frequency_mhz": frequency_hz / 1e6,
+                        "time_steps": 3,
+                        "source_count": 4,
+                        "station_id": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            directories.append(directory)
+            expected.append(beam)
+        values, metadata = load_frequency_time_direction_power_caches(
+            directories,
+            frequencies_hz=np.asarray([100.0e6, 100.1e6]),
+            expected_source_count=4,
+        )
+    np.testing.assert_array_equal(values, np.stack(expected))
+    assert len(metadata) == 2
 
 
 def test_row_direction_file_multiplier_streams_complex_blocks() -> None:

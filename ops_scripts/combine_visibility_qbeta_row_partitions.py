@@ -378,6 +378,7 @@ def main(argv: Iterable[str] | None = None) -> None:
             "operator_storage",
             "primary_beam_request",
             "station_type",
+            "aperture_beam_implementation",
             "aperture_beam_model",
             "aperture_beam_edge_error_fraction",
             "aperture_beam_ripple_cycles",
@@ -622,6 +623,9 @@ def main(argv: Iterable[str] | None = None) -> None:
             "station_type": reference_meta["settings"].get(
                 "station_type", "isotropic"
             ),
+            "aperture_beam_implementation": reference_meta["settings"].get(
+                "aperture_beam_implementation"
+            ),
             "aperture_beam_model": reference_meta["settings"].get(
                 "aperture_beam_model", "exact"
             ),
@@ -652,6 +656,12 @@ def main(argv: Iterable[str] | None = None) -> None:
             "aperture_row_beam_cache_sha256_by_partition": [
                 meta["settings"].get(
                     "aperture_row_beam_cache_sha256", []
+                )
+                for meta in metadata
+            ],
+            "aperture_common_beam_cache_sha256_by_partition": [
+                meta["settings"].get(
+                    "aperture_common_beam_cache_sha256", []
                 )
                 for meta in metadata
             ],

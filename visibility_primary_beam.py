@@ -13,6 +13,14 @@ from typing import Any
 import numpy as np
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def direction_cosine_geometry_sha256(
     *,
     l_cosine: np.ndarray,
@@ -442,6 +450,118 @@ def build_time_direction_kernel_multiplier(
             time_indices, dtype=torch.int64, device=device
         ),
     )
+
+
+def row_time_indices_for_selected_rows(
+    *,
+    all_times_s: np.ndarray,
+    selected_rows: np.ndarray,
+    time_count: int,
+) -> np.ndarray:
+    """Map visibility rows to the ordered times in a common-beam cache."""
+    times = np.asarray(all_times_s, dtype=np.float64).reshape(-1)
+    rows = np.asarray(selected_rows, dtype=np.int64).reshape(-1)
+    if (
+        times.size < 1
+        or rows.size < 1
+        or int(time_count) < 1
+        or np.any(rows < 0)
+        or np.any(rows >= times.size)
+        or not np.all(np.isfinite(times))
+    ):
+        raise ValueError("Invalid visibility times or selected rows")
+    unique_times = np.unique(times)
+    if unique_times.size != int(time_count):
+        raise ValueError(
+            f"Bank has {unique_times.size} times but beam cache has "
+            f"{int(time_count)}"
+        )
+    indices = np.searchsorted(unique_times, times[rows])
+    if not np.array_equal(unique_times[indices], times[rows]):
+        raise ValueError("Selected visibility time does not map to beam cache")
+    return np.asarray(indices, dtype=np.int64)
+
+
+def load_frequency_time_direction_power_caches(
+    cache_dirs: list[Path | str] | tuple[Path | str, ...],
+    *,
+    frequencies_hz: np.ndarray,
+    expected_source_count: int,
+) -> tuple[np.ndarray, list[dict[str, Any]]]:
+    """Load one common scalar OSKAR power-beam cache per frequency."""
+    directories = [Path(value) for value in cache_dirs]
+    frequencies = np.asarray(frequencies_hz, dtype=np.float64).reshape(-1)
+    if (
+        not directories
+        or len(directories) != frequencies.size
+        or int(expected_source_count) < 1
+        or not np.all(np.isfinite(frequencies))
+        or not np.all(frequencies > 0.0)
+    ):
+        raise ValueError("Invalid common power-beam cache geometry")
+
+    values: list[np.ndarray] = []
+    metadata: list[dict[str, Any]] = []
+    expected_time_count: int | None = None
+    expected_station_id: int | None = None
+    for index, directory in enumerate(directories):
+        current = json.loads(
+            (directory / "result.json").read_text(encoding="utf-8")
+        )
+        if current.get("schema") != "oskar_aperture_array_stokes_i_beam_cache":
+            raise ValueError("Unsupported common power-beam cache schema")
+        cache_path = directory / "beam_cache.npz"
+        if str(current.get("beam_cache_sha256", "")) != _sha256_file(
+            cache_path
+        ):
+            raise ValueError("Common power-beam cache SHA256 differs")
+        with np.load(cache_path, allow_pickle=False) as archive:
+            required = {"frequency_hz", "station_id", "stokes_i_power"}
+            missing = sorted(required - set(archive.files))
+            if missing:
+                raise ValueError(
+                    "Common power-beam cache lacks arrays: "
+                    + ", ".join(missing)
+                )
+            frequency_hz = float(np.asarray(archive["frequency_hz"]).item())
+            station_id = int(np.asarray(archive["station_id"]).item())
+            beam = np.asarray(archive["stokes_i_power"], dtype=np.float32)
+        if not np.isclose(
+            frequency_hz,
+            float(frequencies[index]),
+            rtol=0.0,
+            atol=1e-3,
+        ):
+            raise ValueError("Common power-beam cache frequency differs")
+        if (
+            beam.ndim != 2
+            or beam.shape[1] != int(expected_source_count)
+            or not np.all(np.isfinite(beam))
+            or np.any(beam < 0.0)
+        ):
+            raise ValueError("Common power-beam cache values are invalid")
+        if expected_time_count is None:
+            expected_time_count = int(beam.shape[0])
+            expected_station_id = station_id
+        elif int(beam.shape[0]) != expected_time_count:
+            raise ValueError("Common power-beam cache time counts differ")
+        elif station_id != expected_station_id:
+            raise ValueError("Common power-beam cache station IDs differ")
+        if (
+            int(current.get("time_steps", -1)) != int(beam.shape[0])
+            or int(current.get("source_count", -1)) != int(beam.shape[1])
+            or int(current.get("station_id", -1)) != station_id
+            or not np.isclose(
+                float(current.get("frequency_mhz", math.nan)) * 1e6,
+                frequency_hz,
+                rtol=0.0,
+                atol=1e-3,
+            )
+        ):
+            raise ValueError("Common power-beam metadata differs from its data")
+        values.append(beam)
+        metadata.append(current)
+    return np.stack(values, axis=0), metadata
 
 
 def open_row_direction_kernel_multiplier(
