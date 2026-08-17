@@ -79,6 +79,50 @@ def frequency_fourier_basis(
     return np.asarray(basis, dtype=np.complex128), delays
 
 
+def apply_frequency_weights(
+    response: QuadraticResponse,
+    weights: np.ndarray,
+) -> QuadraticResponse:
+    """Apply known per-channel weights and rebuild the quadratic window.
+
+    Zero weights represent flagged channels.  The original foreground basis is
+    left unchanged; the weights are part of the measurement operator and are
+    propagated into the Fisher matrix and row normalization.
+    """
+    channel_weights = np.asarray(weights, dtype=np.float64).reshape(-1)
+    if channel_weights.shape != response.frequencies_hz.shape:
+        raise ValueError("Frequency weights and response frequencies differ")
+    if np.any(~np.isfinite(channel_weights)) or np.any(channel_weights < 0.0):
+        raise ValueError("Frequency weights must be finite and non-negative")
+    if not np.any(channel_weights > 0.0):
+        raise ValueError("At least one frequency weight must be positive")
+
+    analysis = response.analysis_matrix * channel_weights[None, :]
+    input_fourier, _ = frequency_fourier_basis(response.frequencies_hz)
+    mixing = analysis @ input_fourier
+    fisher = np.square(np.abs(mixing))
+    row_normalization = np.sum(fisher, axis=1)
+    window = np.zeros_like(fisher, dtype=np.float64)
+    supported = row_normalization > np.finfo(np.float64).eps
+    window[supported] = fisher[supported] / row_normalization[supported, None]
+    return QuadraticResponse(
+        frequencies_hz=response.frequencies_hz,
+        delays_s=response.delays_s,
+        analysis_matrix=np.asarray(analysis, dtype=np.complex128),
+        fisher=np.asarray(fisher, dtype=np.float64),
+        window=window,
+        row_normalization=np.asarray(row_normalization, dtype=np.float64),
+        foreground_rank=response.foreground_rank,
+        dpss_eigenvalues=response.dpss_eigenvalues,
+        max_delay_s=response.max_delay_s,
+        suppression_strength=response.suppression_strength,
+        taper=response.taper,
+        foreground_basis=response.foreground_basis,
+        polynomial_degree=response.polynomial_degree,
+        source_delays_s=response.source_delays_s,
+    )
+
+
 def weighted_lssa_matrix(
     frequencies_hz: np.ndarray,
     weights: np.ndarray,

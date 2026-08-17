@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from chips_visibility import (
+    apply_frequency_weights,
     build_chebyshev_quadratic_response,
     build_dpss_prefiltered_subband_response,
     build_quadratic_response,
@@ -18,6 +19,29 @@ from chips_visibility import (
     matched_absolute_delay_window_fraction,
     weighted_lssa_matrix,
 )
+
+
+def test_apply_frequency_weights_rebuilds_fisher_and_normalization() -> None:
+    frequencies = np.linspace(100e6, 100.7e6, 8)
+    response = build_quadratic_response(
+        frequencies,
+        max_delay_s=0.0,
+        suppression_strength=0.0,
+        taper="none",
+    )
+    weights = np.ones(8)
+    weights[[2, 5]] = 0.0
+    weighted = apply_frequency_weights(response, weights)
+    np.testing.assert_array_equal(weighted.analysis_matrix[:, [2, 5]], 0.0)
+    fourier, _ = frequency_fourier_basis(frequencies)
+    expected_fisher = np.abs(weighted.analysis_matrix @ fourier) ** 2
+    np.testing.assert_allclose(weighted.fisher, expected_fisher)
+    np.testing.assert_allclose(
+        weighted.row_normalization, np.sum(expected_fisher, axis=1)
+    )
+    np.testing.assert_allclose(
+        np.sum(weighted.window[weighted.supported], axis=1), 1.0
+    )
 
 
 def _frequencies(count: int = 32) -> np.ndarray:

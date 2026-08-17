@@ -326,6 +326,8 @@ def main(argv: Iterable[str] | None = None) -> None:
     )
     if has_frequency_arrays:
         invariant_arrays += frequency_array_names
+    if all("input_frequency_weights" in archive for archive in archives):
+        invariant_arrays += ("input_frequency_weights",)
     source_geometry_names = (
         "source_band_kpar_mpc_inv",
         "source_band_in_geometric_window",
@@ -373,6 +375,7 @@ def main(argv: Iterable[str] | None = None) -> None:
             "input_frequency_count",
             "analysis_frequency_count",
             "analysis_frequency_indices",
+            "flagged_input_frequency_indices",
             "filter_bandwidth_scope",
             "operator_dtype",
             "operator_storage",
@@ -707,6 +710,9 @@ def main(argv: Iterable[str] | None = None) -> None:
                     if has_frequency_arrays
                     else []
                 ),
+            ),
+            "flagged_input_frequency_indices": reference_meta["settings"].get(
+                "flagged_input_frequency_indices", []
             ),
             "filter_bandwidth_scope": reference_meta["settings"].get(
                 "filter_bandwidth_scope", "analysis_subband"

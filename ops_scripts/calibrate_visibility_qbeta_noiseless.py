@@ -29,6 +29,7 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 from chips_visibility import (  # noqa: E402
+    apply_frequency_weights,
     build_chebyshev_quadratic_response,
     build_dpss_prefiltered_subband_response,
     build_quadratic_response,
@@ -238,6 +239,16 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--minimum-window-self-fraction", type=float, default=0.1)
     parser.add_argument("--minimum-relative-sensitivity", type=float, default=1e-4)
     parser.add_argument("--response-rcond", type=float, default=1e-4)
+    parser.add_argument(
+        "--flagged-input-frequency-index",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "Zero-based input-channel index assigned zero weight before the "
+            "foreground filter. Repeat to represent known flagged channels."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -862,6 +873,8 @@ def _visibility_bandpowers(
     suppression_strength: float,
     polynomial_degree: int,
     spectral_taper: str,
+    cross_visibilities: np.ndarray | None = None,
+    input_frequency_weights: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     values = np.asarray(visibilities)
     if values.ndim == 2:
@@ -872,9 +885,37 @@ def _visibility_bandpowers(
     else:
         raise ValueError("Visibilities must have shape [freq,row] or [batch,freq,row]")
     batch, n_frequency, _ = values.shape
+    cross_values: np.ndarray | None = None
+    if cross_visibilities is not None:
+        cross_values = np.asarray(cross_visibilities)
+        if cross_values.ndim == 2:
+            cross_values = cross_values[None, ...]
+        elif cross_values.ndim != 3:
+            raise ValueError(
+                "Cross visibilities must have shape [freq,row] or "
+                "[batch,freq,row]"
+            )
+        if cross_values.shape != values.shape:
+            raise ValueError("Visibility and cross-visibility shapes differ")
     frequencies = np.asarray(frequencies_hz, dtype=np.float64).reshape(-1)
     if frequencies.shape != (n_frequency,):
         raise ValueError("Visibility and input-frequency axes differ")
+    if input_frequency_weights is None:
+        frequency_weights = np.ones(n_frequency, dtype=np.float64)
+    else:
+        frequency_weights = np.asarray(
+            input_frequency_weights, dtype=np.float64
+        ).reshape(-1)
+        if frequency_weights.shape != (n_frequency,):
+            raise ValueError("Input-frequency weights and visibility axes differ")
+        if np.any(~np.isfinite(frequency_weights)) or np.any(
+            frequency_weights < 0.0
+        ):
+            raise ValueError(
+                "Input-frequency weights must be finite and non-negative"
+            )
+        if not np.any(frequency_weights > 0.0):
+            raise ValueError("At least one input-frequency weight must be positive")
     analysis_indices = np.asarray(
         analysis_frequency_indices, dtype=np.int64
     ).reshape(-1)
@@ -946,6 +987,7 @@ def _visibility_bandpowers(
                 dpss_eigenvalue_threshold=float(dpss_eigenvalue_threshold),
                 taper=spectral_taper,
             )
+            response_weights = frequency_weights
         else:
             if filter_name in {"none", "dpss_hard", "dpss_soft"}:
                 response = build_quadratic_response(
@@ -987,6 +1029,10 @@ def _visibility_bandpowers(
                 dpss_eigenvalue_threshold=float(dpss_eigenvalue_threshold),
                 taper=spectral_taper,
             )
+            response_weights = frequency_weights[analysis_indices]
+        if not np.all(response_weights == 1.0):
+            response = apply_frequency_weights(response, response_weights)
+            raw = apply_frequency_weights(raw, response_weights)
         foreground_ranks[transverse_index] = (
             0 if filter_name == "none" else int(response.foreground_rank)
         )
@@ -997,7 +1043,21 @@ def _visibility_bandpowers(
         )
         selected = np.transpose(response_values[:, :, members], (0, 2, 1))
         transformed = selected @ response.analysis_matrix.T
-        estimate = np.mean(np.square(np.abs(transformed)), axis=1)
+        if cross_values is None:
+            estimate = np.mean(np.square(np.abs(transformed)), axis=1)
+        else:
+            cross_response_values = (
+                cross_values
+                if bandwidth_scope == "full_band"
+                else cross_values[:, analysis_indices]
+            )
+            cross_selected = np.transpose(
+                cross_response_values[:, :, members], (0, 2, 1)
+            )
+            cross_transformed = cross_selected @ response.analysis_matrix.T
+            estimate = np.mean(
+                np.real(transformed * np.conjugate(cross_transformed)), axis=1
+            )
         estimate[:, response.supported] /= response.row_normalization[
             response.supported
         ][None, :]
@@ -1357,6 +1417,20 @@ def main(argv: Iterable[str] | None = None) -> None:
         analysis_frequencies_mhz,
     )
     frequencies_hz = frequencies_mhz * 1e6
+    flagged_frequency_indices = np.asarray(
+        args.flagged_input_frequency_index, dtype=np.int64
+    ).reshape(-1)
+    if (
+        np.unique(flagged_frequency_indices).size
+        != flagged_frequency_indices.size
+        or np.any(flagged_frequency_indices < 0)
+        or np.any(flagged_frequency_indices >= frequencies_mhz.size)
+    ):
+        raise ValueError(
+            "Flagged input-frequency indices must be unique and in range"
+        )
+    input_frequency_weights = np.ones(frequencies_mhz.size, dtype=np.float64)
+    input_frequency_weights[flagged_frequency_indices] = 0.0
     bank, manifest = _load_bank(
         args.bank_dir,
         requested_frequencies_hz=frequencies_hz,
@@ -1775,6 +1849,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         "suppression_strength": float(args.suppression_strength),
         "polynomial_degree": int(args.polynomial_degree),
         "spectral_taper": str(args.spectral_taper),
+        "input_frequency_weights": input_frequency_weights,
     }
     calibration_samples = _generate_probe_outputs(
         torch=torch,
@@ -2006,6 +2081,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         ],
         "analysis_frequency_indices": analysis_frequency_indices,
         "analysis_frequencies_mhz": analysis_frequencies_mhz,
+        "input_frequency_weights": input_frequency_weights,
         "selected_bank_rows": selected_rows,
         "selected_row_kperp_mpc_inv": row_kperp,
         "selected_row_kperp_indices": selected_row_kperp_indices,
@@ -2131,6 +2207,7 @@ def main(argv: Iterable[str] | None = None) -> None:
                 analysis_frequencies_mhz.size
             ),
             "analysis_frequency_indices": analysis_frequency_indices,
+            "flagged_input_frequency_indices": flagged_frequency_indices,
             "filter_bandwidth_scope": str(args.filter_bandwidth_scope),
             "foreground_filter": str(args.foreground_filter),
             "suppression_strength": float(args.suppression_strength),

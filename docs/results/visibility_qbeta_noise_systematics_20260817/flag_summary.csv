@@ -1,0 +1,4 @@
+label,flagged_channel_count,flagged_input_frequency_indices,selected_group_count,strict_group_count,selected_nominal_cell_count,bank_total_integrated_power_ratio,bank_total_relative_l2,bank_total_p90_absolute_error_fraction,foreground_effect_maximum_fraction,heldout_total_worst_relative_l2
+random5,3,5;17;41,85,0,336,7927493.842706816,10195928.877091452,16143741.305246845,33443933.049911737,10196135.81207776
+random10,6,5;12;17;29;41;54,84,0,332,52851938.35626734,51838858.2096161,120687366.04971334,225146541.12854546,51838157.145017944
+cluster6,4,29;30;31;32,66,0,260,70914405.84290098,83573619.87535702,113198665.77546439,256770174.57963696,83573026.33524795
